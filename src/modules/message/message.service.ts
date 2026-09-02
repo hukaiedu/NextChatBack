@@ -4,6 +4,7 @@ import { AppError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
 import { computeRequestFingerprint } from "../../common/utils/fingerprint.js";
 import { isUniqueViolation, uniqueViolationTargets } from "../../common/utils/prisma-error.js";
+import { detectTriggerAbort } from "../../common/utils/trigger-abort.js";
 import { ConversationRepository } from "../conversation/conversation.repository.js";
 import { RequestRepository } from "../request/request.repository.js";
 import { MessageRepository } from "./message.repository.js";
@@ -121,6 +122,23 @@ export class MessageService {
           }
         }
       }
+      // 并发归档/删除获胜:数据库 trigger 拦截(Phase 2.1)。
+      // 重读会话确定具体错误(避免只依赖过期的先读检查)。
+      if (detectTriggerAbort(err) === "conversation_not_active") {
+        const conversation = await this.conversationRepo.findById(this.prisma, conversationId);
+        if (!conversation) {
+          throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404, err);
+        }
+        if (conversation.status === "DELETED") {
+          throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted", 409, err);
+        }
+        throw new AppError(
+          ErrorCodes.CONVERSATION_ARCHIVED,
+          "Conversation is archived, restore it before sending messages",
+          409,
+          err,
+        );
+      }
       throw err;
     }
   }
@@ -159,13 +177,16 @@ export class MessageService {
     }
     const messages = await this.messageRepo.listByConversation(this.prisma, conversationId);
     const requests = await this.requestRepo.listByConversation(this.prisma, conversationId);
-    const requestByMessageId = new Map<string, ModelRequestModel>();
+    const requestByAssistantId = new Map<string, ModelRequestModel>();
     for (const request of requests) {
-      requestByMessageId.set(request.userMessageId, request);
-      requestByMessageId.set(request.assistantMessageId, request);
+      requestByAssistantId.set(request.assistantMessageId, request);
     }
+    // 只有 ASSISTANT 消息附带 Request 摘要,USER 消息固定 null
     return messages.map((message) => {
-      const request = requestByMessageId.get(message.id);
+      if (message.role !== "ASSISTANT") {
+        return { ...message, request: null };
+      }
+      const request = requestByAssistantId.get(message.id);
       return { ...message, request: request ? toRequestBrief(request) : null };
     });
   }

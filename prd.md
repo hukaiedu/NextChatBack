@@ -3318,6 +3318,13 @@ Health
 > - ARCHIVED 会话发送消息返回 409 CONVERSATION_ARCHIVED（§12.13 已同步补充）。
 > - API 响应统一 `{ data: ... }`，错误统一 `{ error: { code, message, requestId } }`。
 
+> 第 2.1 阶段收尾修正（2026-09-02）：
+>
+> - POST messages：首次成功创建 Request → **202 Accepted**；同 Idempotency-Key 命中 → 200 OK。
+> - Message List：仅 ASSISTANT 消息附带 request 摘要，USER 消息 request 恒为 null。
+> - 并发不变量（只有 ACTIVE Conversation 能产生活动 Request；存在活动 Request 时禁止归档/删除）由**数据库 Trigger** 保护（migration 20260902150000_phase_2_1_concurrency_guards），不依赖先 SELECT 再 UPDATE；应用层把 trigger abort 映射回业务 409。
+> - Prisma/SQLite 未识别异常统一 → 500 DATABASE_ERROR，内部细节只写服务端日志、不回传响应。
+
 开发：
 
 ```text

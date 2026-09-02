@@ -1,5 +1,13 @@
+import type { Server } from "node:http";
+
+import express from "express";
+import type { Express } from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { createLogger } from "../../src/common/logger/logger.js";
+import { errorHandler } from "../../src/common/middleware/error-handler.js";
+import { requestId } from "../../src/common/middleware/request-id.js";
+import { Prisma } from "../../src/generated/prisma/client.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
@@ -64,5 +72,71 @@ describe("统一错误处理", () => {
     const body = (await res.json()) as { error: { code: string; requestId: string } };
     expect(body.error.code).toBe("VALIDATION_ERROR");
     expect(body.error.requestId).toBe(res.headers.get("x-request-id"));
+  });
+});
+
+describe("数据库异常统一映射", () => {
+  /** 构造最小 express 链:requestId + 抛错路由 + errorHandler */
+  async function withBoomApp(throwingError: () => Error): Promise<{
+    baseUrl: string;
+    close(): Promise<void>;
+  }> {
+    const app: Express = express();
+    app.use(requestId());
+    app.get("/boom", () => {
+      throw throwingError();
+    });
+    app.use(errorHandler(createLogger("silent")));
+
+    const server: Server = app.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("failed to bind");
+    }
+    return {
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      async close(): Promise<void> {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      },
+    };
+  }
+
+  it.each([
+    ["PrismaClientKnownRequestError", () => new Prisma.PrismaClientKnownRequestError("internal db detail: SQLITE_CONSTRAINT secret", { code: "P2003", clientVersion: "test" })],
+    ["PrismaClientUnknownRequestError", () => new Prisma.PrismaClientUnknownRequestError("internal db detail: unknown engine error", { clientVersion: "test" })],
+  ])("%s → 500 DATABASE_ERROR,不泄露内部细节", async (_name, factory) => {
+    const server = await withBoomApp(factory);
+
+    try {
+      const res = await fetch(`${server.baseUrl}/boom`);
+      expect(res.status).toBe(500);
+
+      const body = (await res.json()) as {
+        error: { code: string; message: string; requestId: string };
+      };
+      expect(body.error.code).toBe("DATABASE_ERROR");
+      expect(body.error.message).toBe("Database error");
+      // 内部数据库错误细节不得出现在响应里
+      expect(body.error.message).not.toContain("internal db detail");
+      expect(body.error.message).not.toContain("SQLITE");
+      // requestId 与响应头一致
+      expect(body.error.requestId).toBe(res.headers.get("x-request-id"));
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("非数据库异常保持 500 INTERNAL_ERROR(回归)", async () => {
+    const server = await withBoomApp(() => new Error("some bug"));
+
+    try {
+      const res = await fetch(`${server.baseUrl}/boom`);
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("INTERNAL_ERROR");
+    } finally {
+      await server.close();
+    }
   });
 });

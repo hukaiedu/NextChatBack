@@ -100,7 +100,7 @@ describe("Conversation API", () => {
   it("软删除:DELETE 204,列表与详情不再返回", async () => {
     const conv = await createConversation(ctx.baseUrl);
     const message = await sendMessage(ctx.baseUrl, conv.id, "你好", "del-key-1");
-    expect(message.status).toBe(201);
+    expect(message.status).toBe(202);
 
     // 活动 Request 结束前禁止删除;先置为终态
     const request = await ctx.prisma.modelRequest.findFirstOrThrow();
@@ -171,7 +171,7 @@ describe("Conversation API", () => {
   it("有活动 Request 时禁止归档 → 409 CONVERSATION_REQUEST_IN_PROGRESS", async () => {
     const conv = await createConversation(ctx.baseUrl);
     const sent = await sendMessage(ctx.baseUrl, conv.id, "你好", "act-key-1");
-    expect(sent.status).toBe(201);
+    expect(sent.status).toBe(202);
 
     const res = await fetch(`${ctx.baseUrl}/api/conversations/${conv.id}`, {
       method: "PATCH",

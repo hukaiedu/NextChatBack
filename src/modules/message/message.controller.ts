@@ -31,8 +31,8 @@ export function createMessageRouter(service: MessageService): Router {
     const body = parseOrThrow(sendMessageSchema, req.body ?? {}, "sendMessage");
 
     const result = await service.sendMessage(params.conversationId, body.content, idempotencyKey);
-    // 幂等命中返回 200,新创建返回 201
-    res.status(result.deduplicated ? 200 : 201).json({ data: result });
+    // 幂等命中返回 200,首次成功创建 Request 返回 202 Accepted
+    res.status(result.deduplicated ? 200 : 202).json({ data: result });
   });
 
   return router;

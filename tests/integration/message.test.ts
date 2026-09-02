@@ -50,7 +50,7 @@ describe("Message API", () => {
     const conv = await createConversation(ctx.baseUrl);
     const res = await sendMessage(ctx.baseUrl, conv.id, "你好", "ok-key-1");
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(202);
     const body = (await res.json()) as SendBody;
 
     expect(body.data.deduplicated).toBe(false);
@@ -80,7 +80,7 @@ describe("Message API", () => {
   it("同 Key 同内容:幂等命中返回 200,不新增记录", async () => {
     const conv = await createConversation(ctx.baseUrl);
     const first = await sendMessage(ctx.baseUrl, conv.id, "你好", "idem-key-1");
-    expect(first.status).toBe(201);
+    expect(first.status).toBe(202);
 
     const second = await sendMessage(ctx.baseUrl, conv.id, "你好", "idem-key-1");
     expect(second.status).toBe(200);
@@ -141,8 +141,8 @@ describe("Message API", () => {
 
     const a = await sendMessage(ctx.baseUrl, convA.id, "A", "conv-a-1");
     const b = await sendMessage(ctx.baseUrl, convB.id, "B", "conv-b-1");
-    expect(a.status).toBe(201);
-    expect(b.status).toBe(201);
+    expect(a.status).toBe(202);
+    expect(b.status).toBe(202);
 
     const pending = await ctx.prisma.modelRequest.findMany({
       where: { status: "PENDING" },
@@ -167,7 +167,7 @@ describe("Message API", () => {
     });
 
     const second = await sendMessage(ctx.baseUrl, conv.id, "第二个", "pos-key-2");
-    expect(second.status).toBe(201);
+    expect(second.status).toBe(202);
     const secondBody = (await second.json()) as SendBody;
     expect(secondBody.data.userMessage.position).toBe(3);
     expect(secondBody.data.assistantMessage.position).toBe(4);
@@ -219,6 +219,13 @@ describe("Message API", () => {
     };
 
     expect(body.data.map((m) => m.position)).toEqual([1, 2]);
+
+    // USER Message:request 固定为 null
+    const user = body.data[0]!;
+    expect(user.role).toBe("USER");
+    expect(user.request).toBeNull();
+
+    // ASSISTANT Message:必须携带 Request 摘要
     const assistant = body.data[1]!;
     expect(assistant.role).toBe("ASSISTANT");
     expect(assistant.request).toMatchObject({

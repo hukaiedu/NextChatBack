@@ -2,6 +2,7 @@ import type { PrismaClient } from "../../generated/prisma/client.js";
 import type { ConversationModel } from "../../generated/prisma/models.js";
 import { AppError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
+import { detectTriggerAbort } from "../../common/utils/trigger-abort.js";
 import type { DbClient } from "../../database/prisma.js";
 import { RequestRepository } from "../request/request.repository.js";
 import { ConversationRepository } from "./conversation.repository.js";
@@ -71,14 +72,27 @@ export class ConversationService {
         );
       }
     }
-    const updated = await this.conversationRepo.update(this.prisma, id, {
-      title: patch.title,
-      status: patch.status,
-    });
-    if (!updated) {
-      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+    try {
+      const updated = await this.conversationRepo.update(this.prisma, id, {
+        title: patch.title,
+        status: patch.status,
+      });
+      if (!updated) {
+        throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+      }
+      return updated;
+    } catch (err) {
+      // 并发 Send Message 获胜:数据库 trigger 拦截(Phase 2.1)
+      if (detectTriggerAbort(err) === "active_request_blocks_status_change") {
+        throw new AppError(
+          ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
+          "Conversation has a request in progress",
+          409,
+          err,
+        );
+      }
+      throw err;
     }
-    return updated;
   }
 
   /** 软删除:只改状态,不物理删除 Message / Request */
@@ -98,10 +112,23 @@ export class ConversationService {
         409,
       );
     }
-    await this.conversationRepo.update(this.prisma, id, {
-      status: "DELETED",
-      deletedAt: new Date(),
-    });
+    try {
+      await this.conversationRepo.update(this.prisma, id, {
+        status: "DELETED",
+        deletedAt: new Date(),
+      });
+    } catch (err) {
+      // 并发 Send Message 获胜:数据库 trigger 拦截(Phase 2.1)
+      if (detectTriggerAbort(err) === "active_request_blocks_status_change") {
+        throw new AppError(
+          ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
+          "Conversation has a request in progress",
+          409,
+          err,
+        );
+      }
+      throw err;
+    }
   }
 }
 
