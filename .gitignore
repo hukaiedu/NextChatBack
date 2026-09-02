@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# environment (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# runtime data (keep directory placeholders)
+data/*
+!data/.gitkeep
+!data/database/
+!data/browser-profile/
+!data/debug/
+data/database/*
+!data/database/.gitkeep
+data/browser-profile/*
+!data/browser-profile/.gitkeep
+data/debug/*
+!data/debug/.gitkeep
+
+# logs
+logs/*
+!logs/.gitkeep
+*.log
