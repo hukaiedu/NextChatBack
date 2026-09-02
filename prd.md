@@ -2608,6 +2608,7 @@ VALIDATION_ERROR
 
 CONVERSATION_NOT_FOUND
 CONVERSATION_DELETED
+CONVERSATION_ARCHIVED
 CONVERSATION_REQUEST_IN_PROGRESS
 
 IDEMPOTENCY_KEY_REUSED
@@ -3308,6 +3309,14 @@ Health
 ---
 
 # 第 2 阶段：数据库与核心业务
+
+> 第 2 阶段实现记录（2026-09-02）：
+>
+> - user Message 的 status 落地为 COMPLETED（assistant 消息状态枚举不适用于 user 消息）。
+> - 活动 Request 唯一约束：SQLite 不支持 Prisma partial index，在 migration 中手工实现等价 partial unique index（见 migration.sql 的 uk_active_request_per_conversation）。
+> - Message/ModelRequest/Conversation 的 role/status 字段在 migration 中补充了数据库 CHECK 约束。
+> - ARCHIVED 会话发送消息返回 409 CONVERSATION_ARCHIVED（§12.13 已同步补充）。
+> - API 响应统一 `{ data: ... }`，错误统一 `{ error: { code, message, requestId } }`。
 
 开发：
 

@@ -6,3 +6,65 @@ generator client {
 datasource db {
   provider = "sqlite"
 }
+
+/// 业务会话(不区分 provider 会话来源,provider URL 可空映射)
+model Conversation {
+  id                      String    @id @default(uuid())
+  title                   String
+  status                  String    @default("ACTIVE")
+  provider                String    @default("GEMINI_WEB")
+  providerConversationUrl String?   @unique
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+  deletedAt               DateTime?
+
+  messages Message[]
+  requests ModelRequest[]
+
+  @@index([status])
+  @@index([updatedAt])
+}
+
+model Message {
+  id             String   @id @default(uuid())
+  conversationId String
+  role           String
+  content        String
+  status         String
+  position       Int
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  conversation     Conversation  @relation(fields: [conversationId], references: [id])
+  userRequests     ModelRequest[] @relation("UserMessage")
+  assistantRequests ModelRequest[] @relation("AssistantMessage")
+
+  @@unique([conversationId, position])
+  @@index([conversationId])
+}
+
+/// 一次 User Message → Provider → Assistant Message 的执行记录
+model ModelRequest {
+  id                   String   @id @default(uuid())
+  conversationId       String
+  userMessageId        String
+  assistantMessageId   String
+  idempotencyKey       String   @unique
+  requestFingerprint   String
+  status               String
+  provider             String   @default("GEMINI_WEB")
+  attemptCount         Int      @default(0)
+  errorCode            String?
+  errorMessage         String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  conversation     Conversation @relation(fields: [conversationId], references: [id])
+  userMessage      Message      @relation("UserMessage", fields: [userMessageId], references: [id])
+  assistantMessage Message      @relation("AssistantMessage", fields: [assistantMessageId], references: [id])
+
+  @@index([conversationId])
+  @@index([status])
+}

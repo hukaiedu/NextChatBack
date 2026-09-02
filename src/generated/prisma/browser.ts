@@ -17,4 +17,18 @@ import * as Prisma from './internal/prismaNamespaceBrowser.js'
 export { Prisma }
 export * as $Enums from './enums.js'
 export * from './enums.js';
-
+/**
+ * Model Conversation
+ * 业务会话(不区分 provider 会话来源,provider URL 可空映射)
+ */
+export type Conversation = Prisma.ConversationModel
+/**
+ * Model Message
+ * 
+ */
+export type Message = Prisma.MessageModel
+/**
+ * Model ModelRequest
+ * 一次 User Message → Provider → Assistant Message 的执行记录
+ */
+export type ModelRequest = Prisma.ModelRequestModel

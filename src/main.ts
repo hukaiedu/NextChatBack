@@ -10,9 +10,10 @@ import { createPrismaClient, probeDatabase } from "./database/prisma.js";
 async function main(): Promise<void> {
   const env = parseEnv(process.env);
   const logger = createLogger(env.LOG_LEVEL);
-  const prisma = createPrismaClient(env.DATABASE_URL);
+  const prisma = await createPrismaClient(env.DATABASE_URL);
 
   const app = createApp({
+    prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
   });
