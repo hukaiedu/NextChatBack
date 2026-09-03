@@ -33,4 +33,22 @@ export class MessageRepository {
   async findByIds(db: DbClient, ids: string[]): Promise<MessageModel[]> {
     return db.message.findMany({ where: { id: { in: ids } } });
   }
+
+  async findById(db: DbClient, id: string): Promise<MessageModel | null> {
+    return db.message.findUnique({ where: { id } });
+  }
+
+  async updateStatus(db: DbClient, id: string, status: string): Promise<void> {
+    await db.message.update({ where: { id }, data: { status } });
+  }
+
+  /** 成功收尾:内容与状态一次写入(§12.10) */
+  async updateContentAndStatus(
+    db: DbClient,
+    id: string,
+    content: string,
+    status: string,
+  ): Promise<void> {
+    await db.message.update({ where: { id }, data: { content, status } });
+  }
 }

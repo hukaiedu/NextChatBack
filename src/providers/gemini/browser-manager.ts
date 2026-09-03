@@ -72,6 +72,15 @@ export class BrowserManager {
   /** 启动浏览器并打开/聚焦 Gemini 页面,返回最终状态(READY / LOGIN_REQUIRED) */
   async openGemini(): Promise<BrowserProviderStatus> {
     return this.runExclusive(async () => {
+      // BUSY = 有 Request 正在该页面上执行;此时导航会毁掉进行中的生成。
+      // 检查放在 runExclusive 内:即使调用排在执行期间,状态落到这里时仍是实时值。
+      if (this.state === "BUSY") {
+        throw new AppError(
+          ErrorCodes.PROVIDER_NOT_READY,
+          "browser is busy executing another request",
+          500,
+        );
+      }
       await this.ensureContextStarted();
       return this.ensureGeminiPage();
     });
@@ -123,8 +132,9 @@ export class BrowserManager {
   }
 
   /**
-   * 取出当前可用的 Gemini Page(第 4 阶段 Adapter 唯一入口)。
-   * 状态机是唯一真相源:非 READY 一律抛出对应错误码,调用方不得绕过。
+   * 取出当前可用的 Gemini Page(Adapter 唯一入口)。
+   * 状态机是唯一真相源:非 READY/BUSY 一律抛出对应错误码,调用方不得绕过。
+   * BUSY 放行:执行中的 Request 就是页面的合法使用者(Scheduler 先 setBusy 再执行)。
    */
   requireGeminiPage(): BrowserPageHandle {
     const status = this.getStatus();
@@ -132,13 +142,13 @@ export class BrowserManager {
       throw new AppError(ErrorCodes.PROVIDER_LOGIN_REQUIRED, "Gemini login is required", 500);
     }
     const page = this.page;
-    if (!page || page.isClosed() || status !== "READY") {
+    if (!page || page.isClosed() || (status !== "READY" && status !== "BUSY")) {
       throw new AppError(ErrorCodes.PROVIDER_NOT_READY, "Gemini page is not ready", 500);
     }
     return page;
   }
 
-  /** 第 5 阶段进入业务时置 BUSY;本阶段枚举先建立 */
+  /** Scheduler 执行 Request 期间置 BUSY:阻止 openGemini 导航毁掉进行中的生成 */
   setBusy(): void {
     this.transitionTo("BUSY");
   }

@@ -14,17 +14,23 @@ import {
 } from "./message.types.js";
 import type { MessageListItem, SendMessageResult } from "./message.types.js";
 
+/** 新 Request 事务提交后的回调(app 装配时指向 Scheduler.notify) */
+export interface RequestCreationListener {
+  onRequestCreated(requestId: string): void;
+}
+
 export class MessageService {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly messageRepo: MessageRepository,
     private readonly conversationRepo: ConversationRepository,
     private readonly requestRepo: RequestRepository,
+    private readonly requestCreationListener?: RequestCreationListener,
   ) {}
 
   /**
    * 发送消息:一个数据库事务完成 检查 → 创建 USER / ASSISTANT / REQUEST。
-   * 本阶段不执行 Provider,只创建数据库记录(prd:第 2 阶段用 Fake/无 Provider)。
+   * 事务提交后通知 Scheduler 立即认领(prd §6.2 M→N);Provider 执行不在本方法内。
    */
   async sendMessage(
     conversationId: string,
@@ -41,7 +47,7 @@ export class MessageService {
     }
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      const result = await this.prisma.$transaction(async (tx) => {
         // 1. Conversation 存在 + ACTIVE
         const conversation = await this.conversationRepo.findById(tx, conversationId);
         if (!conversation) {
@@ -101,6 +107,11 @@ export class MessageService {
 
         return { request, userMessage, assistantMessage, deduplicated: false };
       });
+      if (!result.deduplicated) {
+        // 事务已提交才通知;幂等命中(deduplicated)不重复通知
+        this.requestCreationListener?.onRequestCreated(result.request.id);
+      }
+      return result;
     } catch (err) {
       // 数据库级唯一约束兜底(并发竞态):
       // - uk_active_request_per_conversation → 同会话活动 Request

@@ -24,7 +24,7 @@ async function main(): Promise<void> {
     logger,
   });
 
-  const app = createApp({
+  const { app } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,

@@ -3,9 +3,11 @@ import type { Server } from "node:http";
 import type { Express } from "express";
 
 import { createApp } from "../src/app.js";
+import type { SchedulerConfig } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
 import type { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import type { GeminiAdapter } from "../src/providers/gemini/gemini.types.js";
+import type { RequestScheduler } from "../src/modules/request/request.scheduler.js";
 import { TEST_DATABASE_URL } from "./global-setup.js";
 import { createPrismaClient, probeDatabase } from "../src/database/prisma.js";
 import type { PrismaClient } from "../src/generated/prisma/client.js";
@@ -14,6 +16,8 @@ import { FakeDriver, FakeGeminiAdapter, createFakeManager } from "./fakes.js";
 export interface TestContext {
   prisma: PrismaClient;
   baseUrl: string;
+  /** 仅当 setup 时开启 scheduler 才有值;autoStart=false 时可手动 runOnce 驱动 */
+  scheduler: RequestScheduler | null;
   reset(): Promise<void>;
   close(): Promise<void>;
 }
@@ -22,6 +26,8 @@ export interface TestContext {
 export async function setupTestContext(options?: {
   browserManager?: BrowserManager;
   geminiAdapter?: GeminiAdapter;
+  /** 默认不启动 Scheduler(第 2 阶段行为测试不受影响);传入即启用,可 autoStart:false + runOnce 手动驱动 */
+  scheduler?: SchedulerConfig;
 }): Promise<TestContext> {
   const prisma = await createPrismaClient(TEST_DATABASE_URL);
   const logger = createLogger("silent");
@@ -29,12 +35,16 @@ export async function setupTestContext(options?: {
   // 默认注入"永不启动"的 Browser Manager stub(provider 测试才需要真实/可操纵实例)
   const browserManager = options?.browserManager ?? createFakeManager(new FakeDriver());
 
-  const app: Express = createApp({
+  const { app, scheduler } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
     browserManager,
     geminiAdapter: options?.geminiAdapter ?? new FakeGeminiAdapter(),
+    scheduler: {
+      scanIntervalMs: options?.scheduler?.scanIntervalMs ?? 25,
+      autoStart: options?.scheduler ? (options.scheduler.autoStart ?? true) : false,
+    },
   });
 
   const server: Server = app.listen(0, "127.0.0.1");
@@ -47,6 +57,7 @@ export async function setupTestContext(options?: {
   return {
     prisma,
     baseUrl: `http://127.0.0.1:${address.port}`,
+    scheduler,
 
     async reset(): Promise<void> {
       await prisma.modelRequest.deleteMany();
@@ -55,6 +66,7 @@ export async function setupTestContext(options?: {
     },
 
     async close(): Promise<void> {
+      scheduler.stop();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await prisma.$disconnect();
     },

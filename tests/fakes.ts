@@ -316,6 +316,8 @@ export function createFakeManager(driver: FakeDriver, script?: FakePageScript): 
 export interface FakeAdapterBehavior {
   /** 报给落库钩子的会话 URL;显式 null = 整个执行没检测到 URL */
   conversationUrl?: string | null;
+  /** 按调用次序给每次执行分配会话 URL(多会话用例必须各自不同,@unique);超出列表 = null */
+  conversationUrls?: string[];
   answer?: string;
   openError?: unknown;
   runError?: unknown;
@@ -345,9 +347,12 @@ export class FakeGeminiAdapter implements GeminiAdapter {
     if (this.behavior.runError !== undefined) {
       throw this.behavior.runError;
     }
-    const url = this.behavior.conversationUrl === undefined
-      ? FAKE_CONVERSATION_URL
-      : this.behavior.conversationUrl;
+    const callIndex = this.runCalls.length - 1;
+    const url = this.behavior.conversationUrls
+      ? this.behavior.conversationUrls[callIndex] ?? null
+      : this.behavior.conversationUrl === undefined
+        ? FAKE_CONVERSATION_URL
+        : this.behavior.conversationUrl;
     if (url !== null) {
       await input.onConversationUrl(url);
       this.hookUrls.push(url);

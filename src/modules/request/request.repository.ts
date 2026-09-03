@@ -42,4 +42,45 @@ export class RequestRepository {
       orderBy: { createdAt: "asc" },
     });
   }
+
+  /** 最老的 PENDING(Scheduler 取任务;id 兜底同毫秒稳定排序) */
+  async findFirstPending(db: DbClient): Promise<ModelRequestModel | null> {
+    return db.modelRequest.findFirst({
+      where: { status: "PENDING" },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+  }
+
+  /** 认领:PENDING → PROCESSING,返回 0 表示已被别的路径动过 */
+  async claim(db: DbClient, id: string): Promise<number> {
+    const result = await db.modelRequest.updateMany({
+      where: { id, status: "PENDING" },
+      data: { status: "PROCESSING", startedAt: new Date(), attemptCount: { increment: 1 } },
+    });
+    return result.count;
+  }
+
+  /** 成功收尾:PROCESSING → SUCCESS(§12.10 成功事务的 Request 侧) */
+  async markSuccess(db: DbClient, id: string): Promise<number> {
+    const result = await db.modelRequest.updateMany({
+      where: { id, status: "PROCESSING" },
+      data: { status: "SUCCESS", completedAt: new Date() },
+    });
+    return result.count;
+  }
+
+  /** 失败收尾:PROCESSING → FAILED / TIMEOUT(§12.11) */
+  async markFailed(
+    db: DbClient,
+    id: string,
+    status: "FAILED" | "TIMEOUT",
+    errorCode: string,
+    errorMessage: string,
+  ): Promise<number> {
+    const result = await db.modelRequest.updateMany({
+      where: { id, status: "PROCESSING" },
+      data: { status, errorCode, errorMessage, completedAt: new Date() },
+    });
+    return result.count;
+  }
 }
