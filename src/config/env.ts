@@ -3,6 +3,11 @@ import { z } from "zod";
 import { AppError } from "../common/errors/app-error.js";
 import { ErrorCodes } from "../common/errors/error-codes.js";
 
+/** "true"/"false" → boolean(z.coerce.boolean 会把 "false" 变 true,不能用) */
+const boolFromString = z
+  .enum(["true", "false"])
+  .transform((value) => value === "true");
+
 const envSchema = z.object({
   NODE_ENV: z
     .enum(["development", "test", "production"])
@@ -13,6 +18,10 @@ const envSchema = z.object({
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
+  // Browser Manager(第 3 阶段)
+  BROWSER_PROFILE_DIR: z.string().min(1).default("./data/browser-profile"),
+  BROWSER_HEADLESS: boolFromString.default("false"),
+  GEMINI_BASE_URL: z.string().url().default("https://gemini.google.com/app"),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -8,6 +8,8 @@ import { HEALTH_PATH } from "./config/constants.js";
 import type { PrismaClient } from "./generated/prisma/client.js";
 import { createHealthRouter } from "./modules/health/health.controller.js";
 import type { HealthProbe } from "./modules/health/health.controller.js";
+import { createProviderRouter } from "./modules/provider/provider.controller.js";
+import type { BrowserManager } from "./providers/gemini/browser-manager.js";
 import { ConversationRepository } from "./modules/conversation/conversation.repository.js";
 import { ConversationService } from "./modules/conversation/conversation.service.js";
 import { createConversationRouter } from "./modules/conversation/conversation.controller.js";
@@ -22,6 +24,7 @@ export interface AppDeps {
   prisma: PrismaClient;
   probeDatabase: HealthProbe;
   logger: Logger;
+  browserManager: BrowserManager;
 }
 
 export function createApp(deps: AppDeps): Express {
@@ -49,6 +52,7 @@ export function createApp(deps: AppDeps): Express {
     createMessageRouter(messageService),
   );
   app.use("/api/requests", createRequestRouter(requestService));
+  app.use("/api/provider", createProviderRouter(deps.browserManager));
 
   // 统一错误出口,必须最后挂载
   app.use(errorHandler(deps.logger));

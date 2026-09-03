@@ -4,9 +4,11 @@ import type { Express } from "express";
 
 import { createApp } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
+import type { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import { TEST_DATABASE_URL } from "./global-setup.js";
 import { createPrismaClient, probeDatabase } from "../src/database/prisma.js";
 import type { PrismaClient } from "../src/generated/prisma/client.js";
+import { FakeDriver, createFakeManager } from "./fakes.js";
 
 export interface TestContext {
   prisma: PrismaClient;
@@ -16,14 +18,20 @@ export interface TestContext {
 }
 
 /** 每个测试文件独立 app + prisma(同一测试库),beforeEach 时 reset 数据 */
-export async function setupTestContext(): Promise<TestContext> {
+export async function setupTestContext(options?: {
+  browserManager?: BrowserManager;
+}): Promise<TestContext> {
   const prisma = await createPrismaClient(TEST_DATABASE_URL);
   const logger = createLogger("silent");
+
+  // 默认注入"永不启动"的 Browser Manager stub(provider 测试才需要真实/可操纵实例)
+  const browserManager = options?.browserManager ?? createFakeManager(new FakeDriver());
 
   const app: Express = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
+    browserManager,
   });
 
   const server: Server = app.listen(0, "127.0.0.1");

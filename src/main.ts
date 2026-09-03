@@ -6,16 +6,28 @@ import { createApp } from "./app.js";
 import { createLogger } from "./common/logger/logger.js";
 import { parseEnv } from "./config/env.js";
 import { createPrismaClient, probeDatabase } from "./database/prisma.js";
+import { BrowserManager } from "./providers/gemini/browser-manager.js";
+import { PlaywrightBrowserDriver } from "./providers/gemini/playwright-driver.js";
 
 async function main(): Promise<void> {
   const env = parseEnv(process.env);
   const logger = createLogger(env.LOG_LEVEL);
   const prisma = await createPrismaClient(env.DATABASE_URL);
 
+  // Browser Manager:进程级单实例(一个 Persistent Context)
+  const browserManager = new BrowserManager({
+    driver: new PlaywrightBrowserDriver(),
+    profileDir: env.BROWSER_PROFILE_DIR,
+    headless: env.BROWSER_HEADLESS,
+    geminiBaseUrl: env.GEMINI_BASE_URL,
+    logger,
+  });
+
   const app = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
+    browserManager,
   });
 
   const server = http.createServer(app);
@@ -30,14 +42,25 @@ async function main(): Promise<void> {
     }
     shuttingDown = true;
     logger.info({ signal }, "shutting down");
+    // 关闭顺序:停止接受 HTTP → 关闭 Browser Manager → disconnect Prisma
     server.close(() => {
-      prisma
-        .$disconnect()
-        .catch(() => undefined)
-        .finally(() => process.exit(0));
+      browserManager
+        .stop()
+        .catch((err) => {
+          logger.error({ err }, "error while stopping browser manager");
+        })
+        .finally(() => {
+          prisma
+            .$disconnect()
+            .catch(() => undefined)
+            .finally(() => process.exit(0));
+        });
     });
-    // 兜底:连接迟迟不关闭时强制退出
-    setTimeout(() => process.exit(1), 5000).unref();
+    // 兜底:连接迟迟不关闭时强制退出(先尝试关闭浏览器,避免孤儿进程)
+    setTimeout(() => {
+      logger.warn("graceful shutdown timed out, forcing exit");
+      process.exit(1);
+    }, 10_000).unref();
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));
