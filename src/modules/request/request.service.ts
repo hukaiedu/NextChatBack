@@ -83,6 +83,34 @@ export class RequestService {
     });
   }
 
+  /**
+   * 启动恢复(§12.1):上一进程遗留的 PROCESSING 一律 PROCESSING → FAILED。
+   * 无法确认 Prompt 是否已提交给 Gemini,禁止自动重发;
+   * User Message / Assistant Message / Request / providerConversationUrl 全部保留。
+   * 行已被别的路径推进时返回 false(幂等,重复执行安全)。
+   */
+  async recoverProcessingOne(id: string): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      const request = await this.requestRepo.findById(tx, id);
+      if (!request || request.status !== "PROCESSING") {
+        return false;
+      }
+      if (
+        (await this.requestRepo.markFailed(
+          tx,
+          id,
+          "FAILED",
+          ErrorCodes.SERVER_RESTARTED_DURING_PROCESSING,
+          "Server restarted while the request was processing; prompt delivery is unconfirmed",
+        )) === 0
+      ) {
+        return false;
+      }
+      await this.messageRepo.updateStatus(tx, request.assistantMessageId, "FAILED");
+      return true;
+    });
+  }
+
   private async requireProcessing(db: DbClient, id: string): Promise<ModelRequestModel> {
     const request = await this.requestRepo.findById(db, id);
     if (!request || request.status !== "PROCESSING") {

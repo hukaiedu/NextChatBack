@@ -24,7 +24,7 @@ async function main(): Promise<void> {
     logger,
   });
 
-  const { app } = createApp({
+  const { app, scheduler, recovery } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
@@ -35,7 +35,16 @@ async function main(): Promise<void> {
       options: { responseTimeoutMs: env.GEMINI_RESPONSE_TIMEOUT_MS },
       logger,
     }),
+    // 启动顺序由下面三行掌握:恢复 → 开始扫描 → 才开始接受 HTTP 请求
+    scheduler: {
+      executionTimeoutMs: env.REQUEST_EXECUTION_TIMEOUT_MS,
+      autoStart: false,
+    },
   });
+
+  // prd §12.1:残留 PROCESSING 先判 FAILED(禁止自动重发),PENDING 留给 Scheduler 首轮扫描
+  await recovery.run();
+  scheduler.start();
 
   const server = http.createServer(app);
   server.listen(env.PORT, env.HOST, () => {

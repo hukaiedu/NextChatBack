@@ -323,6 +323,8 @@ export interface FakeAdapterBehavior {
   runError?: unknown;
   /** 落库钩子 await 完成之后、返回回答之前执行(测试在此读库取顺序证据) */
   beforeAnswer?: () => Promise<void>;
+  /** 落库之后永不返回(模拟执行器挂死):用于验证 Scheduler 的 execution watchdog */
+  hang?: boolean;
 }
 
 export const FAKE_CONVERSATION_URL = "https://gemini.google.com/app/f1e2d3c4b5a69788";
@@ -356,6 +358,10 @@ export class FakeGeminiAdapter implements GeminiAdapter {
     if (url !== null) {
       await input.onConversationUrl(url);
       this.hookUrls.push(url);
+    }
+    if (this.behavior.hang) {
+      // 永不 settle:只有 Scheduler 的 watchdog 能把这条 Request 收尾
+      return new Promise<GeminiPromptResult>(() => undefined);
     }
     await this.behavior.beforeAnswer?.();
     return {

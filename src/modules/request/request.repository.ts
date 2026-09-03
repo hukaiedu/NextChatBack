@@ -51,6 +51,14 @@ export class RequestRepository {
     });
   }
 
+  /** §12.1 启动恢复扫描:上一进程遗留的全部 PROCESSING(老到新,顺序稳定) */
+  async findProcessing(db: DbClient): Promise<ModelRequestModel[]> {
+    return db.modelRequest.findMany({
+      where: { status: "PROCESSING" },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+  }
+
   /** 认领:PENDING → PROCESSING,返回 0 表示已被别的路径动过 */
   async claim(db: DbClient, id: string): Promise<number> {
     const result = await db.modelRequest.updateMany({

@@ -17,6 +17,9 @@ describe("parseEnv", () => {
     expect(env.PORT).toBe(3011);
     expect(env.HOST).toBe("127.0.0.1");
     expect(env.LOG_LEVEL).toBe("info");
+    // 执行 watchdog 默认 10 分钟,高于 Adapter 的 5 分钟回答上限
+    expect(env.GEMINI_RESPONSE_TIMEOUT_MS).toBe(300_000);
+    expect(env.REQUEST_EXECUTION_TIMEOUT_MS).toBe(600_000);
   });
 
   it("缺少 DATABASE_URL 时抛 VALIDATION_ERROR", () => {

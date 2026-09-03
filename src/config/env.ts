@@ -24,6 +24,12 @@ const envSchema = z.object({
   GEMINI_BASE_URL: z.string().url().default("https://gemini.google.com/app"),
   /** 单次 Prompt 从发送到读回最终回答的等待上限 */
   GEMINI_RESPONSE_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+  /**
+   * Scheduler 单条 Request 执行 watchdog 上限。
+   * 必须高于 GEMINI_RESPONSE_TIMEOUT_MS:正常情况下由 Adapter 自己的超时先报,
+   * watchdog 只兜「执行器挂死连超时都不返回」,把 PROCESSING 判成 TIMEOUT。
+   */
+  REQUEST_EXECUTION_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
 });
 
 export type Env = z.infer<typeof envSchema>;

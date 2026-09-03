@@ -8,6 +8,7 @@ import { createLogger } from "../src/common/logger/logger.js";
 import type { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import type { GeminiAdapter } from "../src/providers/gemini/gemini.types.js";
 import type { RequestScheduler } from "../src/modules/request/request.scheduler.js";
+import type { RequestRecovery } from "../src/modules/request/request.recovery.js";
 import { TEST_DATABASE_URL } from "./global-setup.js";
 import { createPrismaClient, probeDatabase } from "../src/database/prisma.js";
 import type { PrismaClient } from "../src/generated/prisma/client.js";
@@ -18,6 +19,8 @@ export interface TestContext {
   baseUrl: string;
   /** 仅当 setup 时开启 scheduler 才有值;autoStart=false 时可手动 runOnce 驱动 */
   scheduler: RequestScheduler | null;
+  /** 启动恢复器;helper 不自动跑,测试用 run() 模拟「服务重启」 */
+  recovery: RequestRecovery;
   reset(): Promise<void>;
   close(): Promise<void>;
 }
@@ -35,7 +38,7 @@ export async function setupTestContext(options?: {
   // 默认注入"永不启动"的 Browser Manager stub(provider 测试才需要真实/可操纵实例)
   const browserManager = options?.browserManager ?? createFakeManager(new FakeDriver());
 
-  const { app, scheduler } = createApp({
+  const { app, scheduler, recovery } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
@@ -43,6 +46,7 @@ export async function setupTestContext(options?: {
     geminiAdapter: options?.geminiAdapter ?? new FakeGeminiAdapter(),
     scheduler: {
       scanIntervalMs: options?.scheduler?.scanIntervalMs ?? 25,
+      executionTimeoutMs: options?.scheduler?.executionTimeoutMs,
       autoStart: options?.scheduler ? (options.scheduler.autoStart ?? true) : false,
     },
   });
@@ -58,6 +62,7 @@ export async function setupTestContext(options?: {
     prisma,
     baseUrl: `http://127.0.0.1:${address.port}`,
     scheduler,
+    recovery,
 
     async reset(): Promise<void> {
       await prisma.modelRequest.deleteMany();
