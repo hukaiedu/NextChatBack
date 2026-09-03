@@ -5,10 +5,11 @@ import type { Express } from "express";
 import { createApp } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
 import type { BrowserManager } from "../src/providers/gemini/browser-manager.js";
+import type { GeminiAdapter } from "../src/providers/gemini/gemini.types.js";
 import { TEST_DATABASE_URL } from "./global-setup.js";
 import { createPrismaClient, probeDatabase } from "../src/database/prisma.js";
 import type { PrismaClient } from "../src/generated/prisma/client.js";
-import { FakeDriver, createFakeManager } from "./fakes.js";
+import { FakeDriver, FakeGeminiAdapter, createFakeManager } from "./fakes.js";
 
 export interface TestContext {
   prisma: PrismaClient;
@@ -20,6 +21,7 @@ export interface TestContext {
 /** 每个测试文件独立 app + prisma(同一测试库),beforeEach 时 reset 数据 */
 export async function setupTestContext(options?: {
   browserManager?: BrowserManager;
+  geminiAdapter?: GeminiAdapter;
 }): Promise<TestContext> {
   const prisma = await createPrismaClient(TEST_DATABASE_URL);
   const logger = createLogger("silent");
@@ -32,6 +34,7 @@ export async function setupTestContext(options?: {
     probeDatabase: () => probeDatabase(prisma),
     logger,
     browserManager,
+    geminiAdapter: options?.geminiAdapter ?? new FakeGeminiAdapter(),
   });
 
   const server: Server = app.listen(0, "127.0.0.1");

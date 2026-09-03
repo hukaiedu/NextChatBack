@@ -22,6 +22,8 @@ const envSchema = z.object({
   BROWSER_PROFILE_DIR: z.string().min(1).default("./data/browser-profile"),
   BROWSER_HEADLESS: boolFromString.default("false"),
   GEMINI_BASE_URL: z.string().url().default("https://gemini.google.com/app"),
+  /** 单次 Prompt 从发送到读回最终回答的等待上限 */
+  GEMINI_RESPONSE_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
 });
 
 export type Env = z.infer<typeof envSchema>;

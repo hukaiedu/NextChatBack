@@ -45,6 +45,26 @@ export class ConversationRepository {
   }
 
   /**
+   * 绑定 Provider Conversation URL,first-write-wins:
+   * WHERE 里带 providerConversationUrl IS NULL,已有值时返回 null(绝不覆盖)。
+   * 通用 update 故意不支持该列,避免被无条件改绑。
+   */
+  async bindProviderConversationUrl(
+    db: DbClient,
+    id: string,
+    url: string,
+  ): Promise<ConversationModel | null> {
+    const result = await db.conversation.updateMany({
+      where: { id, providerConversationUrl: null },
+      data: { providerConversationUrl: url },
+    });
+    if (result.count === 0) {
+      return null;
+    }
+    return this.findById(db, id);
+  }
+
+  /**
    * 更新并返回更新后的记录;不存在返回 null。
    * 空 data 时只刷新 updatedAt(@updatedAt 由 Prisma 写入)。
    */

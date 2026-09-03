@@ -9,7 +9,9 @@ import type { PrismaClient } from "./generated/prisma/client.js";
 import { createHealthRouter } from "./modules/health/health.controller.js";
 import type { HealthProbe } from "./modules/health/health.controller.js";
 import { createProviderRouter } from "./modules/provider/provider.controller.js";
+import { GeminiPromptService } from "./modules/provider/gemini-prompt.service.js";
 import type { BrowserManager } from "./providers/gemini/browser-manager.js";
+import type { GeminiAdapter } from "./providers/gemini/gemini.types.js";
 import { ConversationRepository } from "./modules/conversation/conversation.repository.js";
 import { ConversationService } from "./modules/conversation/conversation.service.js";
 import { createConversationRouter } from "./modules/conversation/conversation.controller.js";
@@ -25,6 +27,7 @@ export interface AppDeps {
   probeDatabase: HealthProbe;
   logger: Logger;
   browserManager: BrowserManager;
+  geminiAdapter: GeminiAdapter;
 }
 
 export function createApp(deps: AppDeps): Express {
@@ -45,6 +48,12 @@ export function createApp(deps: AppDeps): Express {
   const conversationService = new ConversationService(deps.prisma, conversationRepo, requestRepo);
   const messageService = new MessageService(deps.prisma, messageRepo, conversationRepo, requestRepo);
   const requestService = new RequestService(deps.prisma, requestRepo);
+  const geminiPromptService = new GeminiPromptService(
+    conversationService,
+    deps.browserManager,
+    deps.geminiAdapter,
+    deps.logger,
+  );
 
   app.use("/api/conversations", createConversationRouter(conversationService));
   app.use(
@@ -52,7 +61,7 @@ export function createApp(deps: AppDeps): Express {
     createMessageRouter(messageService),
   );
   app.use("/api/requests", createRequestRouter(requestService));
-  app.use("/api/provider", createProviderRouter(deps.browserManager));
+  app.use("/api/provider", createProviderRouter(deps.browserManager, geminiPromptService));
 
   // 统一错误出口,必须最后挂载
   app.use(errorHandler(deps.logger));

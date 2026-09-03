@@ -5,7 +5,8 @@
  * 1. 单元测试可用 Fake 实现驱动 BrowserManager 状态机,不依赖真实浏览器/Google
  * 2. 真实实现只存在于 playwright-driver.ts
  *
- * 第 4 阶段做 DOM Selector 时在此扩展(当前只暴露第 3 阶段需要的方法)。
+ * DOM 能力覆盖到第 4 阶段 Gemini Adapter 所需:计数、写入输入框、按键、读末条回答文本。
+ * 等待/超时策略不在此层(GeminiAdapter 自己轮询),避免把业务节奏漏进驱动层。
  */
 
 /** Browser Provider 状态(prd §第 3 阶段第六节) */
@@ -26,6 +27,12 @@ export interface BrowserPageHandle {
   bringToFront(): Promise<void>;
   /** 返回匹配 selector 的当前元素数量(登录检测等轻量 DOM 判断用,不做交互) */
   countElements(selector: string): Promise<number>;
+  /** 写入输入框;目标不存在或不可编辑时抛错(由调用方映射 PROVIDER_DOM_CHANGED) */
+  fill(selector: string, value: string): Promise<void>;
+  /** 在目标元素上按下按键(如 Enter 提交) */
+  press(selector: string, key: string): Promise<void>;
+  /** 取最后一个匹配元素的渲染文本;无匹配返回 null */
+  lastInnerText(selector: string): Promise<string | null>;
   /** 页面被关闭(用户手动关闭 / 导航替换等) */
   onClose(listener: () => void): void;
   /** 页面崩溃(renderer crash) */

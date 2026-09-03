@@ -80,6 +80,29 @@ class PlaywrightPageHandle implements BrowserPageHandle {
     }
   }
 
+  /** Playwright fill 会派发 input 事件,可驱动 Angular/Quill 内容变更 */
+  async fill(selector: string, value: string): Promise<void> {
+    await this.page.locator(selector).first().fill(value);
+  }
+
+  /** 先聚焦再按键盘:与真实键盘事件路径一致 */
+  async press(selector: string, key: string): Promise<void> {
+    await this.page.locator(selector).first().focus();
+    await this.page.keyboard.press(key);
+  }
+
+  async lastInnerText(selector: string): Promise<string | null> {
+    try {
+      const last = this.page.locator(selector).last();
+      if ((await last.count()) === 0) {
+        return null;
+      }
+      return await last.innerText();
+    } catch {
+      return null;
+    }
+  }
+
   async bringToFront(): Promise<void> {
     await this.page.bringToFront();
   }

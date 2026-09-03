@@ -8,6 +8,7 @@ import type {
   BrowserProviderStatus,
 } from "./browser-driver.js";
 import { GeminiSessionChecker } from "./session-checker.js";
+import { normalizeConversationUrl } from "./gemini.selectors.js";
 
 export interface BrowserManagerOptions {
   driver: BrowserDriver;
@@ -119,6 +120,22 @@ export class BrowserManager {
       return this.state;
     }
     return this.refreshStatusFromPage();
+  }
+
+  /**
+   * 取出当前可用的 Gemini Page(第 4 阶段 Adapter 唯一入口)。
+   * 状态机是唯一真相源:非 READY 一律抛出对应错误码,调用方不得绕过。
+   */
+  requireGeminiPage(): BrowserPageHandle {
+    const status = this.getStatus();
+    if (status === "LOGIN_REQUIRED") {
+      throw new AppError(ErrorCodes.PROVIDER_LOGIN_REQUIRED, "Gemini login is required", 500);
+    }
+    const page = this.page;
+    if (!page || page.isClosed() || status !== "READY") {
+      throw new AppError(ErrorCodes.PROVIDER_NOT_READY, "Gemini page is not ready", 500);
+    }
+    return page;
   }
 
   /** 第 5 阶段进入业务时置 BUSY;本阶段枚举先建立 */
@@ -243,7 +260,10 @@ export class BrowserManager {
       );
     }
 
-    this.logger.info({ url: page.url() }, "gemini page open");
+    this.logger.info(
+      { url: normalizeConversationUrl(page.url()) ?? "(unparseable)" },
+      "gemini page open",
+    );
     return this.refreshStatusFromPage();
   }
 
