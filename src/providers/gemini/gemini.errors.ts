@@ -68,3 +68,42 @@ export function cancellationUnconfirmed(): AppError {
     "Could not confirm that Gemini stopped generating within the timeout",
   );
 }
+
+/**
+ * Playwright 原始异常中「Context/浏览器进程已关闭或崩溃」的识别(§8.8 竞态)。
+ *
+ * Context 崩溃时,BrowserManager 的 PROVIDER_BROWSER_CRASHED 粘性故障码要等
+ * onClose/onCrash 事件异步写入;执行异常可能先于事件到达 Scheduler,只认粘性码
+ * 会漏成 INTERNAL_ERROR(长稳 108 轮出现 1 次)。按 Playwright 关闭/崩溃文案识别,
+ * 并下钻 cause 链(adapter 会把原始异常包进 domChanged/navigationFailed 的 cause),
+ * 让「事件先到」与「异常先到」两种顺序都稳定归类 PROVIDER_BROWSER_CRASHED。
+ * 只匹配框架文案,不匹配业务消息(pageClosed() 的 "Gemini page was closed" 等),
+ * 主动关页不会误判成进程崩溃。
+ */
+const CONTEXT_CLOSED_MARKERS = [
+  "target closed",
+  "target page, context or browser has been closed",
+  "browser has been closed",
+  "browser has disconnected",
+  "target crashed",
+  "page crashed",
+  "session closed",
+] as const;
+
+/** cause 链下钻上限(err 本身之外再查 4 层),防构造环导致死循环 */
+const CONTEXT_CLOSED_MAX_CAUSE_DEPTH = 4;
+
+export function isContextClosedError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth <= CONTEXT_CLOSED_MAX_CAUSE_DEPTH; depth++) {
+    if (!(current instanceof Error)) {
+      return false;
+    }
+    const message = current.message.toLowerCase();
+    if (CONTEXT_CLOSED_MARKERS.some((marker) => message.includes(marker))) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}

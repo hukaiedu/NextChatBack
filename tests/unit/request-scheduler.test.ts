@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { AppError } from "../../src/common/errors/app-error.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { isContextClosedError } from "../../src/providers/gemini/gemini.errors.js";
 import type { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
 import { FAKE_CONVERSATION_URL, FakeDriver, FakeGeminiAdapter, createFakeManager } from "../fakes.js";
 import type { FakeAdapterBehavior } from "../fakes.js";
@@ -242,5 +243,109 @@ describe("RequestScheduler(单进程串行调度,Fake Adapter + 真 SQLite)", ()
     expect(adapter.runCalls).toHaveLength(1);
     const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
     expect(request?.attemptCount).toBe(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // §8.8 Context 关闭竞态:执行异常先于 BrowserManager 的 close 事件到达时,
+  // 粘性故障码尚未写入,靠原始异常文案识别,稳定归类 PROVIDER_BROWSER_CRASHED
+  // ---------------------------------------------------------------------------
+
+  it("Context 关闭竞态:裸 Playwright 关闭异常先到(无粘性故障码)→ PROVIDER_BROWSER_CRASHED 而非 INTERNAL_ERROR", async () => {
+    await mount({
+      runError: new Error("Target page, context or browser has been closed"),
+    });
+    const seeded = await seedPending("问题");
+
+    await ctx.scheduler!.runOnce();
+
+    const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
+    expect(request?.status).toBe("FAILED");
+    expect(request?.errorCode).toBe(ErrorCodes.PROVIDER_BROWSER_CRASHED);
+    expect(request?.errorMessage).toBe("Target page, context or browser has been closed");
+    // close 事件从未到达:粘性故障码自始至终为空,归类完全靠异常识别
+    expect(manager.takeProviderFault()).toBeNull();
+  });
+
+  it("识别下钻 cause 链:adapter 把 Context 关闭包进 AppError(如 domChanged)同样归类 PROVIDER_BROWSER_CRASHED", async () => {
+    await mount({
+      runError: new AppError(
+        ErrorCodes.PROVIDER_DOM_CHANGED,
+        "Gemini page does not match expected structure: composer is not editable",
+        new Error("Target closed"),
+      ),
+    });
+    const seeded = await seedPending("问题");
+
+    await ctx.scheduler!.runOnce();
+
+    const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
+    expect(request?.status).toBe("FAILED");
+    expect(request?.errorCode).toBe(ErrorCodes.PROVIDER_BROWSER_CRASHED);
+  });
+
+  it("主动关页不是崩溃:pageClosed() 维持 PROVIDER_PAGE_CLOSED,不误判", async () => {
+    await mount({
+      runError: new AppError(
+        ErrorCodes.PROVIDER_PAGE_CLOSED,
+        "Gemini page was closed during execution",
+      ),
+    });
+    const seeded = await seedPending("问题");
+
+    await ctx.scheduler!.runOnce();
+
+    const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
+    expect(request?.status).toBe("FAILED");
+    expect(request?.errorCode).toBe(ErrorCodes.PROVIDER_PAGE_CLOSED);
+  });
+
+  it("无关原始异常仍兜底 INTERNAL_ERROR(识别不扩大化)", async () => {
+    await mount({
+      runError: new TypeError("Cannot read properties of undefined (reading 'click')"),
+    });
+    const seeded = await seedPending("问题");
+
+    await ctx.scheduler!.runOnce();
+
+    const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
+    expect(request?.status).toBe("FAILED");
+    expect(request?.errorCode).toBe(ErrorCodes.INTERNAL_ERROR);
+  });
+});
+
+describe("isContextClosedError(Playwright Context-closed 文案识别,§8.8)", () => {
+  it("命中各类 Playwright 关闭/崩溃文案", () => {
+    expect(isContextClosedError(new Error("Target closed"))).toBe(true);
+    expect(
+      isContextClosedError(new Error("Target page, context or browser has been closed")),
+    ).toBe(true);
+    expect(isContextClosedError(new Error("Browser has been closed"))).toBe(true);
+    expect(isContextClosedError(new Error("Browser has disconnected"))).toBe(true);
+    expect(isContextClosedError(new Error("Target crashed"))).toBe(true);
+    expect(isContextClosedError(new Error("Page crashed"))).toBe(true);
+  });
+
+  it("沿 cause 链下钻:err 本身 + 最多 4 层 cause,超限停止(防环)", () => {
+    const leaf = new Error("Target closed");
+    const level1 = new Error("wrap-1", { cause: leaf });
+    const level2 = new Error("wrap-2", { cause: level1 });
+    const level3 = new Error("wrap-3", { cause: level2 });
+    const level4 = new Error("wrap-4", { cause: level3 });
+
+    expect(isContextClosedError(new Error("outer", { cause: leaf }))).toBe(true);
+    expect(isContextClosedError(new Error("outer", { cause: level3 }))).toBe(true);
+    // leaf 已在第 5 层 cause,超出下钻上限
+    expect(isContextClosedError(new Error("outer", { cause: level4 }))).toBe(false);
+  });
+
+  it("超时/业务文案/非 Error 值不误判", () => {
+    expect(isContextClosedError(new Error("Timeout 30000ms exceeded"))).toBe(false);
+    expect(
+      isContextClosedError(
+        new AppError(ErrorCodes.PROVIDER_PAGE_CLOSED, "Gemini page was closed during execution"),
+      ),
+    ).toBe(false);
+    expect(isContextClosedError("Target closed")).toBe(false);
+    expect(isContextClosedError(undefined)).toBe(false);
   });
 });

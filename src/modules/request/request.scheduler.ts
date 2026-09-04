@@ -10,6 +10,7 @@ import type { PromptExecutionResult, PromptExecutor } from "../provider/gemini-p
 import type { RequestRepository } from "./request.repository.js";
 import type { RequestService } from "./request.service.js";
 import type { CancellationRegistry } from "./request.cancellation.js";
+import { isContextClosedError } from "../../providers/gemini/gemini.errors.js";
 
 const DEFAULT_SCAN_INTERVAL_MS = 1_000;
 /**
@@ -197,10 +198,19 @@ export class RequestScheduler {
       }
     } catch (err) {
       const appErr = err instanceof AppError ? err : undefined;
-      // 粘性故障码优先级最高:Context/Page 崩溃时 adapter 先抛 pageClosed(),
-      // 这里提升为 PROVIDER_BROWSER_CRASHED,精确对齐 §12.2
-      const code = this.deps.browserManager.takeProviderFault() ?? appErr?.code ?? ErrorCodes.INTERNAL_ERROR;
-      const message = appErr?.message ?? "unexpected executor failure";
+      // 故障归属优先级(§8.8 Context 关闭竞态):
+      // ① 粘性故障码:Context/Page 崩溃事件已先于异常到达;
+      // ② 原始异常文案识别:close 事件是异步的,执行异常可能先到,
+      //    缺这层会把 Context 崩溃漏成 INTERNAL_ERROR(长稳 108 轮出现 1 次);
+      // ③ AppError 自带错误码;④ 兜底 INTERNAL_ERROR。
+      const code =
+        this.deps.browserManager.takeProviderFault() ??
+        (isContextClosedError(err) ? ErrorCodes.PROVIDER_BROWSER_CRASHED : undefined) ??
+        appErr?.code ??
+        ErrorCodes.INTERNAL_ERROR;
+      const message =
+        appErr?.message ??
+        (err instanceof Error ? err.message : "unexpected executor failure");
       const nextStatus = code === ErrorCodes.PROVIDER_RESPONSE_TIMEOUT ? "TIMEOUT" : "FAILED";
       try {
         await this.deps.requestService.fail(pending.id, nextStatus, code, message);
