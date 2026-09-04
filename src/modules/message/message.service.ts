@@ -51,16 +51,15 @@ export class MessageService {
         // 1. Conversation 存在 + ACTIVE
         const conversation = await this.conversationRepo.findById(tx, conversationId);
         if (!conversation) {
-          throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+          throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
         }
         if (conversation.status === "DELETED") {
-          throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted", 409);
+          throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted");
         }
         if (conversation.status === "ARCHIVED") {
           throw new AppError(
             ErrorCodes.CONVERSATION_ARCHIVED,
             "Conversation is archived, restore it before sending messages",
-            409,
           );
         }
 
@@ -70,7 +69,6 @@ export class MessageService {
           throw new AppError(
             ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
             "Conversation already has a request in progress",
-            409,
           );
         }
 
@@ -122,7 +120,6 @@ export class MessageService {
           throw new AppError(
             ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
             "Conversation already has a request in progress",
-            409,
             err,
           );
         }
@@ -138,15 +135,14 @@ export class MessageService {
       if (detectTriggerAbort(err) === "conversation_not_active") {
         const conversation = await this.conversationRepo.findById(this.prisma, conversationId);
         if (!conversation) {
-          throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404, err);
+          throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", err);
         }
         if (conversation.status === "DELETED") {
-          throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted", 409, err);
+          throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted", err);
         }
         throw new AppError(
           ErrorCodes.CONVERSATION_ARCHIVED,
           "Conversation is archived, restore it before sending messages",
-          409,
           err,
         );
       }
@@ -164,7 +160,6 @@ export class MessageService {
       throw new AppError(
         ErrorCodes.IDEMPOTENCY_KEY_REUSED,
         "Idempotency-Key was already used with a different request",
-        409,
       );
     }
     const messages = await this.messageRepo.findByIds(this.prisma, [
@@ -175,7 +170,7 @@ export class MessageService {
 
     const assistantMessage = messages.find((m) => m.id === request.assistantMessageId);
     if (!userMessage || !assistantMessage) {
-      throw new AppError(ErrorCodes.DATABASE_ERROR, "Request references missing messages", 500);
+      throw new AppError(ErrorCodes.DATABASE_ERROR, "Request references missing messages");
     }
     return { request, userMessage, assistantMessage, deduplicated: true };
   }
@@ -200,5 +195,16 @@ export class MessageService {
       const request = requestByAssistantId.get(message.id);
       return { ...message, request: request ? toRequestBrief(request) : null };
     });
+  }
+
+  /**
+   * 流式回答期间刷新 Assistant Message 内容(第 6 阶段,由 GeminiStreamService 节流调用)。
+   *
+   * 只写 content、绝不写 status:状态流转唯一入口仍是 RequestService(§11.4)。
+   * 返回 false 表示消息已离开 STREAMING(被收尾或被恢复改走),调用方据此停止推送。
+   */
+  async saveStreamingContent(id: string, content: string): Promise<boolean> {
+    const updated = await this.messageRepo.updateContentIfStreaming(this.prisma, id, content);
+    return updated > 0;
   }
 }

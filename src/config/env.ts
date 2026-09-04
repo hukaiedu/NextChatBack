@@ -30,6 +30,11 @@ const envSchema = z.object({
    * watchdog 只兜「执行器挂死连超时都不返回」,把 PROCESSING 判成 TIMEOUT。
    */
   REQUEST_EXECUTION_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
+  /**
+   * 流式回答期间 Assistant Message 的最小写库间隔(ms,第 6 阶段)。
+   * 只节流数据库压力:SSE 事件按每次回答文本变化立即推送,不等落库。
+   */
+  STREAMING_UPDATE_INTERVAL_MS: z.coerce.number().int().min(0).default(300),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -44,7 +49,6 @@ export function parseEnv(raw: NodeJS.ProcessEnv): Env {
     throw new AppError(
       ErrorCodes.VALIDATION_ERROR,
       `Invalid environment variables: ${detail}`,
-      500,
     );
   }
   return result.data;

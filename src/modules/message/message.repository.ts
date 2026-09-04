@@ -51,4 +51,20 @@ export class MessageRepository {
   ): Promise<void> {
     await db.message.update({ where: { id }, data: { content, status } });
   }
+
+  /**
+   * 流式回答期间刷新内容(第 6 阶段):只写 content,状态条件锁死在 STREAMING。
+   * 返回受影响行数,0 表示消息已被收尾(状态归 RequestService),调用方决定丢弃还是报错。
+   */
+  async updateContentIfStreaming(
+    db: DbClient,
+    id: string,
+    content: string,
+  ): Promise<number> {
+    const result = await db.message.updateMany({
+      where: { id, status: "STREAMING" },
+      data: { content },
+    });
+    return result.count;
+  }
 }
