@@ -33,6 +33,10 @@ export interface BrowserPageHandle {
   press(selector: string, key: string): Promise<void>;
   /** 取最后一个匹配元素的渲染文本;无匹配返回 null */
   lastInnerText(selector: string): Promise<string | null>;
+  /** 点击第一个匹配元素;目标不存在时抛错(由调用方映射 PROVIDER_DOM_CHANGED) */
+  click(selector: string, options?: { timeoutMs?: number }): Promise<void>;
+  /** renderer 是否已崩溃(与 isClosed 语义独立:crash 后 page 可能仍未 close) */
+  isCrashed(): boolean;
   /** 页面被关闭(用户手动关闭 / 导航替换等) */
   onClose(listener: () => void): void;
   /** 页面崩溃(renderer crash) */

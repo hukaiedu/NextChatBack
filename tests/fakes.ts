@@ -27,6 +27,8 @@ export interface FakePageScript {
   neverStable?: boolean;
   /** 模拟输入框存在但不可写(Playwright fill 会抛错) */
   throwOnFill?: boolean;
+  /** click 时对这些选择器(完整串精确匹配)抛错,模拟元素存在但不可点 */
+  throwOnClickSelectors?: string[];
   /** goto 之后页面实际落到的 URL(模拟无效会话被重定向回 /app) */
   navLandsUrl?: string;
   /**
@@ -40,12 +42,18 @@ export interface FakePageScript {
     domCounts?: Record<string, number>;
     answerTexts?: string[];
   };
+  /** 点击停止按钮后生效的页面变化(第 8 阶段取消测试用) */
+  afterStopClick?: {
+    domCounts?: Record<string, number>;
+    answerTexts?: string[];
+  };
 }
 
 /** Fake Page:goto 可模拟"重定向到 Google 登录页"或"同域未登录(显示 Sign in)" */
 export class FakePage implements BrowserPageHandle {
   currentUrl = "about:blank";
   private closedFlag = false;
+  private crashedFlag = false;
   private closeListeners: (() => void)[] = [];
   private crashListeners: (() => void)[] = [];
   /** 同域但页面显示 Sign in 链接(未登录的 Gemini 首页) */
@@ -54,13 +62,16 @@ export class FakePage implements BrowserPageHandle {
   answerTexts: string[];
   neverStable: boolean;
   throwOnFill: boolean;
+  throwOnClickSelectors: string[];
   navLandsUrl: string | null;
   private turnSamples: number[];
   private afterSend: FakePageScript["afterSend"];
+  private afterStopClick: FakePageScript["afterStopClick"];
   /** 断言用调用记录 */
   gotoCalls: string[] = [];
   fillCalls: { selector: string; value: string }[] = [];
   pressCalls: { selector: string; key: string }[] = [];
+  clickCalls: string[] = [];
   /** fill 时水合剧本尚未吐出的计数个数(null = 未配置水合剧本) */
   rampPendingAtFill: number | null = null;
   lastInnerTextCalls = 0;
@@ -76,9 +87,11 @@ export class FakePage implements BrowserPageHandle {
     this.answerTexts = [...(script.answerTexts ?? [])];
     this.neverStable = script.neverStable ?? false;
     this.throwOnFill = script.throwOnFill ?? false;
+    this.throwOnClickSelectors = [...(script.throwOnClickSelectors ?? [])];
     this.navLandsUrl = script.navLandsUrl ?? null;
     this.turnSamples = [...(script.turnSamples ?? [])];
     this.afterSend = script.afterSend;
+    this.afterStopClick = script.afterStopClick;
   }
 
   url(): string {
@@ -184,6 +197,27 @@ export class FakePage implements BrowserPageHandle {
     return queue[0] ?? null;
   }
 
+  async click(selector: string, _options?: { timeoutMs?: number }): Promise<void> {
+    // 记录的是「尝试过的选择器」:失败的候选也会留下痕迹,供轮换断言用
+    this.clickCalls.push(selector);
+    if (this.throwOnClickSelectors.includes(selector)) {
+      throw new Error(`element '${selector}' is not clickable`);
+    }
+    const stop = this.afterStopClick;
+    if (stop) {
+      if (stop.domCounts) {
+        this.domCounts = { ...this.domCounts, ...stop.domCounts };
+      }
+      if (stop.answerTexts) {
+        this.answerTexts = [...stop.answerTexts];
+      }
+    }
+  }
+
+  isCrashed(): boolean {
+    return this.crashedFlag;
+  }
+
   async close(): Promise<void> {
     if (!this.closedFlag) {
       this.emitClosed();
@@ -217,6 +251,7 @@ export class FakePage implements BrowserPageHandle {
 
   /** 测试触发:模拟 renderer crash */
   emitCrashed(): void {
+    this.crashedFlag = true;
     for (const listener of this.crashListeners) {
       listener();
     }
@@ -325,6 +360,25 @@ export interface FakeAdapterBehavior {
   beforeAnswer?: () => Promise<void>;
   /** 落库之后永不返回(模拟执行器挂死):用于验证 Scheduler 的 execution watchdog */
   hang?: boolean;
+  /**
+   * 流式剧本(第 6 阶段):依次通过 Adapter 的 onText 钩子吐出的**当前完整文本**,
+   * 与真实 Adapter 一样是「越读越长的前缀」,增量由业务层推导。
+   */
+  streamTexts?: string[];
+  /** 每推完一段文本后 await(测试据此控制节奏:确认 SSE 已收到才推下一段) */
+  onStreamText?: (text: string, index: number) => Promise<void>;
+  /**
+   * 取消剧本(第 8 阶段):signal 被 abort 时的行为。
+   * "cancelled" = 返回 {cancelled:true};"unconfirmed" = 抛 cancellationUnconfirmed();
+   * 省略 = signal abort 时直接返回 {cancelled:false}(按钮已不在 DOM)。
+   */
+  cancelBehaviour?: "cancelled" | "unconfirmed";
+  /** 取消时返回的部分回答内容 */
+  partialAnswer?: string;
+  /** confirmIdle 返回值;省略 = true */
+  confirmIdle?: boolean;
+  /** signal 被 abort 时通知测试(断言用) */
+  abortObserver?: () => void;
 }
 
 export const FAKE_CONVERSATION_URL = "https://gemini.google.com/app/f1e2d3c4b5a69788";
@@ -334,6 +388,8 @@ export class FakeGeminiAdapter implements GeminiAdapter {
   readonly openCalls: Array<string | null> = [];
   readonly runCalls: Array<{ prompt: string; existingUrl: string | null }> = [];
   readonly hookUrls: string[] = [];
+  /** 已推给 onText 的完整文本序列(流式用例断言用) */
+  readonly streamedTexts: string[] = [];
 
   constructor(private readonly behavior: FakeAdapterBehavior = {}) {}
 
@@ -359,16 +415,68 @@ export class FakeGeminiAdapter implements GeminiAdapter {
       await input.onConversationUrl(url);
       this.hookUrls.push(url);
     }
+    const streamTexts = this.behavior.streamTexts ?? [];
+    for (const [index, text] of streamTexts.entries()) {
+      // 取消信号检查:模拟真实 Adapter 在每轮 poll 开头检查 signal
+      if (input.signal?.aborted) {
+        this.behavior.abortObserver?.();
+        if (this.behavior.cancelBehaviour === "unconfirmed") {
+          const { cancellationUnconfirmed } = await import(
+            "../src/providers/gemini/gemini.errors.js"
+          );
+          throw cancellationUnconfirmed();
+        }
+        return {
+          answer: this.behavior.partialAnswer ?? streamTexts.at(-1) ?? "",
+          conversationUrl: url ?? "",
+          urlDetectedElapsedMs: url === null ? null : 5,
+          answerElapsedMs: 10,
+          cancelled: this.behavior.cancelBehaviour === "cancelled",
+        };
+      }
+      this.streamedTexts.push(text);
+      await input.onText?.(text);
+      // 测试在这里等待,确认 SSE 已经收到这一帧才推下一段
+      await this.behavior.onStreamText?.(text, index);
+    }
     if (this.behavior.hang) {
       // 永不 settle:只有 Scheduler 的 watchdog 能把这条 Request 收尾
+      // 但如果 signal 被 abort,也要响应
+      if (input.signal) {
+        await new Promise<void>((resolve) => {
+          if (input.signal!.aborted) {
+            resolve();
+          } else {
+            input.signal!.addEventListener("abort", () => resolve(), { once: true });
+          }
+        });
+        this.behavior.abortObserver?.();
+        if (this.behavior.cancelBehaviour === "unconfirmed") {
+          const { cancellationUnconfirmed } = await import(
+            "../src/providers/gemini/gemini.errors.js"
+          );
+          throw cancellationUnconfirmed();
+        }
+        return {
+          answer: this.behavior.partialAnswer ?? streamTexts.at(-1) ?? "",
+          conversationUrl: url ?? "",
+          urlDetectedElapsedMs: url === null ? null : 5,
+          answerElapsedMs: 10,
+          cancelled: this.behavior.cancelBehaviour === "cancelled",
+        };
+      }
       return new Promise<GeminiPromptResult>(() => undefined);
     }
     await this.behavior.beforeAnswer?.();
     return {
-      answer: this.behavior.answer ?? "fake answer",
+      answer: this.behavior.answer ?? streamTexts.at(-1) ?? "fake answer",
       conversationUrl: url ?? "",
       urlDetectedElapsedMs: url === null ? null : 5,
       answerElapsedMs: 10,
     };
+  }
+
+  async confirmIdle(): Promise<boolean> {
+    return this.behavior.confirmIdle ?? true;
   }
 }

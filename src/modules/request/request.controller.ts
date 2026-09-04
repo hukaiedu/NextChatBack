@@ -14,5 +14,16 @@ export function createRequestRouter(service: RequestService): Router {
     res.json({ data: request });
   });
 
+  // POST /api/requests/:id/cancel(prd §8.9)
+  router.post("/:id/cancel", async (req, res) => {
+    const params = parseOrThrow(requestParamSchema, req.params, "requestParams");
+    const outcome = await service.cancel(params.id);
+    if (outcome.kind === "cancelling") {
+      res.status(202).json({ data: outcome.request });
+      return;
+    }
+    res.json({ data: outcome.request });
+  });
+
   return router;
 }

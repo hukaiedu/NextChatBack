@@ -22,7 +22,12 @@ import { RequestRepository } from "./modules/request/request.repository.js";
 import { RequestService } from "./modules/request/request.service.js";
 import { RequestScheduler } from "./modules/request/request.scheduler.js";
 import { RequestRecovery } from "./modules/request/request.recovery.js";
+import { CancellationRegistry } from "./modules/request/request.cancellation.js";
 import { createRequestRouter } from "./modules/request/request.controller.js";
+import { GeminiStreamService } from "./modules/provider/gemini-stream.service.js";
+import { RequestEventEmitter } from "./modules/sse/event-emitter.js";
+import { createSseRouter } from "./modules/sse/sse.controller.js";
+import { SseService } from "./modules/sse/sse.service.js";
 
 export interface SchedulerConfig {
   /** PENDING 扫描周期(ms),默认 1000 */
@@ -33,6 +38,11 @@ export interface SchedulerConfig {
   autoStart?: boolean;
 }
 
+export interface StreamingConfig {
+  /** 流式回答期间 Assistant Message 的最小写库间隔(ms,env STREAMING_UPDATE_INTERVAL_MS),默认 300 */
+  updateIntervalMs?: number;
+}
+
 export interface AppDeps {
   prisma: PrismaClient;
   probeDatabase: HealthProbe;
@@ -40,6 +50,7 @@ export interface AppDeps {
   browserManager: BrowserManager;
   geminiAdapter: GeminiAdapter;
   scheduler?: SchedulerConfig;
+  streaming?: StreamingConfig;
 }
 
 /**
@@ -50,6 +61,12 @@ export interface AppHandle {
   app: Express;
   scheduler: RequestScheduler;
   recovery: RequestRecovery;
+  /** 第 6 阶段:SSE 连接登记表,关闭服务器前需要 closeAll() 结束长连接 */
+  sse: SseService;
+  /** 进程内 Request 事件总线(装配与测试观察用) */
+  events: RequestEventEmitter;
+  /** 第 8 阶段:取消通道登记表(测试可断言 abort 次数 / 有界性) */
+  cancellation: CancellationRegistry;
 }
 
 export function createApp(deps: AppDeps): AppHandle {
@@ -63,22 +80,42 @@ export function createApp(deps: AppDeps): AppHandle {
   app.use(HEALTH_PATH, createHealthRouter(deps));
 
   // 模块组装:Controller → Service → Scheduler → GeminiPromptService → Adapter(prd §3.1)
+  // 第 6 阶段的流式通道单向向外:RequestService / GeminiStreamService 发布, SSE 只订阅读取
   const conversationRepo = new ConversationRepository();
   const messageRepo = new MessageRepository();
   const requestRepo = new RequestRepository();
+  const events = new RequestEventEmitter();
 
   const conversationService = new ConversationService(deps.prisma, conversationRepo, requestRepo);
+  const cancellation = new CancellationRegistry();
   const requestService = new RequestService(
     deps.prisma,
     requestRepo,
     messageRepo,
     conversationRepo,
+    events,
+    cancellation,
   );
+  const messageService = new MessageService(
+    deps.prisma,
+    messageRepo,
+    conversationRepo,
+    requestRepo,
+    // scheduler 在下方创建:回调只在新 Request 提交后才运行,前向引用安全
+    { onRequestCreated: () => scheduler.notify() },
+  );
+  const geminiStreamService = new GeminiStreamService({
+    messageService,
+    events,
+    logger: deps.logger,
+    options: { updateIntervalMs: deps.streaming?.updateIntervalMs },
+  });
   const geminiPromptService = new GeminiPromptService(
     conversationService,
     deps.browserManager,
     deps.geminiAdapter,
     deps.logger,
+    geminiStreamService,
   );
   const scheduler = new RequestScheduler({
     prisma: deps.prisma,
@@ -88,6 +125,7 @@ export function createApp(deps: AppDeps): AppHandle {
     executor: geminiPromptService,
     browserManager: deps.browserManager,
     logger: deps.logger,
+    cancellation,
     options: {
       scanIntervalMs: deps.scheduler?.scanIntervalMs,
       executionTimeoutMs: deps.scheduler?.executionTimeoutMs,
@@ -99,13 +137,13 @@ export function createApp(deps: AppDeps): AppHandle {
     requestService,
     logger: deps.logger,
   });
-  const messageService = new MessageService(
-    deps.prisma,
+  const sse = new SseService({
+    prisma: deps.prisma,
+    requests: requestService,
     messageRepo,
-    conversationRepo,
-    requestRepo,
-    { onRequestCreated: () => scheduler.notify() },
-  );
+    events,
+    logger: deps.logger,
+  });
 
   app.use("/api/conversations", createConversationRouter(conversationService));
   app.use(
@@ -113,6 +151,8 @@ export function createApp(deps: AppDeps): AppHandle {
     createMessageRouter(messageService),
   );
   app.use("/api/requests", createRequestRouter(requestService));
+  // GET /api/requests/:id/events(第 6 阶段 SSE);与 REST 路由共用前缀
+  app.use("/api/requests", createSseRouter(sse));
   app.use("/api/provider", createProviderRouter(deps.browserManager));
 
   // 统一错误出口,必须最后挂载
@@ -122,5 +162,5 @@ export function createApp(deps: AppDeps): AppHandle {
     scheduler.start();
   }
 
-  return { app, scheduler, recovery };
+  return { app, scheduler, recovery, sse, events, cancellation };
 }

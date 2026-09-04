@@ -1,6 +1,6 @@
 import type { ModelRequestModel } from "../../generated/prisma/models.js";
 import type { DbClient } from "../../database/prisma.js";
-import { REQUEST_ACTIVE_STATUSES } from "./request.types.js";
+import { REQUEST_ACTIVE_STATUSES, REQUEST_IN_FLIGHT_STATUSES } from "./request.types.js";
 
 export interface ModelRequestCreateData {
   conversationId: string;
@@ -51,10 +51,10 @@ export class RequestRepository {
     });
   }
 
-  /** §12.1 启动恢复扫描:上一进程遗留的全部 PROCESSING(老到新,顺序稳定) */
-  async findProcessing(db: DbClient): Promise<ModelRequestModel[]> {
+  /** §12.1 启动恢复扫描:上一进程遗留的全部 PROCESSING|CANCELLING(老到新,顺序稳定) */
+  async findStaleInFlight(db: DbClient): Promise<ModelRequestModel[]> {
     return db.modelRequest.findMany({
-      where: { status: "PROCESSING" },
+      where: { status: { in: [...REQUEST_IN_FLIGHT_STATUSES] } },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     });
   }
@@ -68,16 +68,16 @@ export class RequestRepository {
     return result.count;
   }
 
-  /** 成功收尾:PROCESSING → SUCCESS(§12.10 成功事务的 Request 侧) */
+  /** 成功收尾:PROCESSING|CANCELLING → SUCCESS(§12.10 成功事务的 Request 侧) */
   async markSuccess(db: DbClient, id: string): Promise<number> {
     const result = await db.modelRequest.updateMany({
-      where: { id, status: "PROCESSING" },
+      where: { id, status: { in: [...REQUEST_IN_FLIGHT_STATUSES] } },
       data: { status: "SUCCESS", completedAt: new Date() },
     });
     return result.count;
   }
 
-  /** 失败收尾:PROCESSING → FAILED / TIMEOUT(§12.11) */
+  /** 失败收尾:PROCESSING|CANCELLING → FAILED / TIMEOUT(§12.11、§11.1) */
   async markFailed(
     db: DbClient,
     id: string,
@@ -86,8 +86,34 @@ export class RequestRepository {
     errorMessage: string,
   ): Promise<number> {
     const result = await db.modelRequest.updateMany({
-      where: { id, status: "PROCESSING" },
+      where: { id, status: { in: [...REQUEST_IN_FLIGHT_STATUSES] } },
       data: { status, errorCode, errorMessage, completedAt: new Date() },
+    });
+    return result.count;
+  }
+
+  /**
+   * 受理取消:PROCESSING → CANCELLING(prd §8.9)。
+   *
+   * 只动 Request 一侧 —— §11.4 规定 CANCELLING ↔ STREAMING,assistant 保持 STREAMING,
+   * 这样 Gemini 停止前已生成的尾部内容还能继续流式落库。
+   */
+  async markCancelling(db: DbClient, id: string): Promise<number> {
+    const result = await db.modelRequest.updateMany({
+      where: { id, status: "PROCESSING" },
+      data: { status: "CANCELLING" },
+    });
+    return result.count;
+  }
+
+  /**
+   * 取消落地:→ CANCELLED。一条原语覆盖 §8.9 的两个入口 ——
+   * PENDING(尚未交给 Gemini,直接取消)与 CANCELLING(已确认真正停止)。
+   */
+  async markCancelled(db: DbClient, id: string): Promise<number> {
+    const result = await db.modelRequest.updateMany({
+      where: { id, status: { in: ["PENDING", "CANCELLING"] } },
+      data: { status: "CANCELLED", completedAt: new Date() },
     });
     return result.count;
   }

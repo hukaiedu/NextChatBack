@@ -51,7 +51,13 @@ class PlaywrightContextHandle implements BrowserContextHandle {
 }
 
 class PlaywrightPageHandle implements BrowserPageHandle {
-  constructor(private readonly page: Page) {}
+  private crashed = false;
+
+  constructor(private readonly page: Page) {
+    page.on("crash", () => {
+      this.crashed = true;
+    });
+  }
 
   url(): string {
     return this.page.url();
@@ -70,6 +76,10 @@ class PlaywrightPageHandle implements BrowserPageHandle {
 
   isClosed(): boolean {
     return this.page.isClosed();
+  }
+
+  isCrashed(): boolean {
+    return this.crashed;
   }
 
   async countElements(selector: string): Promise<number> {
@@ -101,6 +111,12 @@ class PlaywrightPageHandle implements BrowserPageHandle {
     } catch {
       return null;
     }
+  }
+
+  async click(selector: string, options?: { timeoutMs?: number }): Promise<void> {
+    await this.page.locator(selector).first().click({
+      timeout: options?.timeoutMs,
+    });
   }
 
   async bringToFront(): Promise<void> {

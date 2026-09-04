@@ -1,5 +1,7 @@
 import { Router } from "express";
 
+import { AppError } from "../../common/errors/app-error.js";
+import { ErrorCodes } from "../../common/errors/error-codes.js";
 import { PROVIDER_GEMINI_WEB } from "../../config/constants.js";
 import type { BrowserManager } from "../../providers/gemini/browser-manager.js";
 
@@ -40,6 +42,13 @@ export function createProviderRouter(browserManager: BrowserManager): Router {
   });
 
   router.post("/restart", async (_req, res) => {
+    // 防运维手滑炸掉在飞的生成:Scheduler 走直接方法调用不受影响
+    if (browserManager.getStatus() === "BUSY") {
+      throw new AppError(
+        ErrorCodes.PROVIDER_NOT_READY,
+        "Cannot restart while a request is being processed",
+      );
+    }
     const status = await browserManager.restart();
     res.json({
       data: {

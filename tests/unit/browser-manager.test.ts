@@ -128,8 +128,9 @@ describe("BrowserManager 状态机(Fake Driver,不依赖真实浏览器/Google)"
     driver.latestContext!.lastPage!.emitCrashed();
     expect(manager.getStatus()).toBe("ERROR");
 
+    // ERROR 自愈:ensureGeminiPage 先 closeContext 再重建,所以 launchCount +1
     const status = await manager.openGemini();
-    expect(driver.launchCount).toBe(1);
+    expect(driver.launchCount).toBe(2);
     expect(status).toBe("READY");
   });
 

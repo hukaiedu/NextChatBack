@@ -36,6 +36,12 @@ export class BrowserManager {
   private page: BrowserPageHandle | null = null;
   /** 主动 stop 中:防止 context close 事件把状态覆盖成意外关闭 */
   private stopping = false;
+  /**
+   * 粘性故障码(第 8 阶段):Context/Page 崩溃时 adapter 先抛的是 pageClosed(),
+   * Scheduler 用此码提升为 PROVIDER_BROWSER_CRASHED,精确对齐 §12.2。
+   * takeProviderFault() 读并清;只由 bindContextEvents/bindPageEvents 写入。
+   */
+  private providerFault: string | null = null;
 
   private readonly checker: GeminiSessionChecker;
 
@@ -78,8 +84,12 @@ export class BrowserManager {
         throw new AppError(
           ErrorCodes.PROVIDER_NOT_READY,
           "browser is busy executing another request",
-          500,
         );
+      }
+      // 自愈:Chromium 僵死但 context 未 close → newPage() 永久挂住 → Scheduler 静默卡死。
+      // 先 closeContext 让 ensureContextStarted 重建干净的 Chromium。
+      if (this.state === "ERROR") {
+        await this.closeContext("self-heal from ERROR");
       }
       await this.ensureContextStarted();
       return this.ensureGeminiPage();
@@ -139,17 +149,18 @@ export class BrowserManager {
   requireGeminiPage(): BrowserPageHandle {
     const status = this.getStatus();
     if (status === "LOGIN_REQUIRED") {
-      throw new AppError(ErrorCodes.PROVIDER_LOGIN_REQUIRED, "Gemini login is required", 500);
+      throw new AppError(ErrorCodes.PROVIDER_LOGIN_REQUIRED, "Gemini login is required");
     }
     const page = this.page;
     if (!page || page.isClosed() || (status !== "READY" && status !== "BUSY")) {
-      throw new AppError(ErrorCodes.PROVIDER_NOT_READY, "Gemini page is not ready", 500);
+      throw new AppError(ErrorCodes.PROVIDER_NOT_READY, "Gemini page is not ready");
     }
     return page;
   }
 
   /** Scheduler 执行 Request 期间置 BUSY:阻止 openGemini 导航毁掉进行中的生成 */
   setBusy(): void {
+    this.providerFault = null;
     this.transitionTo("BUSY");
   }
 
@@ -157,6 +168,25 @@ export class BrowserManager {
     if (this.state === "BUSY") {
       this.transitionTo("READY");
     }
+  }
+
+  /**
+   * 非抛出版取页:closed/缺失返回 null。
+   * Adapter.confirmIdle 用此方法避免 requireGeminiPage 在崩溃后抛错。
+   */
+  peekGeminiPage(): BrowserPageHandle | null {
+    const page = this.page;
+    if (!page || page.isClosed()) {
+      return null;
+    }
+    return page;
+  }
+
+  /** 读并清粘性故障码;null = 无故障 */
+  takeProviderFault(): string | null {
+    const fault = this.providerFault;
+    this.providerFault = null;
+    return fault;
   }
 
   // ---------------------------------------------------------------------------
@@ -215,7 +245,6 @@ export class BrowserManager {
         throw new AppError(
           ErrorCodes.PROVIDER_PROFILE_IN_USE,
           "Browser profile is in use by another process",
-          500,
           err,
         );
       }
@@ -223,7 +252,6 @@ export class BrowserManager {
       throw new AppError(
         ErrorCodes.PROVIDER_BROWSER_START_FAILED,
         "Failed to start browser",
-        500,
         err,
       );
     }
@@ -235,6 +263,7 @@ export class BrowserManager {
         return;
       }
       this.logger.warn({ from: this.state }, "browser context closed unexpectedly");
+      this.providerFault = ErrorCodes.PROVIDER_BROWSER_CRASHED;
       this.context = null;
       this.page = null;
       this.transitionTo("STOPPED");
@@ -245,7 +274,7 @@ export class BrowserManager {
   private async ensureGeminiPage(): Promise<BrowserProviderStatus> {
     const context = this.context;
     if (!context || context.isClosed()) {
-      throw new AppError(ErrorCodes.PROVIDER_NOT_READY, "Browser is not ready", 500);
+      throw new AppError(ErrorCodes.PROVIDER_NOT_READY, "Browser is not ready");
     }
 
     let page = this.page;
@@ -265,7 +294,6 @@ export class BrowserManager {
       throw new AppError(
         ErrorCodes.PROVIDER_NAVIGATION_FAILED,
         "Failed to open Gemini page",
-        500,
         err,
       );
     }
@@ -291,9 +319,10 @@ export class BrowserManager {
         return;
       }
       this.logger.error(
-        { code: ErrorCodes.PROVIDER_PAGE_CRASHED },
+        { code: ErrorCodes.PROVIDER_BROWSER_CRASHED, fault: "page-crash" },
         "gemini page crashed",
       );
+      this.providerFault = ErrorCodes.PROVIDER_BROWSER_CRASHED;
       this.page = null;
       this.transitionTo("ERROR");
     });
