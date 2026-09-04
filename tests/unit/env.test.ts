@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { AppError } from "../../src/common/errors/app-error.js";
+import { ErrorCodes } from "../../src/common/errors/error-codes.js";
 import { parseEnv } from "../../src/config/env.js";
 
 const base: NodeJS.ProcessEnv = {
@@ -39,5 +41,56 @@ describe("parseEnv", () => {
 
   it("LOG_LEVEL 非法时抛错", () => {
     expect(() => parseEnv({ ...base, LOG_LEVEL: "chatty" })).toThrow(/LOG_LEVEL/);
+  });
+});
+
+// ISSUE-03:REQUEST_EXECUTION_TIMEOUT_MS 与 GEMINI_RESPONSE_TIMEOUT_MS 的跨字段约束。
+// 执行 watchdog 上限必须严格高于单次 Prompt 响应上限;相等或更小都非法,
+// 启动即 VALIDATION_ERROR + fail-fast(不能只写在注释里)。
+describe("parseEnv 超时跨字段约束(ISSUE-03)", () => {
+  it("EXEC > RESPONSE → PASS", () => {
+    const env = parseEnv({
+      ...base,
+      GEMINI_RESPONSE_TIMEOUT_MS: "300000",
+      REQUEST_EXECUTION_TIMEOUT_MS: "300001",
+    });
+    expect(env.GEMINI_RESPONSE_TIMEOUT_MS).toBe(300_000);
+    expect(env.REQUEST_EXECUTION_TIMEOUT_MS).toBe(300_001);
+  });
+
+  it("EXEC = RESPONSE → FAIL(相等同样非法)", () => {
+    expect(() =>
+      parseEnv({
+        ...base,
+        GEMINI_RESPONSE_TIMEOUT_MS: "300000",
+        REQUEST_EXECUTION_TIMEOUT_MS: "300000",
+      }),
+    ).toThrow(/REQUEST_EXECUTION_TIMEOUT_MS must be greater than GEMINI_RESPONSE_TIMEOUT_MS/);
+  });
+
+  it("EXEC < RESPONSE → FAIL(验收计划示例 200000 < 300000)", () => {
+    expect(() =>
+      parseEnv({
+        ...base,
+        GEMINI_RESPONSE_TIMEOUT_MS: "300000",
+        REQUEST_EXECUTION_TIMEOUT_MS: "200000",
+      }),
+    ).toThrow(/REQUEST_EXECUTION_TIMEOUT_MS/);
+  });
+
+  it("非法配置抛 AppError(VALIDATION_ERROR) 且 HTTP 400,fail-fast", () => {
+    let caught: unknown = null;
+    try {
+      parseEnv({
+        ...base,
+        GEMINI_RESPONSE_TIMEOUT_MS: "300000",
+        REQUEST_EXECUTION_TIMEOUT_MS: "300000",
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AppError);
+    expect((caught as AppError).code).toBe(ErrorCodes.VALIDATION_ERROR);
+    expect((caught as AppError).statusCode).toBe(400);
   });
 });

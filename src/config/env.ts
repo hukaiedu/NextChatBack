@@ -35,7 +35,17 @@ const envSchema = z.object({
    * 只节流数据库压力:SSE 事件按每次回答文本变化立即推送,不等落库。
    */
   STREAMING_UPDATE_INTERVAL_MS: z.coerce.number().int().min(0).default(300),
-});
+}).refine(
+  // 跨字段约束(ISSUE-03):执行 watchdog 上限必须严格高于单次 Prompt 响应上限,
+  // 否则 watchdog 可能早于 Adapter 自身超时触发,把正常执行误判成 TIMEOUT。
+  // 相等同样非法(必须严格大于)。违反 → VALIDATION_ERROR + fail-fast。
+  (env) => env.REQUEST_EXECUTION_TIMEOUT_MS > env.GEMINI_RESPONSE_TIMEOUT_MS,
+  {
+    message:
+      "REQUEST_EXECUTION_TIMEOUT_MS must be greater than GEMINI_RESPONSE_TIMEOUT_MS",
+    path: ["REQUEST_EXECUTION_TIMEOUT_MS"],
+  },
+);
 
 export type Env = z.infer<typeof envSchema>;
 

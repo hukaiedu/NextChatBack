@@ -32,3 +32,11 @@ logs/*
 
 # generated docs / baseline reports
 docs/
+
+# IDE
+.idea/
+
+# acceptance harness & evidence (kept on disk, intentionally not versioned per project SCM convention)
+scripts/acceptance/
+acceptance-artifacts/
+data/acceptance/

@@ -8,7 +8,7 @@ import type {
   BrowserProviderStatus,
 } from "./browser-driver.js";
 import { GeminiSessionChecker } from "./session-checker.js";
-import { normalizeConversationUrl } from "./gemini.selectors.js";
+import { extractConversationId } from "./gemini.selectors.js";
 
 export interface BrowserManagerOptions {
   driver: BrowserDriver;
@@ -328,7 +328,9 @@ export class BrowserManager {
     }
 
     this.logger.info(
-      { url: normalizeConversationUrl(page.url()) ?? "(unparseable)" },
+      // prd §14 / ISSUE-02:不记未脱敏会话 URL。Gemini 可能将 /app 重定向到 /app/<id>,
+      // 故只记「是否落在具体会话」的布尔信号,不记 URL / conversation id。
+      { onConversation: extractConversationId(page.url()) !== null },
       "gemini page open",
     );
     return this.refreshStatusFromPage();

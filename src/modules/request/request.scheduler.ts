@@ -197,7 +197,8 @@ export class RequestScheduler {
             requestId: pending.id,
             conversationId: pending.conversationId,
             answerLength: outcome.result.answer.length,
-            conversationUrl: outcome.result.conversationUrl,
+            // prd §14 / ISSUE-02:不记未脱敏的 Provider 会话 URL(含 Gemini conversation id)。
+            // 需定位时凭 conversationId 查库,日志只保留长度类非敏感字段。
           },
           "request completed",
         );
