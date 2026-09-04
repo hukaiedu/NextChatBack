@@ -25,6 +25,12 @@ const DEFAULT_EXECUTION_TIMEOUT_MS = 600_000;
 const ABANDON_GRACE_MS = 15_000;
 /** confirmIdle 超时(ms):页面僵死时不能让 releaseSlot 永久挂住 */
 const CONFIRM_IDLE_TIMEOUT_MS = 5_000;
+/**
+ * 关闭族异常分类的事件收敛窗口(ms):close/crash 事件是异步的,执行异常可能先到
+ * (§8.8,长稳实测事件在异常后 ~27ms 落地)。仅「关闭族」原始异常才等待,
+ * 正常失败路径零延迟。
+ */
+const SETTLE_CLOSE_EVENTS_MS = 250;
 
 export interface RequestSchedulerDeps {
   prisma: PrismaClient;
@@ -198,16 +204,7 @@ export class RequestScheduler {
       }
     } catch (err) {
       const appErr = err instanceof AppError ? err : undefined;
-      // 故障归属优先级(§8.8 Context 关闭竞态):
-      // ① 粘性故障码:Context/Page 崩溃事件已先于异常到达;
-      // ② 原始异常文案识别:close 事件是异步的,执行异常可能先到,
-      //    缺这层会把 Context 崩溃漏成 INTERNAL_ERROR(长稳 108 轮出现 1 次);
-      // ③ AppError 自带错误码;④ 兜底 INTERNAL_ERROR。
-      const code =
-        this.deps.browserManager.takeProviderFault() ??
-        (isContextClosedError(err) ? ErrorCodes.PROVIDER_BROWSER_CRASHED : undefined) ??
-        appErr?.code ??
-        ErrorCodes.INTERNAL_ERROR;
+      const code = await this.classifyExecutorError(err, appErr);
       const message =
         appErr?.message ??
         (err instanceof Error ? err.message : "unexpected executor failure");
@@ -230,6 +227,39 @@ export class RequestScheduler {
       await this.releaseSlot();
     }
     return true;
+  }
+
+  /**
+   * 执行异常 → 错误码(§8.8 Context 关闭竞态)。
+   *
+   * ① 粘性故障码:Context/Page close/crash 事件已先于异常落地(读并清);
+   * ② 非「关闭族」异常:AppError 用自带码,否则兜底 INTERNAL_ERROR;
+   * ③ 「关闭族」原始异常(Playwright "Target page, context or browser has been closed"
+   *    等文案为 Page 单独关闭与 Context 崩溃共用,不得按文案归类):给 Manager 的
+   *    close/crash 事件一个有界收敛窗口后按状态裁定 —— Context 已死/有粘性码 →
+   *    PROVIDER_BROWSER_CRASHED;仅 Gemini Page 关闭 → PROVIDER_PAGE_CLOSED;
+   *    窗口内无信号 → 按 AppError 码或兜底(维持旧语义)。
+   */
+  private async classifyExecutorError(
+    err: unknown,
+    appErr: AppError | undefined,
+  ): Promise<string> {
+    const sticky = this.deps.browserManager.takeProviderFault();
+    if (sticky !== null) {
+      return sticky;
+    }
+    if (!isContextClosedError(err)) {
+      return appErr?.code ?? ErrorCodes.INTERNAL_ERROR;
+    }
+    const outcome = await this.deps.browserManager.settleCloseEvents(SETTLE_CLOSE_EVENTS_MS);
+    if (outcome === "crashed") {
+      this.deps.browserManager.takeProviderFault();
+      return ErrorCodes.PROVIDER_BROWSER_CRASHED;
+    }
+    if (outcome === "page-closed") {
+      return ErrorCodes.PROVIDER_PAGE_CLOSED;
+    }
+    return appErr?.code ?? ErrorCodes.INTERNAL_ERROR;
   }
 
   /**

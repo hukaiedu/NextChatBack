@@ -189,6 +189,35 @@ export class BrowserManager {
     return fault;
   }
 
+  /**
+   * 等待关闭类事件收敛(§8.8 异常分类用):onClose/onCrash 是异步事件,执行异常可能先到。
+   * 短暂轮询内部状态,任一信号落地立即返回;窗口耗尽返回 "none"。
+   * - "crashed":粘性故障码已写入,或 Context 已不存在/已关闭(崩溃、断开、意外关闭)
+   * - "page-closed":Context 仍存活而 Gemini Page 已关闭(用户单独关页)
+   * - "none":窗口内无任何信号(调用方维持原语义兜底)
+   */
+  async settleCloseEvents(timeoutMs: number): Promise<"crashed" | "page-closed" | "none"> {
+    const stepMs = 10;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (this.providerFault !== null) {
+        return "crashed";
+      }
+      if (!this.context || this.context.isClosed()) {
+        return "crashed";
+      }
+      if (!this.page || this.page.isClosed()) {
+        return "page-closed";
+      }
+      if (Date.now() >= deadline) {
+        return "none";
+      }
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, Math.min(stepMs, deadline - Date.now())),
+      );
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // 内部实现
   // ---------------------------------------------------------------------------

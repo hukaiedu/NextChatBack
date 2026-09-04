@@ -70,15 +70,15 @@ export function cancellationUnconfirmed(): AppError {
 }
 
 /**
- * Playwright 原始异常中「Context/浏览器进程已关闭或崩溃」的识别(§8.8 竞态)。
+ * Playwright 原始异常的「关闭族」检测(§8.8 竞态)。
  *
- * Context 崩溃时,BrowserManager 的 PROVIDER_BROWSER_CRASHED 粘性故障码要等
- * onClose/onCrash 事件异步写入;执行异常可能先于事件到达 Scheduler,只认粘性码
- * 会漏成 INTERNAL_ERROR(长稳 108 轮出现 1 次)。按 Playwright 关闭/崩溃文案识别,
- * 并下钻 cause 链(adapter 会把原始异常包进 domChanged/navigationFailed 的 cause),
- * 让「事件先到」与「异常先到」两种顺序都稳定归类 PROVIDER_BROWSER_CRASHED。
- * 只匹配框架文案,不匹配业务消息(pageClosed() 的 "Gemini page was closed" 等),
- * 主动关页不会误判成进程崩溃。
+ * Context/浏览器崩溃断开、以及 Gemini Page 被单独关闭时,Playwright 都可能直接抛出
+ * 这类文案(如 "Target page, context or browser has been closed")—— 文案无法区分
+ * 两者,因此本函数只负责「是否属于关闭族」,归类由 Scheduler 结合 BrowserManager
+ * 的 Page/Context 状态与 sticky fault 裁定(仅 Page 关闭 → PROVIDER_PAGE_CLOSED,
+ * Context/浏览器崩溃断开 → PROVIDER_BROWSER_CRASHED)。
+ * 检测下钻 cause 链(adapter 会把原始异常包进 domChanged/navigationFailed 的 cause)。
+ * 只匹配框架文案,不匹配业务消息(pageClosed() 的 "Gemini page was closed" 等)。
  */
 const CONTEXT_CLOSED_MARKERS = [
   "target closed",

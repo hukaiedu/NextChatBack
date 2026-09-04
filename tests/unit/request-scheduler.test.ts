@@ -246,13 +246,18 @@ describe("RequestScheduler(单进程串行调度,Fake Adapter + 真 SQLite)", ()
   });
 
   // ---------------------------------------------------------------------------
-  // §8.8 Context 关闭竞态:执行异常先于 BrowserManager 的 close 事件到达时,
-  // 粘性故障码尚未写入,靠原始异常文案识别,稳定归类 PROVIDER_BROWSER_CRASHED
+  // §8.8 Context 关闭竞态:close/crash 事件是异步的,执行异常可能先于事件到达。
+  // "Target page, context or browser has been closed" 等文案为 Page 单独关闭与
+  // Context 崩溃共用,归类必须按 BrowserManager 的 Page/Context 状态裁定,
+  // 不得按文案一刀切成 Browser Crash。
   // ---------------------------------------------------------------------------
 
-  it("Context 关闭竞态:裸 Playwright 关闭异常先到(无粘性故障码)→ PROVIDER_BROWSER_CRASHED 而非 INTERNAL_ERROR", async () => {
+  it("竞态:裸 Target page... 异常先抛,Context close 事件晚 10ms 落地 → PROVIDER_BROWSER_CRASHED", async () => {
     await mount({
       runError: new Error("Target page, context or browser has been closed"),
+      beforeRunError: () => {
+        setTimeout(() => driver.latestContext?.emitClosed(), 10);
+      },
     });
     const seeded = await seedPending("问题");
 
@@ -262,17 +267,67 @@ describe("RequestScheduler(单进程串行调度,Fake Adapter + 真 SQLite)", ()
     expect(request?.status).toBe("FAILED");
     expect(request?.errorCode).toBe(ErrorCodes.PROVIDER_BROWSER_CRASHED);
     expect(request?.errorMessage).toBe("Target page, context or browser has been closed");
-    // close 事件从未到达:粘性故障码自始至终为空,归类完全靠异常识别
+    // 粘性码已被分类读并清,不残留到下一条请求
     expect(manager.takeProviderFault()).toBeNull();
   });
 
-  it("识别下钻 cause 链:adapter 把 Context 关闭包进 AppError(如 domChanged)同样归类 PROVIDER_BROWSER_CRASHED", async () => {
+  it("误分类边界:裸 Target page... 异常 + 仅 Gemini Page 关闭(Context 存活)→ PROVIDER_PAGE_CLOSED", async () => {
+    await mount({
+      runError: new Error("Target page, context or browser has been closed"),
+      beforeRunError: () => {
+        setTimeout(() => driver.latestContext?.lastPage?.emitClosed(), 10);
+      },
+    });
+    const seeded = await seedPending("问题");
+
+    await ctx.scheduler!.runOnce();
+
+    const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
+    expect(request?.status).toBe("FAILED");
+    expect(request?.errorCode).toBe(ErrorCodes.PROVIDER_PAGE_CLOSED);
+    // Page 单独关闭不写粘性码:故障不会以崩溃形式残留
+    expect(manager.takeProviderFault()).toBeNull();
+  });
+
+  it("竞态:裸 Target crashed 异常 + Page renderer crash 事件晚 10ms 落地 → PROVIDER_BROWSER_CRASHED", async () => {
+    await mount({
+      runError: new Error("Target crashed"),
+      beforeRunError: () => {
+        setTimeout(() => driver.latestContext?.lastPage?.emitCrashed(), 10);
+      },
+    });
+    const seeded = await seedPending("问题");
+
+    await ctx.scheduler!.runOnce();
+
+    const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
+    expect(request?.status).toBe("FAILED");
+    expect(request?.errorCode).toBe(ErrorCodes.PROVIDER_BROWSER_CRASHED);
+  });
+
+  it("裸关闭族异常 + 窗口内无任何事件落地 → INTERNAL_ERROR 兜底(等待有界,维持旧语义)", async () => {
+    await mount({
+      runError: new Error("Target page, context or browser has been closed"),
+    });
+    const seeded = await seedPending("问题");
+
+    await ctx.scheduler!.runOnce();
+
+    const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
+    expect(request?.status).toBe("FAILED");
+    expect(request?.errorCode).toBe(ErrorCodes.INTERNAL_ERROR);
+  });
+
+  it("cause 链:adapter 把 Context 崩溃包进 domChanged,close 事件晚 10ms 落地 → PROVIDER_BROWSER_CRASHED", async () => {
     await mount({
       runError: new AppError(
         ErrorCodes.PROVIDER_DOM_CHANGED,
         "Gemini page does not match expected structure: composer is not editable",
         new Error("Target closed"),
       ),
+      beforeRunError: () => {
+        setTimeout(() => driver.latestContext?.emitClosed(), 10);
+      },
     });
     const seeded = await seedPending("问题");
 
@@ -313,7 +368,7 @@ describe("RequestScheduler(单进程串行调度,Fake Adapter + 真 SQLite)", ()
   });
 });
 
-describe("isContextClosedError(Playwright Context-closed 文案识别,§8.8)", () => {
+describe("isContextClosedError(Playwright 关闭族文案检测,§8.8)", () => {
   it("命中各类 Playwright 关闭/崩溃文案", () => {
     expect(isContextClosedError(new Error("Target closed"))).toBe(true);
     expect(

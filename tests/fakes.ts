@@ -356,6 +356,8 @@ export interface FakeAdapterBehavior {
   answer?: string;
   openError?: unknown;
   runError?: unknown;
+  /** 抛 runError 前一拍触发(测试在此编排「close/crash 事件晚于异常落地」的竞态时序) */
+  beforeRunError?: () => void;
   /** 落库钩子 await 完成之后、返回回答之前执行(测试在此读库取顺序证据) */
   beforeAnswer?: () => Promise<void>;
   /** 落库之后永不返回(模拟执行器挂死):用于验证 Scheduler 的 execution watchdog */
@@ -403,6 +405,7 @@ export class FakeGeminiAdapter implements GeminiAdapter {
   async runPrompt(input: GeminiPromptRunInput): Promise<GeminiPromptResult> {
     this.runCalls.push({ prompt: input.prompt, existingUrl: input.existingUrl });
     if (this.behavior.runError !== undefined) {
+      this.behavior.beforeRunError?.();
       throw this.behavior.runError;
     }
     const callIndex = this.runCalls.length - 1;
