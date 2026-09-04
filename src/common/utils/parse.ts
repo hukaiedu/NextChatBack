@@ -14,7 +14,7 @@ export function parseOrThrow<T extends z.ZodTypeAny>(
     const detail = result.error.issues
       .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
       .join("; ");
-    throw new AppError(ErrorCodes.VALIDATION_ERROR, `${label}: ${detail}`, 400);
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, `${label}: ${detail}`);
   }
   return result.data;
 }

@@ -35,7 +35,7 @@ export class ConversationService {
   async getById(id: string): Promise<ConversationModel> {
     const conversation = await this.conversationRepo.findById(this.prisma, id);
     if (!conversation || conversation.status === "DELETED") {
-      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
     }
     return conversation;
   }
@@ -48,10 +48,10 @@ export class ConversationService {
   async getWritableById(id: string): Promise<ConversationModel> {
     const conversation = await this.conversationRepo.findById(this.prisma, id);
     if (!conversation) {
-      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
     }
     if (conversation.status === "DELETED") {
-      throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted", 409);
+      throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted");
     }
     return conversation;
   }
@@ -73,10 +73,10 @@ export class ConversationService {
   async update(id: string, patch: { title?: string; status?: "ACTIVE" | "ARCHIVED" }): Promise<ConversationModel> {
     const conversation = await this.conversationRepo.findById(this.prisma, id);
     if (!conversation) {
-      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
     }
     if (conversation.status === "DELETED") {
-      throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted", 409);
+      throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted");
     }
     // ACTIVE → ARCHIVED 归档前:存在活动 Request 时禁止归档(prd §8.4)
     if (patch.status && patch.status !== conversation.status && conversation.status === "ACTIVE") {
@@ -85,7 +85,6 @@ export class ConversationService {
         throw new AppError(
           ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
           "Conversation has a request in progress",
-          409,
         );
       }
     }
@@ -95,7 +94,7 @@ export class ConversationService {
         status: patch.status,
       });
       if (!updated) {
-        throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+        throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
       }
       return updated;
     } catch (err) {
@@ -104,7 +103,6 @@ export class ConversationService {
         throw new AppError(
           ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
           "Conversation has a request in progress",
-          409,
           err,
         );
       }
@@ -123,10 +121,10 @@ export class ConversationService {
       return await this.prisma.$transaction(async (tx) => {
         const conversation = await this.conversationRepo.findById(tx, id);
         if (!conversation) {
-          throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+          throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
         }
         if (conversation.status === "DELETED") {
-          throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted", 409);
+          throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted");
         }
         if (conversation.providerConversationUrl !== null) {
           if (conversation.providerConversationUrl === url) {
@@ -135,7 +133,6 @@ export class ConversationService {
           throw new AppError(
             ErrorCodes.PROVIDER_CONVERSATION_UNAVAILABLE,
             "Conversation is already bound to another provider conversation",
-            409,
           );
         }
 
@@ -160,7 +157,6 @@ export class ConversationService {
         throw new AppError(
           ErrorCodes.PROVIDER_CONVERSATION_UNAVAILABLE,
           "Provider conversation is already bound to another conversation",
-          409,
           err,
         );
       }
@@ -172,10 +168,10 @@ export class ConversationService {
   async softDelete(id: string): Promise<void> {
     const conversation = await this.conversationRepo.findById(this.prisma, id);
     if (!conversation) {
-      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
+      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
     }
     if (conversation.status === "DELETED") {
-      throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted", 409);
+      throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted");
     }
     const hasActive = await this.requestRepo.hasActive(this.prisma, id);
     if (hasActive) {
@@ -196,7 +192,6 @@ export class ConversationService {
         throw new AppError(
           ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
           "Conversation has a request in progress",
-          409,
           err,
         );
       }
@@ -218,18 +213,18 @@ function decodeCursor(raw: string): { updatedAt: Date; id: string } {
   try {
     parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
   } catch {
-    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor", 400);
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor");
   }
   if (typeof parsed !== "object" || parsed === null) {
-    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor", 400);
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor");
   }
   const value = parsed as { u?: unknown; i?: unknown };
   if (typeof value.u !== "string" || typeof value.i !== "string") {
-    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor", 400);
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor");
   }
   const updatedAt = new Date(value.u);
   if (Number.isNaN(updatedAt.getTime())) {
-    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor", 400);
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor");
   }
   return { updatedAt, id: value.i };
 }

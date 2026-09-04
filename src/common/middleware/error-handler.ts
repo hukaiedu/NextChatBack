@@ -39,19 +39,14 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
 
     let appErr: AppError;
     if (isBodyParseError(err)) {
-      appErr = new AppError(
-        ErrorCodes.VALIDATION_ERROR,
-        "Invalid JSON body",
-        400,
-        err,
-      );
+      appErr = new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid JSON body", err);
     } else if (isDatabaseError(err)) {
-      appErr = new AppError(ErrorCodes.DATABASE_ERROR, "Database error", 500, err);
+      appErr = new AppError(ErrorCodes.DATABASE_ERROR, "Database error", err);
     } else {
       appErr =
         err instanceof AppError
           ? err
-          : new AppError(ErrorCodes.INTERNAL_ERROR, "Internal server error", 500, err);
+          : new AppError(ErrorCodes.INTERNAL_ERROR, "Internal server error", err);
     }
 
     // requestId 必须与 x-request-id 响应头一致
