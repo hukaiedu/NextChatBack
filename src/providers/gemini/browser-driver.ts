@@ -18,6 +18,12 @@ export type BrowserProviderStatus =
   | "BUSY" // 正在执行业务(第 5 阶段进入,枚举先建立)
   | "ERROR"; // Browser / Context / Page 初始化失败或异常
 
+/** M2:单个元素的可读快照(text = innerText;attrs 仅含调用方请求的属性) */
+export interface BrowserElementSnapshot {
+  text: string | null;
+  attrs: Record<string, string | null>;
+}
+
 export interface BrowserPageHandle {
   url(): string;
   /** 导航到目标地址;失败抛错(由 BrowserManager 映射 PROVIDER_NAVIGATION_FAILED) */
@@ -27,6 +33,12 @@ export interface BrowserPageHandle {
   bringToFront(): Promise<void>;
   /** 返回匹配 selector 的当前元素数量(登录检测等轻量 DOM 判断用,不做交互) */
   countElements(selector: string): Promise<number>;
+  /**
+   * M2:读取所有匹配元素的文本与白名单属性(模型菜单逐项读取用)。
+   * text = innerText;attrs 只含 options.attrs 里请求的键,元素上不存在的属性为 null。
+   * 页面已死(关闭/崩溃)时抛错由调用方按故障语义分类;单个元素读取失败只影响该元素字段。
+   */
+  readAll(selector: string, options?: { attrs?: string[] }): Promise<BrowserElementSnapshot[]>;
   /** 写入输入框;目标不存在或不可编辑时抛错(由调用方映射 PROVIDER_DOM_CHANGED) */
   fill(selector: string, value: string): Promise<void>;
   /** 在目标元素上按下按键(如 Enter 提交) */
@@ -35,6 +47,11 @@ export interface BrowserPageHandle {
   lastInnerText(selector: string): Promise<string | null>;
   /** 点击第一个匹配元素;目标不存在时抛错(由调用方映射 PROVIDER_DOM_CHANGED) */
   click(selector: string, options?: { timeoutMs?: number }): Promise<void>;
+  /**
+   * M2:点击第 index 个匹配元素。调用方必须先 readAll 枚举再按 index 定位,
+   * 禁止把 opaque key(data-mode-id)拼进 selector。
+   */
+  clickNth(selector: string, index: number, options?: { timeoutMs?: number }): Promise<void>;
   /** renderer 是否已崩溃(与 isClosed 语义独立:crash 后 page 可能仍未 close) */
   isCrashed(): boolean;
   /** 页面被关闭(用户手动关闭 / 导航替换等) */

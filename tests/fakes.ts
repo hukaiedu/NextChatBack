@@ -5,6 +5,7 @@ import { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import type {
   BrowserContextHandle,
   BrowserDriver,
+  BrowserElementSnapshot,
   BrowserPageHandle,
 } from "../src/providers/gemini/browser-driver.js";
 import type {
@@ -12,11 +13,69 @@ import type {
   GeminiModelCatalog,
   GeminiPromptResult,
   GeminiPromptRunInput,
+  ResolvedGeminiModel,
 } from "../src/providers/gemini/gemini.types.js";
-import { GEMINI_SELECTORS } from "../src/providers/gemini/gemini.selectors.js";
+import { GEMINI_MODEL_SELECTORS, GEMINI_SELECTORS } from "../src/providers/gemini/gemini.selectors.js";
 
 const GEMINI_BASE_URL = "https://gemini.google.com/app";
 const LOGIN_URL = "https://accounts.google.com/signin/v2";
+
+/** M2:单个模型菜单项剧本(数组顺序即菜单 DOM 顺序) */
+export interface FakeModelOptionScript {
+  /** data-mode-id(Provider 不透明键,可含任意字符);省略 = 元素缺失该属性(读回 null) */
+  key?: string;
+  /** innerText(可含多行;Adapter 只取首个非空行作 label) */
+  label: string;
+  selected?: boolean;
+  /** aria-disabled="true"(缺省 = "false",非禁用) */
+  ariaDisabled?: boolean;
+  /** disabled 布尔属性存在(getAttribute 读到 "") */
+  disabledAttr?: boolean;
+  /** 追加到 class 的 token(如 "disabled";selected 恒在) */
+  classTokens?: string[];
+  /** 额外属性(如 data-active),仅当被请求时返回 */
+  extraAttrs?: Record<string, string>;
+}
+
+/** M2:模型选择菜单剧本(未配置 = 页面没有模型选择器,trigger 点击无效) */
+export interface FakeModelPickerScript {
+  options: FakeModelOptionScript[];
+  /** 初始即打开(默认关闭) */
+  initiallyOpen?: boolean;
+  /** 点 trigger 能否打开菜单(默认 true;false 模拟「trigger 在但菜单打不开」) */
+  opensOnClick?: boolean;
+  /**
+   * 点击选项后的结果(默认 "switch" = 菜单自动关闭并切换选中态,M0 实测语义):
+   * - "close-only":菜单关闭但选中态不变(切换未生效,靠重开验证发现)
+   * - "noop":什么都不发生(菜单保持打开 → 等不可见超时)
+   * - "throw":点击抛错(模拟元素不可点)
+   * - "disconnect"(FIX-05):点击瞬间 Browser 断连,抛 "browser has disconnected"
+   *   且不置任何页面标志(连接先死、flags 未落地竞态)
+   */
+  onClickOption?: "switch" | "close-only" | "noop" | "throw" | "disconnect";
+  /** 点击选项时同步调用(测试在此 abort,构造「点击后取消」时序) */
+  onOptionClick?: () => void;
+  /** readAll 时同步调用(测试在此 abort,构造「打开菜单/读取后、点击前取消」时序) */
+  onReadAll?: () => void;
+  /**
+   * FIX-02:前 N 次 countElements(modeOption) 返回 0(模拟容器先出现、选项后渲染);
+   * 不配置 = 选项随容器即时出现
+   */
+  optionLagReads?: number;
+  /** FIX-02:每次 countElements(modeOption) 时同步调用(测试在此关闭/崩溃页面) */
+  onOptionCount?: () => void;
+  /**
+   * FIX-01:readAll 在菜单打开且命中 modeOption 时,于元素映射阶段模拟页面死亡并
+   * 抛 Playwright 关闭族异常(locator.all() 已成功 → 元素读取时页面关闭/崩溃);
+   * "disconnected" 为 FIX-04 边界:抛 Browser 断连关闭族异常但不置页面关闭/崩溃
+   * 标志(连接先死、页面状态尚未落地的竞态)
+   */
+  failElementRead?: "closed" | "crash" | "disconnected";
+  /** FIX-05:点 modeTrigger 时抛 "browser has disconnected"(不置页面标志,菜单不打开) */
+  failTriggerClick?: "disconnected";
+  /** FIX-05:countElements(modeOption) 时抛 "browser has disconnected"(不置页面标志) */
+  failOptionCount?: "disconnected";
+}
 
 /** FakePage 的可编程页面状态(第 4 阶段 Adapter 测试用) */
 export interface FakePageScript {
@@ -48,6 +107,8 @@ export interface FakePageScript {
     domCounts?: Record<string, number>;
     answerTexts?: string[];
   };
+  /** M2:模型选择菜单剧本 */
+  modelPicker?: FakeModelPickerScript;
 }
 
 /** Fake Page:goto 可模拟"重定向到 Google 登录页"或"同域未登录(显示 Sign in)" */
@@ -68,11 +129,20 @@ export class FakePage implements BrowserPageHandle {
   private turnSamples: number[];
   private afterSend: FakePageScript["afterSend"];
   private afterStopClick: FakePageScript["afterStopClick"];
+  /** M2:模型菜单状态(由 modelPicker 剧本驱动) */
+  private readonly modelPicker: FakeModelPickerScript | null;
+  private modelMenuOpen = false;
+  private modelOptions: FakeModelOptionScript[] = [];
+  /** FIX-02:剩余的「选项未渲染」读数次数 */
+  private optionLagRemaining = 0;
   /** 断言用调用记录 */
   gotoCalls: string[] = [];
   fillCalls: { selector: string; value: string }[] = [];
   pressCalls: { selector: string; key: string }[] = [];
   clickCalls: string[] = [];
+  /** M2 调用记录:readAll / clickNth 依次记下 selector 与参数 */
+  readAllCalls: Array<{ selector: string; attrs: string[] | undefined }> = [];
+  clickNthCalls: Array<{ selector: string; index: number }> = [];
   /** fill 时水合剧本尚未吐出的计数个数(null = 未配置水合剧本) */
   rampPendingAtFill: number | null = null;
   lastInnerTextCalls = 0;
@@ -93,6 +163,11 @@ export class FakePage implements BrowserPageHandle {
     this.turnSamples = [...(script.turnSamples ?? [])];
     this.afterSend = script.afterSend;
     this.afterStopClick = script.afterStopClick;
+    this.modelPicker = script.modelPicker ?? null;
+    this.modelMenuOpen = script.modelPicker?.initiallyOpen ?? false;
+    // 深拷贝选项:clickNth 会改写 selected,不能污染共享的剧本对象
+    this.modelOptions = (script.modelPicker?.options ?? []).map((option) => ({ ...option }));
+    this.optionLagRemaining = script.modelPicker?.optionLagReads ?? 0;
   }
 
   url(): string {
@@ -113,6 +188,28 @@ export class FakePage implements BrowserPageHandle {
   async countElements(selector: string): Promise<number> {
     if (this.closedFlag) {
       return 0;
+    }
+    if (selector === GEMINI_MODEL_SELECTORS.modeMenu) {
+      return this.modelMenuOpen ? 1 : 0;
+    }
+    if (selector === GEMINI_MODEL_SELECTORS.modeOption) {
+      if (this.modelPicker?.failOptionCount !== undefined) {
+        // FIX-05:连接先死、flags 未落地——不置任何标志,直接抛断连文案
+        throw new Error("browser has disconnected");
+      }
+      this.modelPicker?.onOptionCount?.();
+      // 钩子若在本次计数中关闭/崩溃页面,真实 Playwright 的 count 会失败(driver 降级 0)
+      if (this.closedFlag || this.crashedFlag) {
+        return 0;
+      }
+      if (!this.modelMenuOpen) {
+        return 0;
+      }
+      if (this.optionLagRemaining > 0) {
+        this.optionLagRemaining -= 1;
+        return 0;
+      }
+      return this.modelOptions.length;
     }
     if (selector === GEMINI_SELECTORS.userTurn && this.turnSamples.length > 0) {
       // 最后一条不消费:重复返回,让调用方观察到轮次计数停止变化
@@ -204,6 +301,19 @@ export class FakePage implements BrowserPageHandle {
     if (this.throwOnClickSelectors.includes(selector)) {
       throw new Error(`element '${selector}' is not clickable`);
     }
+    if (selector === GEMINI_MODEL_SELECTORS.modeTrigger && this.modelPicker !== null) {
+      if (this.modelPicker.failTriggerClick !== undefined) {
+        // FIX-05:点击瞬间断连,flags 未落地,菜单也不打开
+        throw new Error("browser has disconnected");
+      }
+      // trigger 是开关:开→关、关→开(M0 实测);opensOnClick=false 时点击无效
+      if (this.modelMenuOpen) {
+        this.modelMenuOpen = false;
+      } else if (this.modelPicker.opensOnClick !== false) {
+        this.modelMenuOpen = true;
+      }
+      return;
+    }
     const stop = this.afterStopClick;
     if (stop) {
       if (stop.domCounts) {
@@ -212,6 +322,94 @@ export class FakePage implements BrowserPageHandle {
       if (stop.answerTexts) {
         this.answerTexts = [...stop.answerTexts];
       }
+    }
+  }
+
+  async readAll(
+    selector: string,
+    options?: { attrs?: string[] },
+  ): Promise<BrowserElementSnapshot[]> {
+    this.readAllCalls.push({ selector, attrs: options?.attrs });
+    this.modelPicker?.onReadAll?.();
+    if (selector !== GEMINI_MODEL_SELECTORS.modeOption || !this.modelMenuOpen) {
+      return [];
+    }
+    if (this.modelPicker?.failElementRead !== undefined) {
+      // FIX-01:locator.all() 已成功,元素读取阶段页面才死亡——真实 Playwright
+      // 对已关/已崩页面的 innerText/getAttribute 抛关闭族异常,不得降级成 null
+      const mode = this.modelPicker.failElementRead;
+      if (mode === "closed") {
+        this.emitClosed();
+      } else if (mode === "crash") {
+        this.emitCrashed();
+      }
+      // "disconnected":不置任何页面标志——连接先死、页面状态未落地(FIX-04 边界)
+      throw new Error(
+        mode === "disconnected" ? "browser has disconnected" : "Target page, context or browser has been closed",
+      );
+    }
+    return this.modelOptions.map((option) => ({
+      text: option.label,
+      attrs: this.modelOptionAttrs(option, options?.attrs ?? []),
+    }));
+  }
+
+  /** 只回请求的属性;元素上不存在的属性为 null(真实 getAttribute 语义) */
+  private modelOptionAttrs(
+    option: FakeModelOptionScript,
+    requested: string[],
+  ): Record<string, string | null> {
+    const available: Record<string, string | null> = {
+      "data-mode-id": option.key ?? null,
+      class: ["gem-menu-item", option.selected ? "selected" : null, ...(option.classTokens ?? [])]
+        .filter(Boolean)
+        .join(" "),
+      "aria-disabled": option.ariaDisabled === true ? "true" : "false",
+      disabled: option.disabledAttr === true ? "" : null,
+      ...option.extraAttrs,
+    };
+    const record: Record<string, string | null> = {};
+    for (const name of requested) {
+      record[name] = Object.hasOwn(available, name) ? (available[name] ?? null) : null;
+    }
+    return record;
+  }
+
+  async clickNth(selector: string, index: number, _options?: { timeoutMs?: number }): Promise<void> {
+    if (this.closedFlag || this.crashedFlag) {
+      // 真实 Playwright 对已关/已崩页面点击会抛关闭族异常
+      throw new Error("Target page, context or browser has been closed");
+    }
+    this.clickNthCalls.push({ selector, index });
+    if (selector !== GEMINI_MODEL_SELECTORS.modeOption) {
+      return;
+    }
+    if (!this.modelMenuOpen) {
+      throw new Error(`model menu is not open; cannot click option index ${index}`);
+    }
+    const option = this.modelOptions[index];
+    if (!option) {
+      throw new Error(`no model option at index ${index}`);
+    }
+    this.modelPicker?.onOptionClick?.();
+    switch (this.modelPicker?.onClickOption ?? "switch") {
+      case "throw":
+        throw new Error(`element '${selector}' [${index}] is not clickable`);
+      case "disconnect":
+        // FIX-05:点击瞬间断连,flags 未落地(菜单/选中态都不变,但主流程已中断)
+        throw new Error("browser has disconnected");
+      case "noop":
+        return;
+      case "close-only":
+        this.modelMenuOpen = false;
+        return;
+      case "switch":
+        // M0:点击选项后菜单自动关闭,选中态即时切到被点项
+        this.modelMenuOpen = false;
+        for (const candidate of this.modelOptions) {
+          candidate.selected = candidate.key === option.key;
+        }
+        return;
     }
   }
 
@@ -386,6 +584,8 @@ export interface FakeAdapterBehavior {
   modelCatalog?: GeminiModelCatalog;
   /** listModels 抛出的错误;优先于 modelCatalog */
   listModelsError?: unknown;
+  /** ensureModel 抛出的错误(signal 未 abort 时);省略 = 从目录查 label 直接返回 */
+  ensureModelError?: unknown;
 }
 
 export const FAKE_CONVERSATION_URL = "https://gemini.google.com/app/f1e2d3c4b5a69788";
@@ -409,6 +609,8 @@ export class FakeGeminiAdapter implements GeminiAdapter {
   readonly streamedTexts: string[] = [];
   /** listModels 被调用的次数(测试断言用) */
   listModelsCalls = 0;
+  /** ensureModel 收到的模型键序列(测试断言用) */
+  readonly ensureModelCalls: string[] = [];
 
   constructor(private readonly behavior: FakeAdapterBehavior = {}) {}
 
@@ -506,5 +708,17 @@ export class FakeGeminiAdapter implements GeminiAdapter {
       throw this.behavior.listModelsError;
     }
     return this.behavior.modelCatalog ?? FAKE_MODEL_CATALOG;
+  }
+
+  async ensureModel(requestedModelKey: string, signal?: AbortSignal): Promise<ResolvedGeminiModel> {
+    this.ensureModelCalls.push(requestedModelKey);
+    // 与真实 Adapter 相同的取消语义:abort 后立即停止,抛出 signal.reason
+    signal?.throwIfAborted();
+    if (this.behavior.ensureModelError !== undefined) {
+      throw this.behavior.ensureModelError;
+    }
+    const catalog = this.behavior.modelCatalog ?? FAKE_MODEL_CATALOG;
+    const found = catalog.models.find((model) => model.key === requestedModelKey);
+    return { key: requestedModelKey, label: found?.label ?? requestedModelKey };
   }
 }

@@ -1,20 +1,23 @@
 import type { Logger } from "../../common/logger/logger.js";
+import type { AppError } from "../../common/errors/app-error.js";
 import type { BrowserManager } from "./browser-manager.js";
-import type { BrowserPageHandle } from "./browser-driver.js";
+import type { BrowserElementSnapshot, BrowserPageHandle } from "./browser-driver.js";
 import {
   browserCrashed,
   cancellationUnconfirmed,
   conversationUnavailable,
   domChanged,
+  isContextClosedError,
   loginRequired,
+  modelSwitchFailed,
+  modelUnavailable,
   navigationFailed,
   pageClosed,
   responseTimeout,
 } from "./gemini.errors.js";
-import { AppError } from "../../common/errors/app-error.js";
-import { ErrorCodes } from "../../common/errors/error-codes.js";
 import {
   extractConversationId,
+  GEMINI_MODEL_SELECTORS,
   GEMINI_SELECTORS,
   isSameConversation,
   normalizeConversationUrl,
@@ -23,8 +26,10 @@ import type {
   GeminiAdapter,
   GeminiAdapterOptions,
   GeminiModelCatalog,
+  GeminiModelOption,
   GeminiPromptResult,
   GeminiPromptRunInput,
+  ResolvedGeminiModel,
 } from "./gemini.types.js";
 import { isGeminiOriginUrl } from "./session-checker.js";
 
@@ -37,6 +42,7 @@ const DEFAULTS = {
   pollIntervalMs: 400,
   stableWindowMs: 1_500,
   stopConfirmTimeoutMs: 10_000,
+  modelMenuTimeoutMs: 5_000,
 } as const;
 
 /**
@@ -50,6 +56,16 @@ const FILL_SETTLE_MS = 300;
  * 否则第一个不可见候选会把整个确认窗口耗光。
  */
 const STOP_CLICK_TIMEOUT_MS = 1_000;
+
+/**
+ * 模型菜单内单次点击(trigger 开合、选项)的预算:与停止按钮同理,候选/重试的
+ * 轮换与验证逻辑需要每次点击有界,菜单状态等待由 modelMenuTimeoutMs 单独覆盖。
+ */
+/** 真机实测:刚导航完 Angular 头部仍在水合,1s 内 trigger 常不可点(M0 采样同款 5s 先例) */
+const MODEL_CLICK_TIMEOUT_MS = 5_000;
+
+/** §十一:模型菜单项一次 readAll 请求的属性集(机器 key / class / 禁用判据) */
+const MODEL_OPTION_ATTRS = ["data-mode-id", "class", "aria-disabled", "disabled"] as const;
 
 export interface GeminiWebAdapterDeps {
   manager: BrowserManager;
@@ -89,6 +105,8 @@ export class GeminiWebAdapter implements GeminiAdapter {
       stableWindowMs: deps.options.stableWindowMs ?? DEFAULTS.stableWindowMs,
       stopConfirmTimeoutMs:
         deps.options.stopConfirmTimeoutMs ?? DEFAULTS.stopConfirmTimeoutMs,
+      modelMenuTimeoutMs:
+        deps.options.modelMenuTimeoutMs ?? DEFAULTS.modelMenuTimeoutMs,
     };
   }
 
@@ -230,8 +248,8 @@ export class GeminiWebAdapter implements GeminiAdapter {
         return this.stopGeneration(page, lastText, baseline, startedAt);
       }
 
-      // 崩溃检测:renderer crash 后 page.isClosed() 仍可能为 false,
-      // countElements/lastInnerText 吞异常返回 0/null → 不检查就会盲等到 responseTimeoutMs
+      // 崩溃检测:renderer crash 后 page.isClosed() 仍可能为 false → 不检查就会
+      // 盲等到 responseTimeoutMs(关闭族异常由 snapshot 上抛,走 Scheduler §8.8 收敛)
       if (page.isCrashed()) {
         throw browserCrashed("renderer-crash");
       }
@@ -373,7 +391,7 @@ export class GeminiWebAdapter implements GeminiAdapter {
   /**
    * 确认 Gemini 页面当前没有正在进行的生成。
    * page 为 null/closed/crashed → true(不存在「仍在进行的生成」,交给 gate 惰性重建)。
-   * countElements 吞异常返回 0 的特性在这里正好:崩溃页 → 0 === 0 → true。
+   * snapshot 抛错(含崩溃页的关闭族异常)被下方 catch 兜住 → true。
    */
   async confirmIdle(): Promise<boolean> {
     const page = this.deps.manager.peekGeminiPage();
@@ -389,12 +407,312 @@ export class GeminiWebAdapter implements GeminiAdapter {
   }
 
   /**
-   * M1 占位:真实目录读取推迟到 M2(需要 BrowserPageHandle 的 readAll/clickNth 能力)。
-   * 按契约「尚未实现」不属于模型切换失败 —— PROVIDER_MODEL_SWITCH_FAILED 的正式语义
-   * 是「目标模型存在且可操作,但点击后无法确认切换成功」(M2 才建立抛点),这里抛 INTERNAL_ERROR。
+   * 读取模型目录(M2 §八~§十七):先查菜单是否已打开(不假设关闭),必要时点 trigger
+   * 打开;一次 readAll 后按 class token 解析;退出前统一恢复页面(菜单不可见)。
+   *
+   * 结构性异常(菜单打不开 / 缺 data-mode-id / 重复 key / 无有效 label / 多个 selected)
+   * → PROVIDER_DOM_CHANGED —— 尚未发生切换,绝不报 MODEL_SWITCH_FAILED。
+   * 关闭失败:主逻辑已有异常时只记日志不覆盖;主逻辑成功时按 DOM_CHANGED 处理,
+   * 不允许静默留下打开的菜单(§十)。
    */
   async listModels(): Promise<GeminiModelCatalog> {
-    throw new AppError(ErrorCodes.INTERNAL_ERROR, "model catalog reading is not implemented until M2");
+    const page = this.deps.manager.requireGeminiPage();
+    await this.openModelMenu(page);
+
+    let outcome: { catalog: GeminiModelCatalog } | { error: unknown };
+    try {
+      outcome = { catalog: await this.readModelCatalog(page) };
+    } catch (err) {
+      outcome = { error: err };
+    }
+
+    let closeFailed = false;
+    try {
+      closeFailed = !(await this.closeModelMenu(page));
+    } catch (closeErr) {
+      if (!("error" in outcome)) {
+        // 页面 crash/closed 是真实故障,原样上抛
+        throw closeErr;
+      }
+      this.logger.warn(
+        { err: closeErr },
+        "gemini model menu close failed while handling a primary error",
+      );
+    }
+    if ("error" in outcome) {
+      throw outcome.error;
+    }
+    if (closeFailed) {
+      this.assertNotLoggedOut(page);
+      throw domChanged("model menu did not close");
+    }
+    return outcome.catalog;
+  }
+
+  /**
+   * 确保页面选中目标模型并返回确认结果(M2 §十八~§二十三)。
+   *
+   * 与 runPrompt 的关键差异:这里全程不导航、不读会话 URL(M0 实测切换不改变 URL);
+   * 切换后绝不能因「click 没抛错」就认为成功,必须重开菜单重读 selected 确认。
+   * abort 检查点:进入 / 打开菜单前 / 点击前 / 点击后 / 重新验证前(§二十三)。
+   */
+  async ensureModel(requestedModelKey: string, signal?: AbortSignal): Promise<ResolvedGeminiModel> {
+    // 检查点 1:进入时。abort 后一个 DOM 操作都不做
+    signal?.throwIfAborted();
+    const page = this.deps.manager.requireGeminiPage();
+
+    // 检查点 2:打开菜单前
+    signal?.throwIfAborted();
+    await this.openModelMenu(page);
+
+    const catalog = await this.readModelCatalog(page);
+    const targetIndex = catalog.models.findIndex((model) => model.key === requestedModelKey);
+    const target = targetIndex === -1 ? undefined : catalog.models[targetIndex];
+    if (target === undefined || target.disabled) {
+      // 目标不存在 / 明确禁用:不可达目标,不是切换失败(§二十二)
+      await this.closeModelMenuQuietly(page);
+      throw modelUnavailable(requestedModelKey);
+    }
+
+    if (target.selected) {
+      // 已是目标模型:不点击,恢复页面后直接返回
+      const closed = await this.closeModelMenu(page);
+      if (!closed) {
+        this.assertNotLoggedOut(page);
+        throw domChanged("model menu did not close");
+      }
+      return { key: target.key, label: target.label };
+    }
+
+    // 检查点 3:点击目标前
+    signal?.throwIfAborted();
+    try {
+      await page.clickNth(GEMINI_MODEL_SELECTORS.modeOption, targetIndex, {
+        timeoutMs: MODEL_CLICK_TIMEOUT_MS,
+      });
+    } catch (err) {
+      // 页面故障(含断连竞态,FIX-05)保持自身语义,绝不包装成 MODEL_SWITCH_FAILED(§二十四)
+      const lifecycle = this.lifecycleError(page, err);
+      if (lifecycle) {
+        throw lifecycle;
+      }
+      this.assertNotLoggedOut(page);
+      throw modelSwitchFailed("target model option click failed", err);
+    }
+
+    // 检查点 4:点击后。abort 则不再做任何 DOM 操作(包括等菜单关闭与关闭菜单)
+    signal?.throwIfAborted();
+    // M0:点击选项后菜单自动关闭;关不掉说明点击未被页面接受,无法确认切换
+    const hidden = await this.waitForModelMenuHidden(page, Date.now() + this.opts.modelMenuTimeoutMs);
+    if (!hidden) {
+      await this.closeModelMenuQuietly(page);
+      throw modelSwitchFailed("model menu did not close after clicking the target option");
+    }
+
+    // 检查点 5:重新验证前(§二十:重开菜单 → 重读 → selected 必须唯一且等于目标)
+    signal?.throwIfAborted();
+    await this.openModelMenu(page);
+    const verified = await this.readModelCatalog(page);
+    const selected = verified.models.find((model) => model.selected);
+    if (selected === undefined || selected.key !== requestedModelKey) {
+      await this.closeModelMenuQuietly(page);
+      throw modelSwitchFailed(
+        `selected model after switch is ${selected?.key ?? "none"}, expected ${requestedModelKey}`,
+      );
+    }
+    const resolvedLabel = selected.label;
+
+    const closed = await this.closeModelMenu(page);
+    if (!closed) {
+      this.assertNotLoggedOut(page);
+      throw domChanged("model menu did not close");
+    }
+    return { key: requestedModelKey, label: resolvedLabel };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 模型菜单内部实现(M2)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * FIX-05:页面生命周期错误消歧的唯一入口。页面已关闭 / 已 crash / 错误本身是
+   * 关闭族文案(如 "browser has disconnected")但页面状态尚未落地的断连竞态,
+   * 统一收敛为 PAGE_CLOSED / BROWSER_CRASHED;未命中返回 null,调用方走原语义
+   * (登录失效消歧、DOM_CHANGED / MODEL_SWITCH_FAILED 等)。
+   * 断连竞态归 BROWSER_CRASHED 的依据:error-codes.ts「一进程 = 一 context」,
+   * browser/context 级死亡都是 BROWSER_CRASHED,页面单独关闭由 isClosed 先行捕获。
+   */
+  private lifecycleError(page: BrowserPageHandle, err: unknown): AppError | null {
+    if (page.isClosed()) {
+      return pageClosed();
+    }
+    if (page.isCrashed()) {
+      return browserCrashed("renderer-crash-during-model-menu");
+    }
+    if (isContextClosedError(err)) {
+      return browserCrashed("browser-disconnected-during-model-catalog", err);
+    }
+    return null;
+  }
+
+  /**
+   * FIX-05:模型菜单路径上的 countElements 统一包装 —— driver 会把关闭族异常
+   * 原样上抛(不再降级 0),在此收敛为生命周期错误码,否则断连会被轮询等成
+   * "model menu contains no model options" 之类的 DOM_CHANGED。
+   */
+  private async countMenuElements(page: BrowserPageHandle, selector: string): Promise<number> {
+    try {
+      return await page.countElements(selector);
+    } catch (err) {
+      const lifecycle = this.lifecycleError(page, err);
+      if (lifecycle) {
+        throw lifecycle;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * 一次 readAll(modeOption) + 解析(FIX-01/FIX-04):读取/解析阶段的页面故障在此
+   * 消歧,消歧规则统一走 lifecycleError(§九)。
+   */
+  private async readModelCatalog(page: BrowserPageHandle): Promise<GeminiModelCatalog> {
+    try {
+      return parseModelCatalog(
+        await page.readAll(GEMINI_MODEL_SELECTORS.modeOption, { attrs: [...MODEL_OPTION_ATTRS] }),
+      );
+    } catch (err) {
+      const lifecycle = this.lifecycleError(page, err);
+      if (lifecycle) {
+        throw lifecycle;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * 确保模型菜单可见且选项已渲染(§九 + FIX-02):已打开直接用;否则点 trigger 并在
+   * 有限窗口内等它出现。菜单容器(data-visible)先于 gem-menu-item 渲染,而
+   * locator.all() 不等待,因此可见后还要等至少一个 modeOption 出现,随后的
+   * readAll(modeOption) 才保证只执行一次且非空。
+   */
+  private async openModelMenu(page: BrowserPageHandle): Promise<void> {
+    if (page.isCrashed()) {
+      throw browserCrashed("renderer-crash-during-model-menu");
+    }
+    if (page.isClosed()) {
+      throw pageClosed();
+    }
+    if ((await this.countMenuElements(page, GEMINI_MODEL_SELECTORS.modeMenu)) === 0) {
+      try {
+        await page.click(GEMINI_MODEL_SELECTORS.modeTrigger, { timeoutMs: MODEL_CLICK_TIMEOUT_MS });
+      } catch (err) {
+        // 点击失败先消歧:页面故障(lifecycleError,含断连竞态)与登录失效,
+        // 不能一律报 DOM 变更(§二十四 + FIX-05)
+        const lifecycle = this.lifecycleError(page, err);
+        if (lifecycle) {
+          throw lifecycle;
+        }
+        this.assertNotLoggedOut(page);
+        throw domChanged("model menu trigger is not clickable", err);
+      }
+      const deadline = Date.now() + this.opts.modelMenuTimeoutMs;
+      let visible = false;
+      while (Date.now() < deadline) {
+        if (page.isCrashed()) {
+          throw browserCrashed("renderer-crash-during-model-menu");
+        }
+        if (page.isClosed()) {
+          throw pageClosed();
+        }
+        if ((await this.countMenuElements(page, GEMINI_MODEL_SELECTORS.modeMenu)) > 0) {
+          visible = true;
+          break;
+        }
+        await sleep(this.opts.pollIntervalMs);
+      }
+      if (!visible) {
+        this.assertNotLoggedOut(page);
+        throw domChanged("model menu did not open");
+      }
+    }
+    // FIX-02:容器可见 ≠ 选项渲染完成。等至少一个选项出现;期间页面关闭/崩溃
+    // 保持自身错误码,登录失效在超时出口消歧;始终无选项 → DOM_CHANGED
+    const optionDeadline = Date.now() + this.opts.modelMenuTimeoutMs;
+    while (true) {
+      if (page.isCrashed()) {
+        throw browserCrashed("renderer-crash-during-model-menu");
+      }
+      if (page.isClosed()) {
+        throw pageClosed();
+      }
+      if ((await this.countMenuElements(page, GEMINI_MODEL_SELECTORS.modeOption)) > 0) {
+        return;
+      }
+      if (Date.now() >= optionDeadline) {
+        break;
+      }
+      await sleep(this.opts.pollIntervalMs);
+    }
+    this.assertNotLoggedOut(page);
+    throw domChanged("model menu contains no model options");
+  }
+
+  /** 关闭模型菜单(再点 trigger,§十)并确认不可见;返回 false = 窗口内无法确认关闭 */
+  private async closeModelMenu(page: BrowserPageHandle): Promise<boolean> {
+    if (page.isCrashed()) {
+      throw browserCrashed("renderer-crash-during-model-menu");
+    }
+    if (page.isClosed()) {
+      throw pageClosed();
+    }
+    if ((await this.countMenuElements(page, GEMINI_MODEL_SELECTORS.modeMenu)) === 0) {
+      return true;
+    }
+    try {
+      await page.click(GEMINI_MODEL_SELECTORS.modeTrigger, { timeoutMs: MODEL_CLICK_TIMEOUT_MS });
+    } catch (err) {
+      // 关闭路径中的页面故障(含断连竞态,FIX-05)是真实故障,上抛收敛为错误码,
+      // 不得静默降级成 "menu did not close" 的 DOM_CHANGED;普通点击失败仍走 false
+      const lifecycle = this.lifecycleError(page, err);
+      if (lifecycle) {
+        throw lifecycle;
+      }
+      this.logger.warn({ err }, "gemini model menu trigger click failed while closing");
+      return false;
+    }
+    return this.waitForModelMenuHidden(page, Date.now() + this.opts.modelMenuTimeoutMs);
+  }
+
+  /** 失败路径上的收尾:尽力恢复页面(菜单不可见),绝不覆盖主错误 */
+  private async closeModelMenuQuietly(page: BrowserPageHandle): Promise<void> {
+    try {
+      const closed = await this.closeModelMenu(page);
+      if (!closed) {
+        this.logger.warn("gemini model menu did not close while recovering from an error");
+      }
+    } catch (err) {
+      this.logger.warn({ err }, "gemini model menu close failed while recovering from an error");
+    }
+  }
+
+  private async waitForModelMenuHidden(
+    page: BrowserPageHandle,
+    deadline: number,
+  ): Promise<boolean> {
+    while (Date.now() < deadline) {
+      if (page.isCrashed()) {
+        throw browserCrashed("renderer-crash-during-model-menu");
+      }
+      if (page.isClosed()) {
+        throw pageClosed();
+      }
+      if ((await this.countMenuElements(page, GEMINI_MODEL_SELECTORS.modeMenu)) === 0) {
+        return true;
+      }
+      await sleep(this.opts.pollIntervalMs);
+    }
+    return false;
   }
 
   private async hasComposer(page: BrowserPageHandle): Promise<boolean> {
@@ -449,4 +767,72 @@ async function clickStopButton(page: BrowserPageHandle): Promise<boolean> {
     }
   }
   return false;
+}
+
+/**
+ * §十三:innerText 的首个非空行。菜单项实际是「标题行 + 描述行」(如
+ * "3.1 Pro\nRaciocínio avançado"),label 只取标题,绝不把描述拼进去。
+ */
+function firstNonEmptyLine(text: string | null): string | null {
+  if (text === null) {
+    return null;
+  }
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.length > 0) {
+      return line;
+    }
+  }
+  return null;
+}
+
+/**
+ * §十一~§十六:把菜单项快照解析成 catalog。
+ * 任何结构性异常(空菜单 / 缺 data-mode-id / 重复 key / 无有效 label / 多个 selected)
+ * 都抛 PROVIDER_DOM_CHANGED,禁止猜测补全;selected 以 class token 判定,
+ * data-active / tabindex / aria-label 一概不参与(§十四)。
+ */
+function parseModelCatalog(snapshots: BrowserElementSnapshot[]): GeminiModelCatalog {
+  if (snapshots.length === 0) {
+    throw domChanged("model menu has no options");
+  }
+  const models: GeminiModelOption[] = [];
+  const seenKeys = new Set<string>();
+  let selectedKey: string | null = null;
+  let selectedCount = 0;
+  for (const snap of snapshots) {
+    const key = (snap.attrs["data-mode-id"] ?? "").trim();
+    if (key.length === 0) {
+      throw domChanged("model option has no data-mode-id");
+    }
+    if (seenKeys.has(key)) {
+      throw domChanged("duplicate data-mode-id in model menu");
+    }
+    seenKeys.add(key);
+    const label = firstNonEmptyLine(snap.text);
+    if (label === null) {
+      throw domChanged("model option has no readable label");
+    }
+    const classTokens = (snap.attrs["class"] ?? "").split(/\s+/).filter(Boolean);
+    const selected = classTokens.includes("selected");
+    if (selected) {
+      selectedCount += 1;
+      selectedKey = key;
+    }
+    models.push({
+      key,
+      label,
+      selected,
+      // §十五:aria-disabled="true" / disabled 属性存在 / class 含 disabled token;
+      // aria-disabled="false" 不算禁用
+      disabled:
+        snap.attrs["aria-disabled"] === "true" ||
+        snap.attrs["disabled"] != null ||
+        classTokens.includes("disabled"),
+    });
+  }
+  if (selectedCount > 1) {
+    throw domChanged("multiple selected model options");
+  }
+  return { models, currentModelKey: selectedKey };
 }

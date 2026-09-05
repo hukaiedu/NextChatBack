@@ -16,6 +16,8 @@ export interface GeminiAdapterOptions {
   stableWindowMs?: number;
   /** 点击停止按钮后等「三条件确认」的上限(生产默认 10s;单测压毫秒级) */
   stopConfirmTimeoutMs?: number;
+  /** M2:打开/关闭模型菜单、以及切换后确认菜单状态的窗口上限(生产默认 5s) */
+  modelMenuTimeoutMs?: number;
 }
 
 /** 一次 Prompt 执行的输入 */
@@ -82,6 +84,15 @@ export interface GeminiModelCatalog {
 }
 
 /**
+ * M2:ensureModel 确认完成后的「已解析模型」。
+ * key = provider 机器键(data-mode-id),label = 确认时最新目录里的展示名(本地化,仅展示)。
+ */
+export interface ResolvedGeminiModel {
+  key: string;
+  label: string;
+}
+
+/**
  * Gemini 页面自动化契约(prd §3.1:URL / DOM / Selector / 输入 / 回答读取)。
  * 抽成接口是为了 Scheduler 与服务层能注入 Fake 做无浏览器测试。
  */
@@ -99,8 +110,19 @@ export interface GeminiAdapter {
    */
   confirmIdle(): Promise<boolean>;
   /**
-   * M1:读取当前会话页面可用的模型目录(打开模型菜单 → 逐项读取 → 关闭菜单)。
-   * 页面未就绪 / DOM 变更 / 菜单操作失败 → PROVIDER_MODEL_SWITCH_FAILED。
+   * M2:读取当前会话页面可用的模型目录(先查菜单是否已打开,再点 trigger 打开 →
+   * 一次 readAll → 关闭菜单恢复页面)。结构性异常(菜单打不开 / 缺 data-mode-id /
+   * 重复 key / 无有效 label / 多个 selected)→ PROVIDER_DOM_CHANGED —— 尚未发生切换,
+   * 不使用 PROVIDER_MODEL_SWITCH_FAILED;登录失效与页面故障保持各自错误码。
    */
   listModels(): Promise<GeminiModelCatalog>;
+  /**
+   * M2:确保页面当前选中的模型是 requestedModelKey,返回确认后的模型。
+   * 参数必须是 string:requestModelKey == null 属于 V1 兼容模式,M3 会完全跳过
+   * ensureModel,本方法不处理 null(模型菜单 DOM 改版不得影响未选模型的普通 V1 聊天)。
+   * 目标不存在 / 明确禁用 → PROVIDER_MODEL_UNAVAILABLE;
+   * 点击后无法在确认窗口内验证选中态 → PROVIDER_MODEL_SWITCH_FAILED;
+   * signal 被 abort → 立即停止后续 DOM 操作并抛出 signal.reason(终态收敛由 M3 负责)。
+   */
+  ensureModel(requestedModelKey: string, signal?: AbortSignal): Promise<ResolvedGeminiModel>;
 }

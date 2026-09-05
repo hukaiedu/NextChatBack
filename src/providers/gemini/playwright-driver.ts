@@ -1,9 +1,11 @@
 import { chromium } from "playwright";
 import type { BrowserContext, Page } from "playwright";
 
+import { isContextClosedError } from "./gemini.errors.js";
 import type {
   BrowserContextHandle,
   BrowserDriver,
+  BrowserElementSnapshot,
   BrowserPageHandle,
 } from "./browser-driver.js";
 
@@ -50,7 +52,8 @@ class PlaywrightContextHandle implements BrowserContextHandle {
   }
 }
 
-class PlaywrightPageHandle implements BrowserPageHandle {
+/** FIX-01 单测需要直接构造本句柄(最小 Fake Page 驱动 readAll 的元素读取阶段) */
+export class PlaywrightPageHandle implements BrowserPageHandle {
   private crashed = false;
 
   constructor(private readonly page: Page) {
@@ -85,9 +88,45 @@ class PlaywrightPageHandle implements BrowserPageHandle {
   async countElements(selector: string): Promise<number> {
     try {
       return await this.page.locator(selector).count();
-    } catch {
+    } catch (err) {
+      // 与 readAll 同一语义(FIX-05):关闭族异常原样上抛,由 Adapter 收敛为
+      // 页面生命周期错误码;普通瞬态失败(计数间隙元素树变动等)仍降级 0
+      if (isContextClosedError(err)) {
+        throw err;
+      }
       return 0;
     }
+  }
+
+  async readAll(
+    selector: string,
+    options?: { attrs?: string[] },
+  ): Promise<BrowserElementSnapshot[]> {
+    const attrs = options?.attrs ?? [];
+    const elements = await this.page.locator(selector).all();
+    const snapshots: BrowserElementSnapshot[] = [];
+    for (const element of elements) {
+      // 单个元素读取失败(读取间隙被移除等)只影响该元素对应字段;
+      // 但读取阶段页面关闭/崩溃必须原样上抛——页面生命周期故障不得降级成 null,
+      // 否则调用方会把 PAGE_CLOSED/BROWSER_CRASHED 误判成 DOM_CHANGED(FIX-01)
+      const text = await element.innerText().catch((err: unknown) => {
+        if (isContextClosedError(err)) {
+          throw err;
+        }
+        return null;
+      });
+      const record: Record<string, string | null> = {};
+      for (const name of attrs) {
+        record[name] = await element.getAttribute(name).catch((err: unknown) => {
+          if (isContextClosedError(err)) {
+            throw err;
+          }
+          return null;
+        });
+      }
+      snapshots.push({ text, attrs: record });
+    }
+    return snapshots;
   }
 
   /** Playwright fill 会派发 input 事件,可驱动 Angular/Quill 内容变更 */
@@ -115,6 +154,12 @@ class PlaywrightPageHandle implements BrowserPageHandle {
 
   async click(selector: string, options?: { timeoutMs?: number }): Promise<void> {
     await this.page.locator(selector).first().click({
+      timeout: options?.timeoutMs,
+    });
+  }
+
+  async clickNth(selector: string, index: number, options?: { timeoutMs?: number }): Promise<void> {
+    await this.page.locator(selector).nth(index).click({
       timeout: options?.timeoutMs,
     });
   }

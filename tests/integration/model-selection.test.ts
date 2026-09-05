@@ -388,7 +388,9 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     }
   });
 
-  it("真实 GeminiAdapter.listModels M1 占位 → INTERNAL_ERROR(非 PROVIDER_MODEL_SWITCH_FAILED)", async () => {
+  it("真实 GeminiAdapter.listModels:Provider 未就绪 → PROVIDER_NOT_READY(非 INTERNAL_ERROR/SWITCH_FAILED)", async () => {
+    // M2 已用真实目录读取替换 M1 占位:未启动的 Fake Manager 没有 page,
+    // requireGeminiPage 先拦截,不允许把「没就绪」误报成目录/切换类错误
     const { GeminiWebAdapter } = await import("../../src/providers/gemini/gemini.adapter.js");
     const { AppError } = await import("../../src/common/errors/app-error.js");
     const realAdapter = new GeminiWebAdapter({
@@ -399,6 +401,6 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     });
     const err = await realAdapter.listModels().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppError);
-    expect((err as AppError).code).toBe("INTERNAL_ERROR");
+    expect((err as AppError).code).toBe("PROVIDER_NOT_READY");
   });
 });

@@ -44,6 +44,26 @@ export const GEMINI_SELECTORS = {
 } as const;
 
 /**
+ * 模型选择器 selector(M2,全部来自 2026-09-05 真机采样,见 docs/GEMINI_MODEL_DOM_REPORT.md)。
+ *
+ * 机器 key 是 `gem-menu-item` 上的 `data-mode-id`(不透明 hash,禁止硬编码进代码/种子,
+ * 也禁止把 key 拼进 CSS selector —— 正确流程是 readAll 枚举后按 index clickNth)。
+ * 选中判据 = class token 含 `selected`;`data-active` 是键盘焦点/悬停高亮,绝不能当选中判据。
+ * `gem-menu` 的动态 id(如 ng-menu-a30681-0)不可用;aria-label 本地化,不可用。
+ */
+export const GEMINI_MODEL_SELECTORS = {
+  /** 选择器触发按钮(composer 右下,浅色 DOM,登录/新会话/旧会话页面均存在) */
+  modeTrigger: 'button[data-test-id="bard-mode-menu-button"]',
+  /** 打开中的模式菜单(data-visible=true 才算打开;点击选项后菜单自动关闭) */
+  modeMenu: 'gem-menu[data-test-id="gem-mode-menu"][data-visible="true"]',
+  /** 单个选项;machine key 在 data-mode-id,展示标题在首个非空文本行 */
+  modeOption: 'gem-menu[data-test-id="gem-mode-menu"] gem-menu-item[role="menuitem"]',
+  /** 选中项(备查的结构判据;catalog 以 readAll 的 class token 计算为准) */
+  modeOptionSelected:
+    'gem-menu[data-test-id="gem-mode-menu"] gem-menu-item.selected[role="menuitem"]',
+} as const;
+
+/**
  * 会话 id 形态(实测 16 位十六进制,如 /app/b386795e14915155)。
  * 放宽到 [0-9a-z_-]{8,64} 以容纳 Gemini 侧格式变化。
  */
