@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { AppError } from "../../src/common/errors/app-error.js";
+import { ErrorCodes } from "../../src/common/errors/error-codes.js";
 import { createLogger } from "../../src/common/logger/logger.js";
 import type { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
 import {
@@ -8,7 +10,13 @@ import {
   setupTestContext,
 } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
-import { createFakeManager, FAKE_MODEL_CATALOG, FakeDriver, FakeGeminiAdapter } from "../fakes.js";
+import {
+  createFakeManager,
+  FAKE_MODEL_CATALOG,
+  FakeDriver,
+  FakeGeminiAdapter,
+} from "../fakes.js";
+import type { FakeAdapterBehavior } from "../fakes.js";
 
 interface MessageSendBody {
   data: {
@@ -402,5 +410,110 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     const err = await realAdapter.listModels().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppError);
     expect((err as AppError).code).toBe("PROVIDER_NOT_READY");
+  });
+});
+
+
+// ---------------------------------------------------------------------------------
+// M3(§十五):模型选择接入真实执行链路。HTTP 发送 → 真 Scheduler → 真执行器
+// (装配根构造的 GeminiPromptService),Adapter 用 Fake;逐 Case 独立 app。
+// ---------------------------------------------------------------------------------
+describe("M3 模型选择接入执行链路(Case A/B/C,真实 executor/scheduler)", () => {
+  async function mount(behavior: FakeAdapterBehavior = {}): Promise<{
+    adapter: FakeGeminiAdapter;
+    ctx: TestContext;
+  }> {
+    const adapter = new FakeGeminiAdapter({ answer: "假回答", ...behavior });
+    const ctx = await setupTestContext({
+      geminiAdapter: adapter,
+      scheduler: { autoStart: false },
+    });
+    await ctx.reset();
+    return { adapter, ctx };
+  }
+
+  it("Case A:不带 modelKey → SUCCESS,ensureModel 0 调用,resolved null(V1 兼容)", async () => {
+    const { adapter, ctx } = await mount();
+    try {
+      const conv = await createConversation(ctx.baseUrl);
+      const sent = await sendMessage(ctx.baseUrl, conv.id, "你好", "m3-case-a");
+      expect(sent.status).toBe(202);
+      const { request } = ((await sent.json()) as MessageSendBody).data;
+      expect(request.requestedModelKey).toBeNull();
+
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: request.id } });
+      expect(row.status).toBe("SUCCESS");
+      expect(row.resolvedModelKey).toBeNull();
+      expect(row.resolvedModelLabel).toBeNull();
+      expect(adapter.ensureModelCalls).toEqual([]);
+      expect(adapter.runCalls).toHaveLength(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("Case B:modelKey=model-a → 全链路 SUCCESS,resolved 落库,DTO 与 assistant 均可见", async () => {
+    const { adapter, ctx } = await mount();
+    try {
+      const conv = await createConversation(ctx.baseUrl);
+      const sent = await sendMessage(ctx.baseUrl, conv.id, "切到 A", "m3-case-b", "model-a");
+      expect(sent.status).toBe(202);
+      const { request } = ((await sent.json()) as MessageSendBody).data;
+      expect(request.requestedModelKey).toBe("model-a");
+      expect(request.resolvedModelKey).toBeNull();
+
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: request.id } });
+      expect(row.status).toBe("SUCCESS");
+      expect(row.resolvedModelKey).toBe("model-a");
+      expect(row.resolvedModelLabel).toBe("Model A");
+      expect(adapter.ensureModelCalls).toEqual(["model-a"]);
+
+      const detail = await fetch(`${ctx.baseUrl}/api/requests/${request.id}`);
+      expect(detail.status).toBe(200);
+      const detailBody = (await detail.json()) as {
+        data: { resolvedModelKey: string | null; resolvedModelLabel: string | null };
+      };
+      expect(detailBody.data.resolvedModelKey).toBe("model-a");
+      expect(detailBody.data.resolvedModelLabel).toBe("Model A");
+
+      const assistant = await ctx.prisma.message.findUniqueOrThrow({
+        where: { id: row.assistantMessageId },
+      });
+      expect(assistant.status).toBe("COMPLETED");
+      expect(assistant.content).toBe("假回答");
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("Case C:未知 modelKey → FAILED PROVIDER_MODEL_UNAVAILABLE,Prompt 不发送,resolved null", async () => {
+    const { adapter, ctx } = await mount({
+      ensureModelError: new AppError(
+        ErrorCodes.PROVIDER_MODEL_UNAVAILABLE,
+        "Model model-z is not available",
+        400,
+      ),
+    });
+    try {
+      const conv = await createConversation(ctx.baseUrl);
+      const sent = await sendMessage(ctx.baseUrl, conv.id, "用不存在的", "m3-case-c", "model-z");
+      expect(sent.status).toBe(202);
+      const { request } = ((await sent.json()) as MessageSendBody).data;
+
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: request.id } });
+      expect(row.status).toBe("FAILED");
+      expect(row.errorCode).toBe(ErrorCodes.PROVIDER_MODEL_UNAVAILABLE);
+      expect(row.resolvedModelKey).toBeNull();
+      expect(adapter.ensureModelCalls).toEqual(["model-z"]);
+      expect(adapter.runCalls).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
   });
 });

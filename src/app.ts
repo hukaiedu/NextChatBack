@@ -68,6 +68,8 @@ export interface AppHandle {
   events: RequestEventEmitter;
   /** 第 8 阶段:取消通道登记表(测试可断言 abort 次数 / 有界性) */
   cancellation: CancellationRegistry;
+  /** M3:执行器实例(测试直接驱动 execute,精确控制取消时点) */
+  executor: GeminiPromptService;
 }
 
 export function createApp(deps: AppDeps): AppHandle {
@@ -117,6 +119,8 @@ export function createApp(deps: AppDeps): AppHandle {
     deps.geminiAdapter,
     deps.logger,
     geminiStreamService,
+    deps.prisma,
+    requestRepo,
   );
   const scheduler = new RequestScheduler({
     prisma: deps.prisma,
@@ -164,5 +168,5 @@ export function createApp(deps: AppDeps): AppHandle {
     scheduler.start();
   }
 
-  return { app, scheduler, recovery, sse, events, cancellation };
+  return { app, scheduler, recovery, sse, events, cancellation, executor: geminiPromptService };
 }

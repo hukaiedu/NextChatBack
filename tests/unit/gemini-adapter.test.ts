@@ -852,6 +852,113 @@ describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
       expect(page.clickCalls).toEqual([]);
       expect(page.readAllCalls).toEqual([]);
     });
+
+    // FIX-06(Review):冷启动水合竞态 —— trigger 元素可见但 Angular 交互绑定尚未
+    // 就绪,首次点击可能以 Playwright click timeout 瞬时失败。一次失败不能证明
+    // DOM 已变:健康页面在总预算内短间隔重试;生命周期错误与登录失效绝不重试。
+    const PLAIN_CLICK_TIMEOUT = new Error(
+      "locator.click: Timeout 5000ms exceeded.\nCall log:\n  - performing click action",
+    );
+
+    it("FIX-06-01 首次 trigger click 瞬时失败,第二次成功 → 菜单照常打开,不报 DOM_CHANGED", async () => {
+      const { adapter, page } = await setup(
+        {
+          modelPicker: pickerScript({
+            onTriggerClick: (attempt) => {
+              if (attempt === 1) {
+                throw PLAIN_CLICK_TIMEOUT;
+              }
+            },
+          }),
+        },
+        MENU_FAST,
+      );
+
+      const catalog = await adapter.listModels();
+
+      expect(catalog.currentModelKey).toBe("k-raciocinio");
+      // 第 1 次失败 + 第 2 次成功打开 + 读取后关闭
+      expect(page.clickCalls).toEqual([
+        MODEL_SEL.modeTrigger,
+        MODEL_SEL.modeTrigger,
+        MODEL_SEL.modeTrigger,
+      ]);
+      expect(page.readAllCalls).toHaveLength(1);
+    });
+
+    it("FIX-06-02 每次点击都瞬时失败 → 总预算耗尽 PROVIDER_DOM_CHANGED,重试有上限", async () => {
+      const { adapter, page } = await setup(
+        {
+          modelPicker: pickerScript({
+            onTriggerClick: () => {
+              throw PLAIN_CLICK_TIMEOUT;
+            },
+          }),
+        },
+        // 预算 60ms / pollInterval 2ms → 至多约 30 轮;单测墙钟秒级完成本身即上界证据
+        { ...MENU_FAST, modelTriggerBudgetMs: 60 },
+      );
+
+      await expect(adapter.listModels()).rejects.toMatchObject({
+        code: ErrorCodes.PROVIDER_DOM_CHANGED,
+        message: expect.stringContaining("model menu trigger is not clickable"),
+      });
+      // 确实重试过;且每轮 click 超时都被剩余预算封顶(不会叠乘出 5s × N)
+      expect(page.clickCalls.length).toBeGreaterThanOrEqual(2);
+      expect(page.clickCalls.length).toBeLessThan(60);
+      for (const { selector, timeoutMs } of page.clickTimeoutCalls) {
+        expect(selector).toBe(MODEL_SEL.modeTrigger);
+        expect(timeoutMs).toBeLessThanOrEqual(60);
+      }
+      expect(page.readAllCalls).toEqual([]);
+    });
+
+    it("FIX-06-03 重试期间 browser disconnect → PROVIDER_BROWSER_CRASHED,不收敛成 DOM_CHANGED", async () => {
+      const { adapter, page } = await setup(
+        {
+          modelPicker: pickerScript({
+            onTriggerClick: (attempt) => {
+              if (attempt === 1) {
+                throw PLAIN_CLICK_TIMEOUT;
+              }
+              // 第二轮断连:flags 未落地的关闭族竞态,必须立即上抛
+              throw new Error("browser has disconnected");
+            },
+          }),
+        },
+        MENU_FAST,
+      );
+
+      await expect(adapter.listModels()).rejects.toMatchObject({
+        code: ErrorCodes.PROVIDER_BROWSER_CRASHED,
+      });
+      expect(page.clickCalls).toEqual([MODEL_SEL.modeTrigger, MODEL_SEL.modeTrigger]);
+      expect(page.readAllCalls).toEqual([]);
+    });
+
+    it("FIX-06-04 重试期间登录失效 → PROVIDER_LOGIN_REQUIRED,不再无意义重试", async () => {
+      const { adapter, page } = await setup(
+        {
+          modelPicker: pickerScript({
+            onTriggerClick: (attempt) => {
+              if (attempt === 1) {
+                throw PLAIN_CLICK_TIMEOUT;
+              }
+              page.currentUrl = LOGIN_URL;
+              throw PLAIN_CLICK_TIMEOUT;
+            },
+          }),
+        },
+        MENU_FAST,
+      );
+
+      await expect(adapter.listModels()).rejects.toMatchObject({
+        code: ErrorCodes.PROVIDER_LOGIN_REQUIRED,
+      });
+      // 第二次失败即消歧退出,没有第三次重试
+      expect(page.clickCalls).toEqual([MODEL_SEL.modeTrigger, MODEL_SEL.modeTrigger]);
+      expect(page.readAllCalls).toEqual([]);
+    });
   });
 
   describe("ensureModel(M2 §二十七)", () => {

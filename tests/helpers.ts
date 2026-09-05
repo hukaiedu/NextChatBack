@@ -7,6 +7,7 @@ import type { SchedulerConfig, StreamingConfig } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
 import type { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import type { GeminiAdapter } from "../src/providers/gemini/gemini.types.js";
+import type { GeminiPromptService } from "../src/modules/provider/gemini-prompt.service.js";
 import type { RequestScheduler } from "../src/modules/request/request.scheduler.js";
 import type { RequestRecovery } from "../src/modules/request/request.recovery.js";
 import type { RequestEventEmitter } from "../src/modules/sse/event-emitter.js";
@@ -27,6 +28,8 @@ export interface TestContext {
   events: RequestEventEmitter;
   /** 第 8 阶段:取消通道登记表(测试可断言 abort 次数 / 有界性) */
   cancellation: CancellationRegistry;
+  /** M3:执行器实例(直接驱动 execute,精确控制取消时点) */
+  executor: GeminiPromptService;
   /** 当前存活的 SSE 连接数 */
   sseConnections(): number;
   reset(): Promise<void>;
@@ -48,7 +51,7 @@ export async function setupTestContext(options?: {
   // 默认注入"永不启动"的 Browser Manager stub(provider 测试才需要真实/可操纵实例)
   const browserManager = options?.browserManager ?? createFakeManager(new FakeDriver());
 
-  const { app, scheduler, recovery, sse, events, cancellation } = createApp({
+  const { app, scheduler, recovery, sse, events, cancellation, executor } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
@@ -76,6 +79,7 @@ export async function setupTestContext(options?: {
     recovery,
     events,
     cancellation,
+    executor,
 
     sseConnections(): number {
       return sse.connectionCount();

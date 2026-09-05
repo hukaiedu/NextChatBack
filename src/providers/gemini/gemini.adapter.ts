@@ -43,6 +43,8 @@ const DEFAULTS = {
   stableWindowMs: 1_500,
   stopConfirmTimeoutMs: 10_000,
   modelMenuTimeoutMs: 5_000,
+  // FIX-06:trigger 点击重试总预算 = 单次点击 5s + 菜单等待 5s 的既有最坏包络
+  modelTriggerBudgetMs: 10_000,
 } as const;
 
 /**
@@ -107,6 +109,8 @@ export class GeminiWebAdapter implements GeminiAdapter {
         deps.options.stopConfirmTimeoutMs ?? DEFAULTS.stopConfirmTimeoutMs,
       modelMenuTimeoutMs:
         deps.options.modelMenuTimeoutMs ?? DEFAULTS.modelMenuTimeoutMs,
+      modelTriggerBudgetMs:
+        deps.options.modelTriggerBudgetMs ?? DEFAULTS.modelTriggerBudgetMs,
     };
   }
 
@@ -604,37 +608,7 @@ export class GeminiWebAdapter implements GeminiAdapter {
       throw pageClosed();
     }
     if ((await this.countMenuElements(page, GEMINI_MODEL_SELECTORS.modeMenu)) === 0) {
-      try {
-        await page.click(GEMINI_MODEL_SELECTORS.modeTrigger, { timeoutMs: MODEL_CLICK_TIMEOUT_MS });
-      } catch (err) {
-        // 点击失败先消歧:页面故障(lifecycleError,含断连竞态)与登录失效,
-        // 不能一律报 DOM 变更(§二十四 + FIX-05)
-        const lifecycle = this.lifecycleError(page, err);
-        if (lifecycle) {
-          throw lifecycle;
-        }
-        this.assertNotLoggedOut(page);
-        throw domChanged("model menu trigger is not clickable", err);
-      }
-      const deadline = Date.now() + this.opts.modelMenuTimeoutMs;
-      let visible = false;
-      while (Date.now() < deadline) {
-        if (page.isCrashed()) {
-          throw browserCrashed("renderer-crash-during-model-menu");
-        }
-        if (page.isClosed()) {
-          throw pageClosed();
-        }
-        if ((await this.countMenuElements(page, GEMINI_MODEL_SELECTORS.modeMenu)) > 0) {
-          visible = true;
-          break;
-        }
-        await sleep(this.opts.pollIntervalMs);
-      }
-      if (!visible) {
-        this.assertNotLoggedOut(page);
-        throw domChanged("model menu did not open");
-      }
+      await this.clickTriggerUntilMenuVisible(page);
     }
     // FIX-02:容器可见 ≠ 选项渲染完成。等至少一个选项出现;期间页面关闭/崩溃
     // 保持自身错误码,登录失效在超时出口消歧;始终无选项 → DOM_CHANGED
@@ -656,6 +630,67 @@ export class GeminiWebAdapter implements GeminiAdapter {
     }
     this.assertNotLoggedOut(page);
     throw domChanged("model menu contains no model options");
+  }
+
+  /**
+   * FIX-06:冷启动下 Gemini 首页元素已可见但 Angular 交互绑定尚未就绪,首次
+   * trigger 点击可能以 Playwright click timeout 失败(REAL-M3 无预热验收实测,
+   * 约 1/5 冷启动命中)。一次瞬时失败不能证明 DOM 已变:在 modelTriggerBudgetMs
+   * 总预算内短间隔重试,每轮 click 与菜单出现等待的超时都被剩余预算封顶,最坏
+   * 等待不超过预算本身(不扩大 M2 单次路径 5s+5s 的包络)。
+   * 生命周期错误(PAGE_CLOSED / BROWSER_CRASHED,含断连竞态)与登录失效
+   * (LOGIN_REQUIRED)绝不重试,立即上抛;预算耗尽仍打不开 → DOM_CHANGED。
+   */
+  private async clickTriggerUntilMenuVisible(page: BrowserPageHandle): Promise<void> {
+    const deadline = Date.now() + this.opts.modelTriggerBudgetMs;
+    let lastErr: unknown;
+    while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      try {
+        await page.click(GEMINI_MODEL_SELECTORS.modeTrigger, {
+          timeoutMs: Math.min(MODEL_CLICK_TIMEOUT_MS, remaining),
+        });
+      } catch (err) {
+        // 点击失败先消歧:页面故障(含断连竞态)与登录失效绝不重试(§六)
+        lastErr = err;
+        const lifecycle = this.lifecycleError(page, err);
+        if (lifecycle) {
+          throw lifecycle;
+        }
+        this.assertNotLoggedOut(page);
+        this.logger.warn(
+          { err, remainingMs: remaining },
+          "gemini model trigger click failed, retrying within budget",
+        );
+        await sleep(this.opts.pollIntervalMs);
+        continue;
+      }
+      // 点击被页面接受 → 等菜单出现;等待窗口仍是 modelMenuTimeoutMs,但被
+      // 同一 deadline 封顶(remaining 不足时提前失败,不把最坏等待叠乘)
+      const menuDeadline = Math.min(Date.now() + this.opts.modelMenuTimeoutMs, deadline);
+      let visible = false;
+      while (Date.now() < menuDeadline) {
+        if (page.isCrashed()) {
+          throw browserCrashed("renderer-crash-during-model-menu");
+        }
+        if (page.isClosed()) {
+          throw pageClosed();
+        }
+        if ((await this.countMenuElements(page, GEMINI_MODEL_SELECTORS.modeMenu)) > 0) {
+          visible = true;
+          break;
+        }
+        await sleep(this.opts.pollIntervalMs);
+      }
+      if (visible) {
+        return;
+      }
+      // 点击成功但菜单始终未出现:重试点击有误二次开合的风险,按 DOM 变更处理
+      this.assertNotLoggedOut(page);
+      throw domChanged("model menu did not open");
+    }
+    this.assertNotLoggedOut(page);
+    throw domChanged("model menu trigger is not clickable", lastErr);
   }
 
   /** 关闭模型菜单(再点 trigger,§十)并确认不可见;返回 false = 窗口内无法确认关闭 */

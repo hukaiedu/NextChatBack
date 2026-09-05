@@ -73,6 +73,12 @@ export interface FakeModelPickerScript {
   failElementRead?: "closed" | "crash" | "disconnected";
   /** FIX-05:点 modeTrigger 时抛 "browser has disconnected"(不置页面标志,菜单不打开) */
   failTriggerClick?: "disconnected";
+  /**
+   * FIX-06:每次点 modeTrigger 时同步调用(attempt 从 1 起)。抛错即模拟该次点击
+   * 失败 —— 普通 Playwright timeout 文案 = 冷启动水合未就绪的瞬时失败,
+   * "browser has disconnected" = 断连竞态;不抛错则继续正常开合逻辑。
+   */
+  onTriggerClick?: (attempt: number) => void;
   /** FIX-05:countElements(modeOption) 时抛 "browser has disconnected"(不置页面标志) */
   failOptionCount?: "disconnected";
 }
@@ -140,6 +146,10 @@ export class FakePage implements BrowserPageHandle {
   fillCalls: { selector: string; value: string }[] = [];
   pressCalls: { selector: string; key: string }[] = [];
   clickCalls: string[] = [];
+  /** FIX-06:click 的 timeoutMs 参数记录(供 deadline 封顶断言),与 clickCalls 同序 */
+  clickTimeoutCalls: Array<{ selector: string; timeoutMs: number | undefined }> = [];
+  /** FIX-06:modeTrigger 已尝试的点击次数(onTriggerClick 的 attempt 基数) */
+  private triggerClickAttempts = 0;
   /** M2 调用记录:readAll / clickNth 依次记下 selector 与参数 */
   readAllCalls: Array<{ selector: string; attrs: string[] | undefined }> = [];
   clickNthCalls: Array<{ selector: string; index: number }> = [];
@@ -295,13 +305,17 @@ export class FakePage implements BrowserPageHandle {
     return queue[0] ?? null;
   }
 
-  async click(selector: string, _options?: { timeoutMs?: number }): Promise<void> {
+  async click(selector: string, options?: { timeoutMs?: number }): Promise<void> {
     // 记录的是「尝试过的选择器」:失败的候选也会留下痕迹,供轮换断言用
     this.clickCalls.push(selector);
+    this.clickTimeoutCalls.push({ selector, timeoutMs: options?.timeoutMs });
     if (this.throwOnClickSelectors.includes(selector)) {
       throw new Error(`element '${selector}' is not clickable`);
     }
     if (selector === GEMINI_MODEL_SELECTORS.modeTrigger && this.modelPicker !== null) {
+      this.triggerClickAttempts++;
+      // FIX-06:剧本钩子先于开合逻辑,抛错即该次点击失败
+      this.modelPicker.onTriggerClick?.(this.triggerClickAttempts);
       if (this.modelPicker.failTriggerClick !== undefined) {
         // FIX-05:点击瞬间断连,flags 未落地,菜单也不打开
         throw new Error("browser has disconnected");

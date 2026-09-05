@@ -7,9 +7,15 @@ import {
   extractConversationId,
   normalizeConversationUrl,
 } from "../../providers/gemini/gemini.selectors.js";
-import type { GeminiAdapter, GeminiPromptResult } from "../../providers/gemini/gemini.types.js";
+import type {
+  GeminiAdapter,
+  GeminiPromptResult,
+  ResolvedGeminiModel,
+} from "../../providers/gemini/gemini.types.js";
 import type { ConversationModel, MessageModel, ModelRequestModel } from "../../generated/prisma/models.js";
+import type { PrismaClient } from "../../generated/prisma/client.js";
 import type { ConversationService } from "../conversation/conversation.service.js";
+import type { RequestRepository } from "../request/request.repository.js";
 import type { GeminiStreamService } from "./gemini-stream.service.js";
 
 export interface PromptExecutionInput {
@@ -25,7 +31,10 @@ export interface PromptExecutionResult {
   conversationUrl: string | null;
   /** Provider 返回的最终回答文本 */
   answer: string;
-  /** true = 通过 stopGeneration 确认 Gemini 已停止生成 */
+  /**
+   * true = 通过 stopGeneration 确认 Gemini 已停止生成(§11.3);
+   * M3 起 Prompt 发送前(执行入口/模型选择段)被 abort 时同样为 true,此时无需停止生成。
+   */
   cancelled?: boolean;
 }
 
@@ -39,7 +48,8 @@ export interface PromptExecutor {
 /**
  * Provider 执行器:已被 Scheduler 认领的 Request → Gemini 实际执行。
  *
- * 职责(prd §6.2 O→AF 段):打开已有/新会话 → 发 Prompt → URL 一确定立即落库 →
+ * 职责(prd §6.2 O→AF 段):打开已有/新会话 → [M3:requestedModelKey 非空时
+ * ensureModel → resolved 立即落库] → 发 Prompt → URL 一确定立即落库 →
  * 生成期间的回答文本交给流式层(第 6 阶段)→ 读回最终回答。
  * 不做:Request 状态流转与 Assistant 收尾(§11.4 归 RequestService);
  * Provider 就绪门禁与 BUSY(Scheduler/BrowserManager 职责,本类执行时页面必已 READY/BUSY)。
@@ -51,14 +61,58 @@ export class GeminiPromptService implements PromptExecutor {
     private readonly adapter: GeminiAdapter,
     private readonly logger: Logger,
     private readonly streams: GeminiStreamService,
+    private readonly prisma: PrismaClient,
+    private readonly requests: RequestRepository,
   ) {}
 
   async execute(input: PromptExecutionInput): Promise<PromptExecutionResult> {
     const { request, userMessage } = input;
+    // 取消时点 A:执行入口已 abort → 不触碰任何 Provider DOM,resolved 保持 null
+    if (input.signal?.aborted) {
+      return this.cancelledBeforePrompt();
+    }
     const conversation = await this.requireConversation(request.conversationId);
 
     const existingUrl = conversation.providerConversationUrl;
     await this.adapter.openConversation(existingUrl);
+
+    // 模型选择段:requestedModelKey == null(V1 兼容)完全跳过 —— 不调 ensureModel、
+    // 不做模型菜单 DOM 探测,resolved 保持 null,指纹与 V1 逐字节一致。
+    let resolvedModelKey: string | null = null;
+    let resolvedModelLabel: string | null = null;
+    if (request.requestedModelKey !== null) {
+      let resolved: ResolvedGeminiModel;
+      try {
+        resolved = await this.adapter.ensureModel(request.requestedModelKey, input.signal);
+      } catch (err) {
+        // 取消时点 B:ensureModel 中途 abort —— 不发送 Prompt,也绝不猜测/补写 resolved
+        if (input.signal?.aborted) {
+          return this.cancelledBeforePrompt();
+        }
+        throw err;
+      }
+      // resolved 只取 ensureModel 的返回值(key 与 label),不从 requestedModelKey 复制;
+      // 落库失败(含行已离开在飞)必须阻止发送 Prompt —— 审计完整性优先
+      const written = await this.requests.markResolved(
+        this.prisma,
+        request.id,
+        resolved.key,
+        resolved.label,
+      );
+      if (written === 0) {
+        throw new AppError(
+          ErrorCodes.INTERNAL_ERROR,
+          `Request ${request.id} is not in-flight; resolved model was not persisted`,
+        );
+      }
+      resolvedModelKey = resolved.key;
+      resolvedModelLabel = resolved.label;
+
+      // 取消时点 C:resolved 已落库必须保留,但 Prompt 不再发送
+      if (input.signal?.aborted) {
+        return this.cancelledBeforePrompt();
+      }
+    }
 
     // 每次执行一个流式写入器:广播走事件总线,落库按节流间隔,收尾补写剩余文本
     const stream = this.streams.open(request.id, request.assistantMessageId);
@@ -104,11 +158,21 @@ export class GeminiPromptService implements PromptExecutor {
         urlDetectedElapsedMs: result.urlDetectedElapsedMs,
         answerElapsedMs: result.answerElapsedMs,
         reusedConversation: existingUrl !== null,
+        resolvedModelKey,
       },
       "gemini prompt completed",
     );
 
     return { conversationUrl: saved?.url ?? null, answer: result.answer, cancelled: result.cancelled };
+  }
+
+  /**
+   * Prompt 发送前的取消收尾(时点 A/B/C 共用):URL 为 null(尚未出现)、无回答。
+   * 由 Scheduler 既有分派(result.cancelled → requestService.cancelled)落 CANCELLED 终态,
+   * AbortError 绝不进入 classifyExecutorError(否则被兜底成 INTERNAL_ERROR)。
+   */
+  private cancelledBeforePrompt(): PromptExecutionResult {
+    return { conversationUrl: null, answer: "", cancelled: true };
   }
 
   async confirmIdle(): Promise<boolean> {

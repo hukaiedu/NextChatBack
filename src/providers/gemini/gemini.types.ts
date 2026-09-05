@@ -18,6 +18,12 @@ export interface GeminiAdapterOptions {
   stopConfirmTimeoutMs?: number;
   /** M2:打开/关闭模型菜单、以及切换后确认菜单状态的窗口上限(生产默认 5s) */
   modelMenuTimeoutMs?: number;
+  /**
+   * FIX-06:冷启动 trigger 点击重试的总预算(deadline;点击与菜单出现等待共用,
+   * 每轮超时都被剩余预算封顶)。生产默认 10s = 单次点击 5s + 菜单等待 5s 的
+   * 既有最坏包络,重试只在其内细分,不扩大最坏等待。
+   */
+  modelTriggerBudgetMs?: number;
 }
 
 /** 一次 Prompt 执行的输入 */

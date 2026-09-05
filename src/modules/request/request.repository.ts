@@ -95,6 +95,24 @@ export class RequestRepository {
   }
 
   /**
+   * M3:resolved 落库(ensureModel 成功后、发送 Prompt 前)。
+   * 条件写接受 PROCESSING|CANCELLING:切换成功瞬间用户可能已点停止(§8.9),
+   * 此时 resolved 同样要保留;返回 0 表示行已离开在飞,调用方必须阻止发送 Prompt。
+   */
+  async markResolved(
+    db: DbClient,
+    id: string,
+    resolvedModelKey: string,
+    resolvedModelLabel: string,
+  ): Promise<number> {
+    const result = await db.modelRequest.updateMany({
+      where: { id, status: { in: [...REQUEST_IN_FLIGHT_STATUSES] } },
+      data: { resolvedModelKey, resolvedModelLabel },
+    });
+    return result.count;
+  }
+
+  /**
    * 受理取消:PROCESSING → CANCELLING(prd §8.9)。
    *
    * 只动 Request 一侧 —— §11.4 规定 CANCELLING ↔ STREAMING,assistant 保持 STREAMING,
