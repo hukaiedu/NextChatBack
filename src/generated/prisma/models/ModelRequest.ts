@@ -43,6 +43,9 @@ export type ModelRequestMinAggregateOutputType = {
   requestFingerprint: string | null
   status: string | null
   provider: string | null
+  requestedModelKey: string | null
+  resolvedModelKey: string | null
+  resolvedModelLabel: string | null
   attemptCount: number | null
   errorCode: string | null
   errorMessage: string | null
@@ -61,6 +64,9 @@ export type ModelRequestMaxAggregateOutputType = {
   requestFingerprint: string | null
   status: string | null
   provider: string | null
+  requestedModelKey: string | null
+  resolvedModelKey: string | null
+  resolvedModelLabel: string | null
   attemptCount: number | null
   errorCode: string | null
   errorMessage: string | null
@@ -79,6 +85,9 @@ export type ModelRequestCountAggregateOutputType = {
   requestFingerprint: number
   status: number
   provider: number
+  requestedModelKey: number
+  resolvedModelKey: number
+  resolvedModelLabel: number
   attemptCount: number
   errorCode: number
   errorMessage: number
@@ -107,6 +116,9 @@ export type ModelRequestMinAggregateInputType = {
   requestFingerprint?: true
   status?: true
   provider?: true
+  requestedModelKey?: true
+  resolvedModelKey?: true
+  resolvedModelLabel?: true
   attemptCount?: true
   errorCode?: true
   errorMessage?: true
@@ -125,6 +137,9 @@ export type ModelRequestMaxAggregateInputType = {
   requestFingerprint?: true
   status?: true
   provider?: true
+  requestedModelKey?: true
+  resolvedModelKey?: true
+  resolvedModelLabel?: true
   attemptCount?: true
   errorCode?: true
   errorMessage?: true
@@ -143,6 +158,9 @@ export type ModelRequestCountAggregateInputType = {
   requestFingerprint?: true
   status?: true
   provider?: true
+  requestedModelKey?: true
+  resolvedModelKey?: true
+  resolvedModelLabel?: true
   attemptCount?: true
   errorCode?: true
   errorMessage?: true
@@ -248,6 +266,9 @@ export type ModelRequestGroupByOutputType = {
   requestFingerprint: string
   status: string
   provider: string
+  requestedModelKey: string | null
+  resolvedModelKey: string | null
+  resolvedModelLabel: string | null
   attemptCount: number
   errorCode: string | null
   errorMessage: string | null
@@ -289,6 +310,9 @@ export type ModelRequestWhereInput = {
   requestFingerprint?: Prisma.StringFilter<"ModelRequest"> | string
   status?: Prisma.StringFilter<"ModelRequest"> | string
   provider?: Prisma.StringFilter<"ModelRequest"> | string
+  requestedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
+  resolvedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
+  resolvedModelLabel?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   attemptCount?: Prisma.IntFilter<"ModelRequest"> | number
   errorCode?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   errorMessage?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
@@ -310,6 +334,9 @@ export type ModelRequestOrderByWithRelationInput = {
   requestFingerprint?: Prisma.SortOrder
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
+  requestedModelKey?: Prisma.SortOrderInput | Prisma.SortOrder
+  resolvedModelKey?: Prisma.SortOrderInput | Prisma.SortOrder
+  resolvedModelLabel?: Prisma.SortOrderInput | Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrderInput | Prisma.SortOrder
   errorMessage?: Prisma.SortOrderInput | Prisma.SortOrder
@@ -334,6 +361,9 @@ export type ModelRequestWhereUniqueInput = Prisma.AtLeast<{
   requestFingerprint?: Prisma.StringFilter<"ModelRequest"> | string
   status?: Prisma.StringFilter<"ModelRequest"> | string
   provider?: Prisma.StringFilter<"ModelRequest"> | string
+  requestedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
+  resolvedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
+  resolvedModelLabel?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   attemptCount?: Prisma.IntFilter<"ModelRequest"> | number
   errorCode?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   errorMessage?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
@@ -355,6 +385,9 @@ export type ModelRequestOrderByWithAggregationInput = {
   requestFingerprint?: Prisma.SortOrder
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
+  requestedModelKey?: Prisma.SortOrderInput | Prisma.SortOrder
+  resolvedModelKey?: Prisma.SortOrderInput | Prisma.SortOrder
+  resolvedModelLabel?: Prisma.SortOrderInput | Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrderInput | Prisma.SortOrder
   errorMessage?: Prisma.SortOrderInput | Prisma.SortOrder
@@ -381,6 +414,9 @@ export type ModelRequestScalarWhereWithAggregatesInput = {
   requestFingerprint?: Prisma.StringWithAggregatesFilter<"ModelRequest"> | string
   status?: Prisma.StringWithAggregatesFilter<"ModelRequest"> | string
   provider?: Prisma.StringWithAggregatesFilter<"ModelRequest"> | string
+  requestedModelKey?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
+  resolvedModelKey?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
+  resolvedModelLabel?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
   attemptCount?: Prisma.IntWithAggregatesFilter<"ModelRequest"> | number
   errorCode?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
   errorMessage?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
@@ -396,6 +432,9 @@ export type ModelRequestCreateInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -417,6 +456,9 @@ export type ModelRequestUncheckedCreateInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -432,6 +474,9 @@ export type ModelRequestUpdateInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -453,6 +498,9 @@ export type ModelRequestUncheckedUpdateInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -471,6 +519,9 @@ export type ModelRequestCreateManyInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -486,6 +537,9 @@ export type ModelRequestUpdateManyMutationInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -504,6 +558,9 @@ export type ModelRequestUncheckedUpdateManyInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -532,6 +589,9 @@ export type ModelRequestCountOrderByAggregateInput = {
   requestFingerprint?: Prisma.SortOrder
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
+  requestedModelKey?: Prisma.SortOrder
+  resolvedModelKey?: Prisma.SortOrder
+  resolvedModelLabel?: Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrder
   errorMessage?: Prisma.SortOrder
@@ -554,6 +614,9 @@ export type ModelRequestMaxOrderByAggregateInput = {
   requestFingerprint?: Prisma.SortOrder
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
+  requestedModelKey?: Prisma.SortOrder
+  resolvedModelKey?: Prisma.SortOrder
+  resolvedModelLabel?: Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrder
   errorMessage?: Prisma.SortOrder
@@ -572,6 +635,9 @@ export type ModelRequestMinOrderByAggregateInput = {
   requestFingerprint?: Prisma.SortOrder
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
+  requestedModelKey?: Prisma.SortOrder
+  resolvedModelKey?: Prisma.SortOrder
+  resolvedModelLabel?: Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrder
   errorMessage?: Prisma.SortOrder
@@ -717,6 +783,9 @@ export type ModelRequestCreateWithoutConversationInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -736,6 +805,9 @@ export type ModelRequestUncheckedCreateWithoutConversationInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -782,6 +854,9 @@ export type ModelRequestScalarWhereInput = {
   requestFingerprint?: Prisma.StringFilter<"ModelRequest"> | string
   status?: Prisma.StringFilter<"ModelRequest"> | string
   provider?: Prisma.StringFilter<"ModelRequest"> | string
+  requestedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
+  resolvedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
+  resolvedModelLabel?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   attemptCount?: Prisma.IntFilter<"ModelRequest"> | number
   errorCode?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   errorMessage?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
@@ -797,6 +872,9 @@ export type ModelRequestCreateWithoutUserMessageInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -816,6 +894,9 @@ export type ModelRequestUncheckedCreateWithoutUserMessageInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -840,6 +921,9 @@ export type ModelRequestCreateWithoutAssistantMessageInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -859,6 +943,9 @@ export type ModelRequestUncheckedCreateWithoutAssistantMessageInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -917,6 +1004,9 @@ export type ModelRequestCreateManyConversationInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -932,6 +1022,9 @@ export type ModelRequestUpdateWithoutConversationInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -951,6 +1044,9 @@ export type ModelRequestUncheckedUpdateWithoutConversationInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -968,6 +1064,9 @@ export type ModelRequestUncheckedUpdateManyWithoutConversationInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -985,6 +1084,9 @@ export type ModelRequestCreateManyUserMessageInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -1002,6 +1104,9 @@ export type ModelRequestCreateManyAssistantMessageInput = {
   requestFingerprint: string
   status: string
   provider?: string
+  requestedModelKey?: string | null
+  resolvedModelKey?: string | null
+  resolvedModelLabel?: string | null
   attemptCount?: number
   errorCode?: string | null
   errorMessage?: string | null
@@ -1017,6 +1122,9 @@ export type ModelRequestUpdateWithoutUserMessageInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -1036,6 +1144,9 @@ export type ModelRequestUncheckedUpdateWithoutUserMessageInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -1053,6 +1164,9 @@ export type ModelRequestUncheckedUpdateManyWithoutUserMessageInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -1068,6 +1182,9 @@ export type ModelRequestUpdateWithoutAssistantMessageInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -1087,6 +1204,9 @@ export type ModelRequestUncheckedUpdateWithoutAssistantMessageInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -1104,6 +1224,9 @@ export type ModelRequestUncheckedUpdateManyWithoutAssistantMessageInput = {
   requestFingerprint?: Prisma.StringFieldUpdateOperationsInput | string
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
+  requestedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
@@ -1124,6 +1247,9 @@ export type ModelRequestSelect<ExtArgs extends runtime.Types.Extensions.Internal
   requestFingerprint?: boolean
   status?: boolean
   provider?: boolean
+  requestedModelKey?: boolean
+  resolvedModelKey?: boolean
+  resolvedModelLabel?: boolean
   attemptCount?: boolean
   errorCode?: boolean
   errorMessage?: boolean
@@ -1145,6 +1271,9 @@ export type ModelRequestSelectCreateManyAndReturn<ExtArgs extends runtime.Types.
   requestFingerprint?: boolean
   status?: boolean
   provider?: boolean
+  requestedModelKey?: boolean
+  resolvedModelKey?: boolean
+  resolvedModelLabel?: boolean
   attemptCount?: boolean
   errorCode?: boolean
   errorMessage?: boolean
@@ -1166,6 +1295,9 @@ export type ModelRequestSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.
   requestFingerprint?: boolean
   status?: boolean
   provider?: boolean
+  requestedModelKey?: boolean
+  resolvedModelKey?: boolean
+  resolvedModelLabel?: boolean
   attemptCount?: boolean
   errorCode?: boolean
   errorMessage?: boolean
@@ -1187,6 +1319,9 @@ export type ModelRequestSelectScalar = {
   requestFingerprint?: boolean
   status?: boolean
   provider?: boolean
+  requestedModelKey?: boolean
+  resolvedModelKey?: boolean
+  resolvedModelLabel?: boolean
   attemptCount?: boolean
   errorCode?: boolean
   errorMessage?: boolean
@@ -1196,7 +1331,7 @@ export type ModelRequestSelectScalar = {
   updatedAt?: boolean
 }
 
-export type ModelRequestOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "conversationId" | "userMessageId" | "assistantMessageId" | "idempotencyKey" | "requestFingerprint" | "status" | "provider" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "completedAt" | "createdAt" | "updatedAt", ExtArgs["result"]["modelRequest"]>
+export type ModelRequestOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "conversationId" | "userMessageId" | "assistantMessageId" | "idempotencyKey" | "requestFingerprint" | "status" | "provider" | "requestedModelKey" | "resolvedModelKey" | "resolvedModelLabel" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "completedAt" | "createdAt" | "updatedAt", ExtArgs["result"]["modelRequest"]>
 export type ModelRequestInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   conversation?: boolean | Prisma.ConversationDefaultArgs<ExtArgs>
   userMessage?: boolean | Prisma.MessageDefaultArgs<ExtArgs>
@@ -1229,6 +1364,18 @@ export type $ModelRequestPayload<ExtArgs extends runtime.Types.Extensions.Intern
     requestFingerprint: string
     status: string
     provider: string
+    /**
+     * M1:创建时客户端显式提交的模型键快照(未提交则为 null,创建后不再变更)
+     */
+    requestedModelKey: string | null
+    /**
+     * M1:实际执行的模型键(由 ensureModel 解析;M1 仅落库,M2 写入)
+     */
+    resolvedModelKey: string | null
+    /**
+     * M1:实际执行模型的展示名(如 "3.6 Flash";M1 仅落库,M2 写入)
+     */
+    resolvedModelLabel: string | null
     attemptCount: number
     errorCode: string | null
     errorMessage: string | null
@@ -1670,6 +1817,9 @@ export interface ModelRequestFieldRefs {
   readonly requestFingerprint: Prisma.FieldRef<"ModelRequest", 'String'>
   readonly status: Prisma.FieldRef<"ModelRequest", 'String'>
   readonly provider: Prisma.FieldRef<"ModelRequest", 'String'>
+  readonly requestedModelKey: Prisma.FieldRef<"ModelRequest", 'String'>
+  readonly resolvedModelKey: Prisma.FieldRef<"ModelRequest", 'String'>
+  readonly resolvedModelLabel: Prisma.FieldRef<"ModelRequest", 'String'>
   readonly attemptCount: Prisma.FieldRef<"ModelRequest", 'Int'>
   readonly errorCode: Prisma.FieldRef<"ModelRequest", 'String'>
   readonly errorMessage: Prisma.FieldRef<"ModelRequest", 'String'>

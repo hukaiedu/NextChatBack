@@ -70,7 +70,11 @@ export class ConversationService {
     };
   }
 
-  async update(id: string, patch: { title?: string; status?: "ACTIVE" | "ARCHIVED" }): Promise<ConversationModel> {
+  async update(id: string, patch: {
+    title?: string;
+    status?: "ACTIVE" | "ARCHIVED";
+    preferredModelKey?: string | null;
+  }): Promise<ConversationModel> {
     const conversation = await this.conversationRepo.findById(this.prisma, id);
     if (!conversation) {
       throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
@@ -78,6 +82,9 @@ export class ConversationService {
     if (conversation.status === "DELETED") {
       throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted");
     }
+    // M1(FIX-02):preferredModelKey = 「下一次 Request」的模型偏好。在途 Request 用的是
+    // 已冻结的 requestedModelKey 快照,偏好修改不影响它 —— 这里不做活动 Request 闸门,
+    // 前端 Selector 的禁用是 UI 规则,不后置成业务约束(避免不可完全消除的竞态)。
     // ACTIVE → ARCHIVED 归档前:存在活动 Request 时禁止归档(prd §8.4)
     if (patch.status && patch.status !== conversation.status && conversation.status === "ACTIVE") {
       const hasActive = await this.requestRepo.hasActive(this.prisma, id);
@@ -92,6 +99,7 @@ export class ConversationService {
       const updated = await this.conversationRepo.update(this.prisma, id, {
         title: patch.title,
         status: patch.status,
+        preferredModelKey: patch.preferredModelKey,
       });
       if (!updated) {
         throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");

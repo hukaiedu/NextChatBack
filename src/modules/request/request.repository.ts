@@ -10,6 +10,8 @@ export interface ModelRequestCreateData {
   requestFingerprint: string;
   status: string;
   provider: string;
+  /** M1:客户端显式提交的模型键快照;未提交为 null,创建后不再变更 */
+  requestedModelKey?: string | null;
 }
 
 export class RequestRepository {

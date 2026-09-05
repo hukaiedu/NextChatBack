@@ -32,6 +32,12 @@ export interface RequestBrief {
   status: string;
   errorCode: string | null;
   errorMessage: string | null;
+  /** M1:客户端显式提交的模型键快照;未提交为 null */
+  requestedModelKey: string | null;
+  /** M1:实际执行的模型键(M2 的 ensureModel 写入;M1 阶段恒为 null) */
+  resolvedModelKey: string | null;
+  /** M1:实际执行模型的展示名(M2 写入;M1 阶段恒为 null) */
+  resolvedModelLabel: string | null;
 }
 
 export interface MessageListItem extends MessageModel {
@@ -44,5 +50,8 @@ export function toRequestBrief(request: ModelRequestModel): RequestBrief {
     status: request.status,
     errorCode: request.errorCode,
     errorMessage: request.errorMessage,
+    requestedModelKey: request.requestedModelKey,
+    resolvedModelKey: request.resolvedModelKey,
+    resolvedModelLabel: request.resolvedModelLabel,
   };
 }

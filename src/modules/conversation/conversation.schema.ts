@@ -8,10 +8,14 @@ export const patchConversationSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
     status: z.enum(["ACTIVE", "ARCHIVED"]).optional(),
+    // M1:显式 null = 清除偏好;undefined = 不动偏好。只做长度约束,键为不透明字符串
+    preferredModelKey: z.string().trim().min(1).max(256).nullable().optional(),
   })
-  .refine((value) => value.title !== undefined || value.status !== undefined, {
-    message: "at least one of title or status is required",
-  });
+  .refine(
+    (value) =>
+      value.title !== undefined || value.status !== undefined || value.preferredModelKey !== undefined,
+    { message: "at least one of title, status or preferredModelKey is required" },
+  );
 
 export const listConversationsQuerySchema = z.object({
   status: z.enum(["ACTIVE", "ARCHIVED"]).default("ACTIVE"),

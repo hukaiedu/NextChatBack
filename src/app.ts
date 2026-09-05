@@ -9,6 +9,7 @@ import type { PrismaClient } from "./generated/prisma/client.js";
 import { createHealthRouter } from "./modules/health/health.controller.js";
 import type { HealthProbe } from "./modules/health/health.controller.js";
 import { createProviderRouter } from "./modules/provider/provider.controller.js";
+import { ProviderModelsService } from "./modules/provider/provider-models.service.js";
 import { GeminiPromptService } from "./modules/provider/gemini-prompt.service.js";
 import type { BrowserManager } from "./providers/gemini/browser-manager.js";
 import type { GeminiAdapter } from "./providers/gemini/gemini.types.js";
@@ -144,6 +145,7 @@ export function createApp(deps: AppDeps): AppHandle {
     events,
     logger: deps.logger,
   });
+  const providerModelsService = new ProviderModelsService(deps.geminiAdapter, deps.browserManager);
 
   app.use("/api/conversations", createConversationRouter(conversationService));
   app.use(
@@ -153,7 +155,7 @@ export function createApp(deps: AppDeps): AppHandle {
   app.use("/api/requests", createRequestRouter(requestService));
   // GET /api/requests/:id/events(第 6 阶段 SSE);与 REST 路由共用前缀
   app.use("/api/requests", createSseRouter(sse));
-  app.use("/api/provider", createProviderRouter(deps.browserManager));
+  app.use("/api/provider", createProviderRouter(deps.browserManager, providerModelsService));
 
   // 统一错误出口,必须最后挂载
   app.use(errorHandler(deps.logger));

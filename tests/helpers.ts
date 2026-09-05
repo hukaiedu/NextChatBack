@@ -121,6 +121,7 @@ export async function sendMessage(
   conversationId: string,
   content: string,
   idempotencyKey: string,
+  modelKey?: string,
 ): Promise<Response> {
   return fetch(`${baseUrl}/api/conversations/${conversationId}/messages`, {
     method: "POST",
@@ -128,7 +129,7 @@ export async function sendMessage(
       "Content-Type": "application/json",
       "Idempotency-Key": idempotencyKey,
     },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify(modelKey !== undefined ? { content, modelKey } : { content }),
   });
 }
 

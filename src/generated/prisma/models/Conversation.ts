@@ -30,6 +30,7 @@ export type ConversationMinAggregateOutputType = {
   status: string | null
   provider: string | null
   providerConversationUrl: string | null
+  preferredModelKey: string | null
   createdAt: Date | null
   updatedAt: Date | null
   deletedAt: Date | null
@@ -41,6 +42,7 @@ export type ConversationMaxAggregateOutputType = {
   status: string | null
   provider: string | null
   providerConversationUrl: string | null
+  preferredModelKey: string | null
   createdAt: Date | null
   updatedAt: Date | null
   deletedAt: Date | null
@@ -52,6 +54,7 @@ export type ConversationCountAggregateOutputType = {
   status: number
   provider: number
   providerConversationUrl: number
+  preferredModelKey: number
   createdAt: number
   updatedAt: number
   deletedAt: number
@@ -65,6 +68,7 @@ export type ConversationMinAggregateInputType = {
   status?: true
   provider?: true
   providerConversationUrl?: true
+  preferredModelKey?: true
   createdAt?: true
   updatedAt?: true
   deletedAt?: true
@@ -76,6 +80,7 @@ export type ConversationMaxAggregateInputType = {
   status?: true
   provider?: true
   providerConversationUrl?: true
+  preferredModelKey?: true
   createdAt?: true
   updatedAt?: true
   deletedAt?: true
@@ -87,6 +92,7 @@ export type ConversationCountAggregateInputType = {
   status?: true
   provider?: true
   providerConversationUrl?: true
+  preferredModelKey?: true
   createdAt?: true
   updatedAt?: true
   deletedAt?: true
@@ -171,6 +177,7 @@ export type ConversationGroupByOutputType = {
   status: string
   provider: string
   providerConversationUrl: string | null
+  preferredModelKey: string | null
   createdAt: Date
   updatedAt: Date
   deletedAt: Date | null
@@ -203,6 +210,7 @@ export type ConversationWhereInput = {
   status?: Prisma.StringFilter<"Conversation"> | string
   provider?: Prisma.StringFilter<"Conversation"> | string
   providerConversationUrl?: Prisma.StringNullableFilter<"Conversation"> | string | null
+  preferredModelKey?: Prisma.StringNullableFilter<"Conversation"> | string | null
   createdAt?: Prisma.DateTimeFilter<"Conversation"> | Date | string
   updatedAt?: Prisma.DateTimeFilter<"Conversation"> | Date | string
   deletedAt?: Prisma.DateTimeNullableFilter<"Conversation"> | Date | string | null
@@ -216,6 +224,7 @@ export type ConversationOrderByWithRelationInput = {
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
   providerConversationUrl?: Prisma.SortOrderInput | Prisma.SortOrder
+  preferredModelKey?: Prisma.SortOrderInput | Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
   deletedAt?: Prisma.SortOrderInput | Prisma.SortOrder
@@ -232,6 +241,7 @@ export type ConversationWhereUniqueInput = Prisma.AtLeast<{
   title?: Prisma.StringFilter<"Conversation"> | string
   status?: Prisma.StringFilter<"Conversation"> | string
   provider?: Prisma.StringFilter<"Conversation"> | string
+  preferredModelKey?: Prisma.StringNullableFilter<"Conversation"> | string | null
   createdAt?: Prisma.DateTimeFilter<"Conversation"> | Date | string
   updatedAt?: Prisma.DateTimeFilter<"Conversation"> | Date | string
   deletedAt?: Prisma.DateTimeNullableFilter<"Conversation"> | Date | string | null
@@ -245,6 +255,7 @@ export type ConversationOrderByWithAggregationInput = {
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
   providerConversationUrl?: Prisma.SortOrderInput | Prisma.SortOrder
+  preferredModelKey?: Prisma.SortOrderInput | Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
   deletedAt?: Prisma.SortOrderInput | Prisma.SortOrder
@@ -262,6 +273,7 @@ export type ConversationScalarWhereWithAggregatesInput = {
   status?: Prisma.StringWithAggregatesFilter<"Conversation"> | string
   provider?: Prisma.StringWithAggregatesFilter<"Conversation"> | string
   providerConversationUrl?: Prisma.StringNullableWithAggregatesFilter<"Conversation"> | string | null
+  preferredModelKey?: Prisma.StringNullableWithAggregatesFilter<"Conversation"> | string | null
   createdAt?: Prisma.DateTimeWithAggregatesFilter<"Conversation"> | Date | string
   updatedAt?: Prisma.DateTimeWithAggregatesFilter<"Conversation"> | Date | string
   deletedAt?: Prisma.DateTimeNullableWithAggregatesFilter<"Conversation"> | Date | string | null
@@ -273,6 +285,7 @@ export type ConversationCreateInput = {
   status?: string
   provider?: string
   providerConversationUrl?: string | null
+  preferredModelKey?: string | null
   createdAt?: Date | string
   updatedAt?: Date | string
   deletedAt?: Date | string | null
@@ -286,6 +299,7 @@ export type ConversationUncheckedCreateInput = {
   status?: string
   provider?: string
   providerConversationUrl?: string | null
+  preferredModelKey?: string | null
   createdAt?: Date | string
   updatedAt?: Date | string
   deletedAt?: Date | string | null
@@ -299,6 +313,7 @@ export type ConversationUpdateInput = {
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
   providerConversationUrl?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  preferredModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -312,6 +327,7 @@ export type ConversationUncheckedUpdateInput = {
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
   providerConversationUrl?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  preferredModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -325,6 +341,7 @@ export type ConversationCreateManyInput = {
   status?: string
   provider?: string
   providerConversationUrl?: string | null
+  preferredModelKey?: string | null
   createdAt?: Date | string
   updatedAt?: Date | string
   deletedAt?: Date | string | null
@@ -336,6 +353,7 @@ export type ConversationUpdateManyMutationInput = {
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
   providerConversationUrl?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  preferredModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -347,6 +365,7 @@ export type ConversationUncheckedUpdateManyInput = {
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
   providerConversationUrl?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  preferredModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -358,6 +377,7 @@ export type ConversationCountOrderByAggregateInput = {
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
   providerConversationUrl?: Prisma.SortOrder
+  preferredModelKey?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
   deletedAt?: Prisma.SortOrder
@@ -369,6 +389,7 @@ export type ConversationMaxOrderByAggregateInput = {
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
   providerConversationUrl?: Prisma.SortOrder
+  preferredModelKey?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
   deletedAt?: Prisma.SortOrder
@@ -380,6 +401,7 @@ export type ConversationMinOrderByAggregateInput = {
   status?: Prisma.SortOrder
   provider?: Prisma.SortOrder
   providerConversationUrl?: Prisma.SortOrder
+  preferredModelKey?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
   deletedAt?: Prisma.SortOrder
@@ -440,6 +462,7 @@ export type ConversationCreateWithoutMessagesInput = {
   status?: string
   provider?: string
   providerConversationUrl?: string | null
+  preferredModelKey?: string | null
   createdAt?: Date | string
   updatedAt?: Date | string
   deletedAt?: Date | string | null
@@ -452,6 +475,7 @@ export type ConversationUncheckedCreateWithoutMessagesInput = {
   status?: string
   provider?: string
   providerConversationUrl?: string | null
+  preferredModelKey?: string | null
   createdAt?: Date | string
   updatedAt?: Date | string
   deletedAt?: Date | string | null
@@ -480,6 +504,7 @@ export type ConversationUpdateWithoutMessagesInput = {
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
   providerConversationUrl?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  preferredModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -492,6 +517,7 @@ export type ConversationUncheckedUpdateWithoutMessagesInput = {
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
   providerConversationUrl?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  preferredModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -504,6 +530,7 @@ export type ConversationCreateWithoutRequestsInput = {
   status?: string
   provider?: string
   providerConversationUrl?: string | null
+  preferredModelKey?: string | null
   createdAt?: Date | string
   updatedAt?: Date | string
   deletedAt?: Date | string | null
@@ -516,6 +543,7 @@ export type ConversationUncheckedCreateWithoutRequestsInput = {
   status?: string
   provider?: string
   providerConversationUrl?: string | null
+  preferredModelKey?: string | null
   createdAt?: Date | string
   updatedAt?: Date | string
   deletedAt?: Date | string | null
@@ -544,6 +572,7 @@ export type ConversationUpdateWithoutRequestsInput = {
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
   providerConversationUrl?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  preferredModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -556,6 +585,7 @@ export type ConversationUncheckedUpdateWithoutRequestsInput = {
   status?: Prisma.StringFieldUpdateOperationsInput | string
   provider?: Prisma.StringFieldUpdateOperationsInput | string
   providerConversationUrl?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  preferredModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -608,6 +638,7 @@ export type ConversationSelect<ExtArgs extends runtime.Types.Extensions.Internal
   status?: boolean
   provider?: boolean
   providerConversationUrl?: boolean
+  preferredModelKey?: boolean
   createdAt?: boolean
   updatedAt?: boolean
   deletedAt?: boolean
@@ -622,6 +653,7 @@ export type ConversationSelectCreateManyAndReturn<ExtArgs extends runtime.Types.
   status?: boolean
   provider?: boolean
   providerConversationUrl?: boolean
+  preferredModelKey?: boolean
   createdAt?: boolean
   updatedAt?: boolean
   deletedAt?: boolean
@@ -633,6 +665,7 @@ export type ConversationSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.
   status?: boolean
   provider?: boolean
   providerConversationUrl?: boolean
+  preferredModelKey?: boolean
   createdAt?: boolean
   updatedAt?: boolean
   deletedAt?: boolean
@@ -644,12 +677,13 @@ export type ConversationSelectScalar = {
   status?: boolean
   provider?: boolean
   providerConversationUrl?: boolean
+  preferredModelKey?: boolean
   createdAt?: boolean
   updatedAt?: boolean
   deletedAt?: boolean
 }
 
-export type ConversationOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "title" | "status" | "provider" | "providerConversationUrl" | "createdAt" | "updatedAt" | "deletedAt", ExtArgs["result"]["conversation"]>
+export type ConversationOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "title" | "status" | "provider" | "providerConversationUrl" | "preferredModelKey" | "createdAt" | "updatedAt" | "deletedAt", ExtArgs["result"]["conversation"]>
 export type ConversationInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   messages?: boolean | Prisma.Conversation$messagesArgs<ExtArgs>
   requests?: boolean | Prisma.Conversation$requestsArgs<ExtArgs>
@@ -670,6 +704,10 @@ export type $ConversationPayload<ExtArgs extends runtime.Types.Extensions.Intern
     status: string
     provider: string
     providerConversationUrl: string | null
+    /**
+     * M1:用户在会话维度显式选择的模型键(provider 机器键,如 data-mode-id);null = 未指定
+     */
+    preferredModelKey: string | null
     createdAt: Date
     updatedAt: Date
     deletedAt: Date | null
@@ -1103,6 +1141,7 @@ export interface ConversationFieldRefs {
   readonly status: Prisma.FieldRef<"Conversation", 'String'>
   readonly provider: Prisma.FieldRef<"Conversation", 'String'>
   readonly providerConversationUrl: Prisma.FieldRef<"Conversation", 'String'>
+  readonly preferredModelKey: Prisma.FieldRef<"Conversation", 'String'>
   readonly createdAt: Prisma.FieldRef<"Conversation", 'DateTime'>
   readonly updatedAt: Prisma.FieldRef<"Conversation", 'DateTime'>
   readonly deletedAt: Prisma.FieldRef<"Conversation", 'DateTime'>

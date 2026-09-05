@@ -31,14 +31,20 @@ export class MessageService {
   /**
    * 发送消息:一个数据库事务完成 检查 → 创建 USER / ASSISTANT / REQUEST。
    * 事务提交后通知 Scheduler 立即认领(prd §6.2 M→N);Provider 执行不在本方法内。
+   *
+   * M1:modelKey 为客户端本次**显式提交**的模型键(可省略):
+   * - 参与幂等指纹(省略 = V1 语义,与旧指纹逐字节一致);偏好永不参与指纹
+   * - requestedModelKey 快照 = 显式提交 ?? 会话偏好 ?? null(创建后不再变更)
+   * - 同事务把 Conversation.preferredModelKey 同步为该键;省略则绝不触碰偏好
    */
   async sendMessage(
     conversationId: string,
     rawContent: string,
     idempotencyKey: string,
+    modelKey?: string,
   ): Promise<SendMessageResult> {
     const content = rawContent.trim();
-    const fingerprint = computeRequestFingerprint(conversationId, content);
+    const fingerprint = computeRequestFingerprint(conversationId, content, modelKey);
 
     // 幂等预检(同 Key 常见重复请求直接返回,避免无谓事务)
     const existing = await this.requestRepo.findByIdempotencyKey(this.prisma, idempotencyKey);
@@ -98,10 +104,15 @@ export class MessageService {
           requestFingerprint: fingerprint,
           status: "PENDING",
           provider: conversation.provider,
+          requestedModelKey: modelKey ?? conversation.preferredModelKey ?? null,
         });
 
-        // 4. 刷新 Conversation.updatedAt
-        await this.conversationRepo.update(tx, conversationId, {});
+        // 4. 显式提交模型键 → 同事务同步会话偏好;省略则只刷新 updatedAt,偏好绝不变动
+        await this.conversationRepo.update(
+          tx,
+          conversationId,
+          modelKey === undefined ? {} : { preferredModelKey: modelKey },
+        );
 
         return { request, userMessage, assistantMessage, deduplicated: false };
       });

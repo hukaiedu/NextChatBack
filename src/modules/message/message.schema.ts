@@ -8,6 +8,8 @@ export const sendMessageSchema = z.object({
     .refine((value) => value.trim().length > 0, {
       message: "content must not be empty after trim",
     }),
+  // M1:显式提交的模型键;省略 = 沿用会话偏好。键为 provider 不透明字符串,只做长度约束
+  modelKey: z.string().trim().min(1).max(256).optional(),
 });
 
 export const messageRouteParamSchema = z.object({

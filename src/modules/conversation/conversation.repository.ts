@@ -11,6 +11,8 @@ export interface ConversationUpdateData {
   title?: string;
   status?: string;
   deletedAt?: Date | null;
+  /** M1:undefined = 不动;null = 清除偏好(Prisma updateMany 原生语义,无需特判) */
+  preferredModelKey?: string | null;
 }
 
 export interface ConversationListQuery {

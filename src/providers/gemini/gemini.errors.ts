@@ -69,6 +69,20 @@ export function cancellationUnconfirmed(): AppError {
   );
 }
 
+/** M1:请求的模型键不在当前模型目录中 */
+export function modelUnavailable(key: string): AppError {
+  return new AppError(ErrorCodes.PROVIDER_MODEL_UNAVAILABLE, `Model is not available: ${key}`);
+}
+
+/** M1:读取模型目录 / 切换模型失败(detail 只允许选择器名/页面状态名) */
+export function modelSwitchFailed(detail: string, cause?: unknown): AppError {
+  return new AppError(
+    ErrorCodes.PROVIDER_MODEL_SWITCH_FAILED,
+    `Gemini model menu operation failed: ${detail}`,
+    cause,
+  );
+}
+
 /**
  * Playwright 原始异常的「关闭族」检测(§8.8 竞态)。
  *

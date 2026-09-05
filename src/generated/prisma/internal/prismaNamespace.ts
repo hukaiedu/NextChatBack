@@ -683,6 +683,7 @@ export const ConversationScalarFieldEnum = {
   status: 'status',
   provider: 'provider',
   providerConversationUrl: 'providerConversationUrl',
+  preferredModelKey: 'preferredModelKey',
   createdAt: 'createdAt',
   updatedAt: 'updatedAt',
   deletedAt: 'deletedAt'
@@ -714,6 +715,9 @@ export const ModelRequestScalarFieldEnum = {
   requestFingerprint: 'requestFingerprint',
   status: 'status',
   provider: 'provider',
+  requestedModelKey: 'requestedModelKey',
+  resolvedModelKey: 'resolvedModelKey',
+  resolvedModelLabel: 'resolvedModelLabel',
   attemptCount: 'attemptCount',
   errorCode: 'errorCode',
   errorMessage: 'errorMessage',

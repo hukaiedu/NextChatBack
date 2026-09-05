@@ -4,11 +4,13 @@ import { AppError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
 import { PROVIDER_GEMINI_WEB } from "../../config/constants.js";
 import type { BrowserManager } from "../../providers/gemini/browser-manager.js";
+import type { ProviderModelsService } from "./provider-models.service.js";
 
 /**
  * Provider API:
  *
  * GET  /api/provider/status   当前 Provider 状态(不启动浏览器)
+ * GET  /api/provider/models   模型目录(M1;BUSY 时拒绝)
  * POST /api/provider/open     启动 Browser Manager → 打开/聚焦 Gemini Page
  * POST /api/provider/restart  关闭 Context → 同一 Profile 重启 → 打开 Gemini
  *
@@ -19,7 +21,10 @@ import type { BrowserManager } from "../../providers/gemini/browser-manager.js";
  * 启动失败(如 Profile 被占用)由 BrowserManager 抛 AppError,
  * 统一错误出口返回 { error: { code, message, requestId } }。
  */
-export function createProviderRouter(browserManager: BrowserManager): Router {
+export function createProviderRouter(
+  browserManager: BrowserManager,
+  modelsService: ProviderModelsService,
+): Router {
   const router = Router();
 
   router.get("/status", (_req, res) => {
@@ -29,6 +34,11 @@ export function createProviderRouter(browserManager: BrowserManager): Router {
         status: browserManager.getStatus(),
       },
     });
+  });
+
+  router.get("/models", async (_req, res) => {
+    const catalog = await modelsService.listModels();
+    res.json({ data: catalog });
   });
 
   router.post("/open", async (_req, res) => {

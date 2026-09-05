@@ -59,6 +59,28 @@ export interface GeminiPromptResult {
   cancelled?: boolean;
 }
 
+/** M1:目录中的单个模型(provider 机器键 + 展示名) */
+export interface GeminiModelOption {
+  /** provider 机器键(实测为菜单项 data-mode-id;不透明字符串,禁止假设格式) */
+  key: string;
+  /** 页面展示名(随 UI 语言本地化,仅用于展示) */
+  label: string;
+  /** 菜单中当前被选中(会话/页面正在使用)的模型 */
+  selected: boolean;
+  /** 菜单中该项是否禁用(不可选) */
+  disabled: boolean;
+}
+
+/** M1:一次目录读取的结果 */
+export interface GeminiModelCatalog {
+  models: GeminiModelOption[];
+  /**
+   * 页面当前选中的模型键(页面状态,与会话偏好 preferredModelKey 无关);
+   * 无法确定时为 null。
+   */
+  currentModelKey: string | null;
+}
+
 /**
  * Gemini 页面自动化契约(prd §3.1:URL / DOM / Selector / 输入 / 回答读取)。
  * 抽成接口是为了 Scheduler 与服务层能注入 Fake 做无浏览器测试。
@@ -76,4 +98,9 @@ export interface GeminiAdapter {
    * page 为 null/closed 返回 true(页面已没了就不存在「仍在进行的生成」)。
    */
   confirmIdle(): Promise<boolean>;
+  /**
+   * M1:读取当前会话页面可用的模型目录(打开模型菜单 → 逐项读取 → 关闭菜单)。
+   * 页面未就绪 / DOM 变更 / 菜单操作失败 → PROVIDER_MODEL_SWITCH_FAILED。
+   */
+  listModels(): Promise<GeminiModelCatalog>;
 }

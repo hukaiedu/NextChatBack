@@ -11,6 +11,8 @@ import {
   pageClosed,
   responseTimeout,
 } from "./gemini.errors.js";
+import { AppError } from "../../common/errors/app-error.js";
+import { ErrorCodes } from "../../common/errors/error-codes.js";
 import {
   extractConversationId,
   GEMINI_SELECTORS,
@@ -20,6 +22,7 @@ import {
 import type {
   GeminiAdapter,
   GeminiAdapterOptions,
+  GeminiModelCatalog,
   GeminiPromptResult,
   GeminiPromptRunInput,
 } from "./gemini.types.js";
@@ -383,6 +386,15 @@ export class GeminiWebAdapter implements GeminiAdapter {
     } catch {
       return true;
     }
+  }
+
+  /**
+   * M1 占位:真实目录读取推迟到 M2(需要 BrowserPageHandle 的 readAll/clickNth 能力)。
+   * 按契约「尚未实现」不属于模型切换失败 —— PROVIDER_MODEL_SWITCH_FAILED 的正式语义
+   * 是「目标模型存在且可操作,但点击后无法确认切换成功」(M2 才建立抛点),这里抛 INTERNAL_ERROR。
+   */
+  async listModels(): Promise<GeminiModelCatalog> {
+    throw new AppError(ErrorCodes.INTERNAL_ERROR, "model catalog reading is not implemented until M2");
   }
 
   private async hasComposer(page: BrowserPageHandle): Promise<boolean> {

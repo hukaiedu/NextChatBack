@@ -14,6 +14,8 @@ model Conversation {
   status                  String    @default("ACTIVE")
   provider                String    @default("GEMINI_WEB")
   providerConversationUrl String?   @unique
+  /// M1:用户在会话维度显式选择的模型键(provider 机器键,如 data-mode-id);null = 未指定
+  preferredModelKey       String?
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
   deletedAt               DateTime?
@@ -53,6 +55,12 @@ model ModelRequest {
   requestFingerprint   String
   status               String
   provider             String   @default("GEMINI_WEB")
+  /// M1:创建时客户端显式提交的模型键快照(未提交则为 null,创建后不再变更)
+  requestedModelKey    String?
+  /// M1:实际执行的模型键(由 ensureModel 解析;M1 仅落库,M2 写入)
+  resolvedModelKey     String?
+  /// M1:实际执行模型的展示名(如 "3.6 Flash";M1 仅落库,M2 写入)
+  resolvedModelLabel   String?
   attemptCount         Int      @default(0)
   errorCode            String?
   errorMessage         String?

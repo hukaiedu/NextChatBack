@@ -9,6 +9,7 @@ import type {
 } from "../src/providers/gemini/browser-driver.js";
 import type {
   GeminiAdapter,
+  GeminiModelCatalog,
   GeminiPromptResult,
   GeminiPromptRunInput,
 } from "../src/providers/gemini/gemini.types.js";
@@ -381,9 +382,23 @@ export interface FakeAdapterBehavior {
   confirmIdle?: boolean;
   /** signal 被 abort 时通知测试(断言用) */
   abortObserver?: () => void;
+  /** listModels 返回的目录;省略 = A/B/C 三模型、当前 A(M1 §十 Fake 默认目录) */
+  modelCatalog?: GeminiModelCatalog;
+  /** listModels 抛出的错误;优先于 modelCatalog */
+  listModelsError?: unknown;
 }
 
 export const FAKE_CONVERSATION_URL = "https://gemini.google.com/app/f1e2d3c4b5a69788";
+
+/** M1 §十:Fake 默认模型目录(A/B/C 三个不透明键,当前选中 A) */
+export const FAKE_MODEL_CATALOG: GeminiModelCatalog = {
+  models: [
+    { key: "model-a", label: "Model A", selected: true, disabled: false },
+    { key: "model-b", label: "Model B", selected: false, disabled: false },
+    { key: "model-c", label: "Model C", selected: false, disabled: false },
+  ],
+  currentModelKey: "model-a",
+};
 
 /** 无浏览器版 Gemini Adapter:让 Provider 端点的集成测试跑真 SQLite */
 export class FakeGeminiAdapter implements GeminiAdapter {
@@ -392,6 +407,8 @@ export class FakeGeminiAdapter implements GeminiAdapter {
   readonly hookUrls: string[] = [];
   /** 已推给 onText 的完整文本序列(流式用例断言用) */
   readonly streamedTexts: string[] = [];
+  /** listModels 被调用的次数(测试断言用) */
+  listModelsCalls = 0;
 
   constructor(private readonly behavior: FakeAdapterBehavior = {}) {}
 
@@ -481,5 +498,13 @@ export class FakeGeminiAdapter implements GeminiAdapter {
 
   async confirmIdle(): Promise<boolean> {
     return this.behavior.confirmIdle ?? true;
+  }
+
+  async listModels(): Promise<GeminiModelCatalog> {
+    this.listModelsCalls += 1;
+    if (this.behavior.listModelsError !== undefined) {
+      throw this.behavior.listModelsError;
+    }
+    return this.behavior.modelCatalog ?? FAKE_MODEL_CATALOG;
   }
 }
