@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { Writable } from "node:stream";
 import pino from "pino";
@@ -13,6 +13,22 @@ import { GEMINI_MODEL_SELECTORS, GEMINI_SELECTORS } from "../../src/providers/ge
 import type { GeminiAdapterOptions } from "../../src/providers/gemini/gemini.types.js";
 import { FakeDriver, createFakeManager } from "../fakes.js";
 import type { FakeModelPickerScript, FakePage, FakePageScript } from "../fakes.js";
+
+// AD-FMT-04 专用:真实转换器透传,只有含标记的输入模拟「普通解析失败」。
+// convertGeminiHtmlToMarkdown 对任意字符串都不抛错,这是触发 fallback 分支的唯一手段。
+vi.mock("../../src/providers/gemini/gemini-response-markdown.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../src/providers/gemini/gemini-response-markdown.js")>();
+  return {
+    ...actual,
+    convertGeminiHtmlToMarkdown: (html: string) => {
+      if (html.includes("FMT_EXPLODE_MARKER")) {
+        throw new Error("converter exploded");
+      }
+      return actual.convertGeminiHtmlToMarkdown(html);
+    },
+  };
+});
 
 const BASE_URL = "https://gemini.google.com/app";
 const CONVERSATION_URL = "https://gemini.google.com/app/b386795e14915155";
@@ -247,8 +263,8 @@ describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
 
     expect(texts).toEqual(["正在", "正在处理", "正在处理完成"]);
     expect(result.answer).toBe("正在处理完成");
-    // 生成期间就在读文本(不再是「完成后只读一次」)
-    expect(page.lastInnerTextCalls).toBeGreaterThan(3);
+    // 生成期间就在读内容(V1.3 起主读路径是 lastInnerHtml,不再是「完成后只读一次」)
+    expect(page.lastInnerHtmlCalls).toBeGreaterThan(3);
   });
 
   it("onText 抛错(流式落库失败)→ 整次执行失败,绝不继续读回答", async () => {
@@ -281,6 +297,8 @@ describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
         }),
       ),
     ).rejects.toThrow("db write failed");
+    // V1.3:回答读取主入口是 lastInnerHtml,两个读取方法都必须零调用
+    expect(page.lastInnerHtmlCalls).toBe(0);
     expect(page.lastInnerTextCalls).toBe(0);
   });
 
@@ -323,6 +341,7 @@ describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
         }),
       ),
     ).rejects.toMatchObject({ code: ErrorCodes.PROVIDER_PAGE_CLOSED });
+    expect(page.lastInnerHtmlCalls).toBe(0);
     expect(page.lastInnerTextCalls).toBe(0);
   });
 
@@ -405,7 +424,7 @@ describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
     const result = await adapter.runPrompt(runInput({ existingUrl: CONVERSATION_URL }));
 
     expect(result.answer).toBe("新一条");
-    expect(page.lastInnerTextCalls).toBeGreaterThan(0);
+    expect(page.lastInnerHtmlCalls).toBeGreaterThan(0);
   });
 
   // 实测(2026-09-03 人工验收 2):历史未渲染完就发送,Gemini 客户端会在缺少上文时提交 Prompt
@@ -630,6 +649,181 @@ describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
     ).rejects.toMatchObject({ code: ErrorCodes.PROVIDER_CANCELLATION_UNCONFIRMED });
     // 只遍历一轮候选,没有整轮重试
     expect(page.clickCalls).toEqual([STOP_SEL[0]]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // V1.3 富文本:readAnswerContent 统一回答读取入口(AD-FMT)
+  // 主读路径 lastInnerHtml → Markdown;三条结束方式(流式/完成/取消)格式一致。
+  // ---------------------------------------------------------------------------
+
+  it("AD-FMT-01 onText 收到 Markdown 而非 HTML", async () => {
+    const texts: string[] = [];
+    const { adapter } = await setup({
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerHtmls: ["<p>Hel</p>", "<p><b>Hello</b> world</p>", "<p><b>Hello</b> world</p>"],
+      },
+    });
+
+    const result = await adapter.runPrompt(runInput({ onText: async (t) => void texts.push(t) }));
+
+    expect(texts).toEqual(["Hel", "**Hello** world"]);
+    expect(result.answer).toBe("**Hello** world");
+  });
+
+  it("AD-FMT-02 最终 answer 与流式同格式:HTML 转 Markdown", async () => {
+    const { adapter } = await setup({
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerHtmls: ["<h2>结论</h2><p>正文内容</p>", "<h2>结论</h2><p>正文内容</p>"],
+      },
+    });
+
+    const result = await adapter.runPrompt(runInput());
+
+    expect(result.answer).toBe("## 结论\n\n正文内容");
+  });
+
+  it("AD-FMT-03 多帧是完整快照而非增量", async () => {
+    const texts: string[] = [];
+    const { adapter } = await setup({
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerHtmls: ["<p>ABC</p>", "<p>ABC</p><p>DEF</p>", "<p>ABC</p><p>DEF</p>"],
+      },
+    });
+
+    const result = await adapter.runPrompt(runInput({ onText: async (t) => void texts.push(t) }));
+
+    expect(texts).toEqual(["ABC", "ABC\n\nDEF"]);
+    expect(result.answer).toBe("ABC\n\nDEF");
+  });
+
+  it("AD-FMT-04 转换器普通异常 → 降级 innerText 纯文本 + formatFallback warn", async () => {
+    const { adapter, page, lines } = await setupWithLogger({
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerHtmls: ["<p>FMT_EXPLODE_MARKER</p>", "<p>FMT_EXPLODE_MARKER</p>"],
+        answerTexts: ["纯文本回退", "纯文本回退"],
+      },
+    });
+
+    const result = await adapter.runPrompt(runInput());
+
+    expect(result.answer).toBe("纯文本回退");
+    expect(lines.join("\n")).toContain('"formatFallback":true');
+    expect(page.lastInnerTextCalls).toBeGreaterThan(0);
+  });
+
+  it("AD-FMT-05 读内容时页面已关(关闭族异常)→ 原样上抛,绝不降级 fallback", async () => {
+    const { adapter, page } = await setup({
+      throwOnLastInnerHtml: "closed",
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerTexts: ["不该被读到", "不该被读到"],
+      },
+    });
+
+    await expect(adapter.runPrompt(runInput())).rejects.toThrow(
+      "Target page, context or browser has been closed",
+    );
+    expect(page.lastInnerHtmlCalls).toBeGreaterThan(0);
+  });
+
+  it("AD-FMT-06 读内容时 Browser 断连 → 原样上抛,绝不降级 fallback", async () => {
+    const { adapter, page } = await setup({
+      throwOnLastInnerHtml: "disconnected",
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerTexts: ["不该被读到", "不该被读到"],
+      },
+    });
+
+    await expect(adapter.runPrompt(runInput())).rejects.toThrow("browser has disconnected");
+    expect(page.lastInnerHtmlCalls).toBeGreaterThan(0);
+  });
+
+  it("AD-FMT-10 fallback lastInnerText 阶段页面关闭 → readAnswerContent 原样上抛(FINAL-FIX-01)", async () => {
+    // 竞态形态:lastInnerHtml 成功返回 → 转换器抛普通异常进入 fallback →
+    // 此刻 Page/Context 关闭。fallback 的关闭族异常必须上抛,
+    // 不得被吞成 null(「暂无回答」)或 stale answer。
+    const { adapter, page, lines } = await setupWithLogger({
+      throwOnLastInnerText: "closed",
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerHtmls: ["<p>FMT_EXPLODE_MARKER</p>", "<p>FMT_EXPLODE_MARKER</p>"],
+        answerTexts: ["不该被降级读到", "不该被降级读到"],
+      },
+    });
+
+    await expect(adapter.runPrompt(runInput())).rejects.toThrow(
+      "Target page, context or browser has been closed",
+    );
+    // 确认走的正是「lastInnerHtml 成功 → 转换失败 → fallback lastInnerText」路径
+    expect(page.lastInnerHtmlCalls).toBeGreaterThan(0);
+    expect(page.lastInnerTextCalls).toBeGreaterThan(0);
+    expect(lines.join("\n")).toContain('"formatFallback":true');
+  });
+
+  it("AD-FMT-07 取消 partial 与正常完成同格式(Markdown)", async () => {
+    const controller = new AbortController();
+    const { adapter, page } = await setup({
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: { ...FIRST_TURN_DOM, [STOP_SEL[0]]: 1 },
+        answerHtmls: ["<p>生成中</p>", "<p>生成中</p>"],
+      },
+      afterStopClick: {
+        domCounts: { [STOP_SEL[0]]: 0 },
+        answerHtmls: ["<p><b>部分</b>内容</p>", "<p><b>部分</b>内容</p>"],
+      },
+    });
+
+    const result = await adapter.runPrompt(
+      runInput({ signal: controller.signal, onConversationUrl: abortOnUrl(controller) }),
+    );
+
+    expect(result.cancelled).toBe(true);
+    expect(result.answer).toBe("**部分**内容");
+    expect(page.clickCalls).toEqual([STOP_SEL[0]]);
+  });
+
+  it("AD-FMT-08 纯文本回答不产生转义/包裹伪影", async () => {
+    const { adapter } = await setup({
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerHtmls: ["<p>plain answer 42</p>", "<p>plain answer 42</p>"],
+      },
+    });
+
+    const result = await adapter.runPrompt(runInput());
+
+    expect(result.answer).toBe("plain answer 42");
+  });
+
+  it("AD-FMT-09 HTML 非空但 Markdown 空、页面文本非空 → 降级纯文本并 warn", async () => {
+    const chromeOnly = '<div class="buttons"><button>copy</button></div>';
+    const { adapter, lines } = await setupWithLogger({
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: FIRST_TURN_DOM,
+        answerHtmls: [chromeOnly, chromeOnly],
+        answerTexts: ["纯文本兜底", "纯文本兜底"],
+      },
+    });
+
+    const result = await adapter.runPrompt(runInput());
+
+    expect(result.answer).toBe("纯文本兜底");
+    expect(lines.join("\n")).toContain('"formatFallback":true');
   });
 
   // ---------------------------------------------------------------------------

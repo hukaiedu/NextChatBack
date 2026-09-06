@@ -22,6 +22,7 @@ import {
   isSameConversation,
   normalizeConversationUrl,
 } from "./gemini.selectors.js";
+import { convertGeminiHtmlToMarkdown } from "./gemini-response-markdown.js";
 import type {
   GeminiAdapter,
   GeminiAdapterOptions,
@@ -327,9 +328,10 @@ export class GeminiWebAdapter implements GeminiAdapter {
       }
 
       const current = await this.snapshot(page);
-      // 本轮回答元素一出现就开始读文本:生成中的文本就是流式来源(第 6 阶段)
+      // 本轮回答元素一出现就开始读内容:生成中的内容就是流式来源(第 6 阶段);
+      // V1.3 起统一走 readAnswerContent(HTML → Markdown),三条路径格式一致
       if (current.answers > baseline.answers) {
-        const text = await page.lastInnerText(GEMINI_SELECTORS.answerText);
+        const text = await this.readAnswerContent(page);
         if (text !== null && text !== lastText) {
           lastText = text;
           textChangedAt = Date.now();
@@ -419,7 +421,7 @@ export class GeminiWebAdapter implements GeminiAdapter {
       const snap = await this.snapshot(page);
       const shellsEqual = snap.shells === snap.answers;
 
-      const currentText = await page.lastInnerText(GEMINI_SELECTORS.answerText);
+      const currentText = await this.readAnswerContent(page);
       if (currentText !== prevText) {
         prevText = currentText;
         textStableSince = Date.now();
@@ -441,6 +443,66 @@ export class GeminiWebAdapter implements GeminiAdapter {
     }
 
     throw cancellationUnconfirmed();
+  }
+
+  /**
+   * V1.3 富文本:统一回答读取入口 —— 正常流式 / 最终 answer / 取消 partial 三条
+   * 路径共用,保证三种结束方式的格式一致(HTML → Markdown)。
+   *
+   * 流程:lastInnerHtml → convertGeminiHtmlToMarkdown;普通转换异常降级
+   * lastInnerText + formatFallback 日志;关闭族异常(lastInnerHtml 已上抛)不进
+   * fallback,继续走页面生命周期错误链路。
+   *
+   * 空内容规则(§十六):Markdown 为空而页面文本非空 → 转换器丢正文,降级纯文本;
+   * 两者都空 → DOM 仍在流式构造,返回 null(暂不 push)。
+   */
+  private async readAnswerContent(page: BrowserPageHandle): Promise<string | null> {
+    const extractStartedAt = Date.now();
+    const html = await page.lastInnerHtml(GEMINI_SELECTORS.answerText);
+    const extractElapsedMs = Date.now() - extractStartedAt;
+    if (html === null) {
+      return null;
+    }
+
+    const convertStartedAt = Date.now();
+    let markdown: string;
+    try {
+      markdown = convertGeminiHtmlToMarkdown(html);
+    } catch (err) {
+      this.logger.warn(
+        { formatFallback: true, responseExtractElapsedMs: extractElapsedMs },
+        "gemini answer markdown conversion failed; falling back to plain text",
+      );
+      return page.lastInnerText(GEMINI_SELECTORS.answerText);
+    }
+    const convertElapsedMs = Date.now() - convertStartedAt;
+
+    if (markdown.trim().length === 0) {
+      const plain = await page.lastInnerText(GEMINI_SELECTORS.answerText);
+      if (plain !== null && plain.trim().length > 0) {
+        this.logger.warn(
+          {
+            formatFallback: true,
+            responseExtractElapsedMs: extractElapsedMs,
+            responseConvertElapsedMs: convertElapsedMs,
+          },
+          "gemini answer markdown is empty while page text is not; falling back to plain text",
+        );
+        return plain;
+      }
+      return null;
+    }
+
+    // 正常耗时只进 debug(§十九:流式轮询高频,不允许刷 INFO)
+    this.logger.debug(
+      {
+        responseExtractElapsedMs: extractElapsedMs,
+        responseConvertElapsedMs: convertElapsedMs,
+        formatFallback: false,
+      },
+      "gemini answer content converted to markdown",
+    );
+    return markdown;
   }
 
   /**

@@ -43,8 +43,21 @@ export interface BrowserPageHandle {
   fill(selector: string, value: string): Promise<void>;
   /** 在目标元素上按下按键(如 Enter 提交) */
   press(selector: string, key: string): Promise<void>;
-  /** 取最后一个匹配元素的渲染文本;无匹配返回 null */
+  /**
+   * 取最后一个匹配元素的渲染文本。与 readAll/lastInnerHtml 同一异常语义:
+   * 无匹配返回 null;普通瞬态读取失败(读取间隙 DOM 变动等)降级 null;
+   * 页面/Context 关闭、Browser 断连等关闭族异常原样上抛,不得降级成 null
+   * (readAnswerContent 的 fallback 复用本方法,吞掉生命周期异常会把
+   * PAGE_CLOSED/BROWSER_CRASHED 伪造成「暂无回答」)。
+   */
   lastInnerText(selector: string): Promise<string | null>;
+  /**
+   * V1.3 富文本:取最后一个匹配元素的 innerHTML(回答结构化读取用)。
+   * 无匹配返回 null;普通瞬态读取失败(读取间隙 DOM 变动等)降级 null;
+   * 页面/Context 关闭、Browser 断连等关闭族异常原样上抛(与 readAll 同一语义,
+   * 禁止降级成 null —— 否则上层会把 PAGE_CLOSED/BROWSER_CRASHED 误判成「暂无回答」)。
+   */
+  lastInnerHtml(selector: string): Promise<string | null>;
   /** 点击第一个匹配元素;目标不存在时抛错(由调用方映射 PROVIDER_DOM_CHANGED) */
   click(selector: string, options?: { timeoutMs?: number }): Promise<void>;
   /**

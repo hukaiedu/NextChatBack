@@ -140,6 +140,11 @@ export class PlaywrightPageHandle implements BrowserPageHandle {
     await this.page.keyboard.press(key);
   }
 
+  /**
+   * 与 readAll/lastInnerHtml 同一异常语义(FINAL-FIX-01):无匹配 null、普通瞬态
+   * 读取失败 null;页面/Context 关闭、Browser 断连等关闭族异常原样上抛 ——
+   * fallback 路径复用本方法,吞掉生命周期异常会把页面故障伪造成「暂无回答」。
+   */
   async lastInnerText(selector: string): Promise<string | null> {
     try {
       const last = this.page.locator(selector).last();
@@ -147,7 +152,29 @@ export class PlaywrightPageHandle implements BrowserPageHandle {
         return null;
       }
       return await last.innerText();
-    } catch {
+    } catch (err) {
+      if (isContextClosedError(err)) {
+        throw err;
+      }
+      return null;
+    }
+  }
+
+  /**
+   * V1.3:与 lastInnerText 同构,但关闭族异常不吞 —— 与 readAll 同一语义,
+   * 页面生命周期故障必须上抛,不得降级成 null(否则上层误判「暂无回答」)。
+   */
+  async lastInnerHtml(selector: string): Promise<string | null> {
+    try {
+      const last = this.page.locator(selector).last();
+      if ((await last.count()) === 0) {
+        return null;
+      }
+      return await last.innerHTML();
+    } catch (err) {
+      if (isContextClosedError(err)) {
+        throw err;
+      }
       return null;
     }
   }

@@ -110,3 +110,120 @@ describe("PlaywrightBrowserDriver.countElements(FIX-05)", () => {
     await expect(handle.countElements("sel")).resolves.toBe(0);
   });
 });
+
+/**
+ * V1.3 富文本(F1):lastInnerHtml 与 readAll 同一异常语义 ——
+ * 无匹配/普通瞬态失败 → null;关闭族异常(页面关闭、Browser 断连)原样上抛,
+ * 绝不允许复制 lastInnerText 的 catch-all(否则上层把页面故障误判成「暂无回答」)。
+ */
+describe("PlaywrightBrowserDriver.lastInnerHtml(V1.3 DRV-HTML)", () => {
+  function makeHtmlHandle(
+    last: { count: () => Promise<number>; innerHTML: () => Promise<string> },
+  ): PlaywrightPageHandle {
+    const page = {
+      on: () => undefined,
+      locator: () => ({ last: () => last }),
+    } as unknown as Page;
+    return new PlaywrightPageHandle(page);
+  }
+
+  it("DRV-HTML-01 有匹配元素 → 返回 innerHTML", async () => {
+    const handle = makeHtmlHandle({
+      count: async () => 1,
+      innerHTML: async () => "<p>hello <b>world</b></p>",
+    });
+
+    await expect(handle.lastInnerHtml("sel")).resolves.toBe("<p>hello <b>world</b></p>");
+  });
+
+  it("DRV-HTML-02 无匹配元素 → null", async () => {
+    const handle = makeHtmlHandle({
+      count: async () => 0,
+      innerHTML: async () => "<p>should not be read</p>",
+    });
+
+    await expect(handle.lastInnerHtml("sel")).resolves.toBeNull();
+  });
+
+  it("DRV-HTML-03 普通瞬态读取失败 → null", async () => {
+    const handle = makeHtmlHandle({
+      count: async () => 1,
+      innerHTML: async () => Promise.reject(new Error(TRANSIENT_MESSAGE)),
+    });
+
+    await expect(handle.lastInnerHtml("sel")).resolves.toBeNull();
+  });
+
+  it("DRV-HTML-04 关闭族异常(页面关闭)→ 原样上抛,不降级 null", async () => {
+    const handle = makeHtmlHandle({
+      count: async () => 1,
+      innerHTML: async () => Promise.reject(new Error(CLOSED_MESSAGE)),
+    });
+
+    await expect(handle.lastInnerHtml("sel")).rejects.toThrow(CLOSED_MESSAGE);
+  });
+
+  it("DRV-HTML-05 关闭族异常(browser has disconnected,含 count 阶段)→ 原样上抛", async () => {
+    const handle = makeHtmlHandle({
+      count: async () => {
+        throw new Error("browser has disconnected");
+      },
+      innerHTML: async () => "<p>unreachable</p>",
+    });
+
+    await expect(handle.lastInnerHtml("sel")).rejects.toThrow("browser has disconnected");
+  });
+});
+
+/**
+ * FINAL-FIX-01:lastInnerText 与 readAll/lastInnerHtml 收口到同一异常语义 ——
+ * 它是 readAnswerContent 的 fallback 读取路径,catch-all 吞掉关闭族异常会把
+ * PAGE_CLOSED/BROWSER_CRASHED 伪造成「暂无回答」(null)。
+ */
+describe("PlaywrightBrowserDriver.lastInnerText(FINAL-FIX-01 DRV-TEXT)", () => {
+  function makeTextHandle(
+    last: { count: () => Promise<number>; innerText: () => Promise<string> },
+  ): PlaywrightPageHandle {
+    const page = {
+      on: () => undefined,
+      locator: () => ({ last: () => last }),
+    } as unknown as Page;
+    return new PlaywrightPageHandle(page);
+  }
+
+  it("DRV-TEXT-01 有匹配元素 → 返回 innerText", async () => {
+    const handle = makeTextHandle({
+      count: async () => 1,
+      innerText: async () => "纯文本回答",
+    });
+
+    await expect(handle.lastInnerText("sel")).resolves.toBe("纯文本回答");
+  });
+
+  it("DRV-TEXT-02 无匹配元素 → null", async () => {
+    const handle = makeTextHandle({
+      count: async () => 0,
+      innerText: async () => "should not be read",
+    });
+
+    await expect(handle.lastInnerText("sel")).resolves.toBeNull();
+  });
+
+  it("DRV-TEXT-03 普通瞬态读取失败 → null", async () => {
+    const handle = makeTextHandle({
+      count: async () => 1,
+      innerText: async () => Promise.reject(new Error(TRANSIENT_MESSAGE)),
+    });
+
+    await expect(handle.lastInnerText("sel")).resolves.toBeNull();
+  });
+
+  it("DRV-TEXT-04 关闭族异常(页面关闭)→ 原样上抛,不降级 null", async () => {
+    const handle = makeTextHandle({
+      count: async () => 1,
+      innerText: async () => Promise.reject(new Error(CLOSED_MESSAGE)),
+    });
+
+    await expect(handle.lastInnerText("sel")).rejects.toThrow(CLOSED_MESSAGE);
+  });
+});

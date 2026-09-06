@@ -89,6 +89,20 @@ export interface FakePageScript {
   domCounts?: Record<string, number>;
   /** lastInnerText 依次返回的文本;读尽后重复最后一条,空队列返回 null */
   answerTexts?: string[];
+  /** V1.3:lastInnerHtml 依次返回的 HTML;读尽后重复最后一条,空队列返回 null */
+  answerHtmls?: string[];
+  /**
+   * V1.3:lastInnerHtml 异常剧本。"closed"/"disconnected" 抛关闭族异常但不置页面
+   * 标志(连接先死、状态未落地的竞态,与 modelPicker.failElementRead 同构),
+   * Adapter 不得将其降级成 fallback;"generic" 抛普通瞬态异常(应降级 null/fallback)。
+   */
+  throwOnLastInnerHtml?: "closed" | "disconnected" | "generic";
+  /**
+   * FINAL-FIX-01:lastInnerText 异常剧本,语义与 throwOnLastInnerHtml 相同 ——
+   * "closed"/"disconnected" 抛关闭族异常但不置页面标志,"generic" 抛普通瞬态异常。
+   * fallback 路径复用 lastInnerText,关闭族异常必须原样上抛。
+   */
+  throwOnLastInnerText?: "closed" | "disconnected" | "generic";
   /** lastInnerText 每次都返回不同文本(模拟持续流式输出,永不停稳) */
   neverStable?: boolean;
   /** 模拟输入框存在但不可写(Playwright fill 会抛错) */
@@ -109,11 +123,13 @@ export interface FakePageScript {
     url?: string;
     domCounts?: Record<string, number>;
     answerTexts?: string[];
+    answerHtmls?: string[];
   };
   /** 点击停止按钮后生效的页面变化(第 8 阶段取消测试用) */
   afterStopClick?: {
     domCounts?: Record<string, number>;
     answerTexts?: string[];
+    answerHtmls?: string[];
   };
   /** M2:模型选择菜单剧本 */
   modelPicker?: FakeModelPickerScript;
@@ -130,6 +146,9 @@ export class FakePage implements BrowserPageHandle {
   showSignInLink: boolean;
   domCounts: Record<string, number>;
   answerTexts: string[];
+  answerHtmls: string[];
+  throwOnLastInnerHtml: FakePageScript["throwOnLastInnerHtml"];
+  throwOnLastInnerText: FakePageScript["throwOnLastInnerText"];
   neverStable: boolean;
   throwOnFill: boolean;
   throwOnGoto: boolean;
@@ -169,6 +188,9 @@ export class FakePage implements BrowserPageHandle {
     this.showSignInLink = showSignInLink;
     this.domCounts = { ...script.domCounts };
     this.answerTexts = [...(script.answerTexts ?? [])];
+    this.answerHtmls = [...(script.answerHtmls ?? [])];
+    this.throwOnLastInnerHtml = script.throwOnLastInnerHtml;
+    this.throwOnLastInnerText = script.throwOnLastInnerText;
     this.neverStable = script.neverStable ?? false;
     this.throwOnFill = script.throwOnFill ?? false;
     this.throwOnGoto = script.throwOnGoto ?? false;
@@ -293,10 +315,22 @@ export class FakePage implements BrowserPageHandle {
     if (send.answerTexts) {
       this.answerTexts = [...send.answerTexts];
     }
+    if (send.answerHtmls) {
+      this.answerHtmls = [...send.answerHtmls];
+    }
   }
 
   async lastInnerText(selector: string): Promise<string | null> {
     this.lastInnerTextCalls++;
+    switch (this.throwOnLastInnerText) {
+      case "closed":
+        // FINAL-FIX-01:关闭族异常但 flags 未落地,不得被降级 null
+        throw new Error("Target page, context or browser has been closed");
+      case "disconnected":
+        throw new Error("browser has disconnected");
+      case "generic":
+        throw new Error("element is detached");
+    }
     if (this.neverStable) {
       this.textTick++;
       return `streaming ${this.textTick}`;
@@ -310,6 +344,45 @@ export class FakePage implements BrowserPageHandle {
     }
     // 最后一条不消费:重复返回,让调用方能观察到文本稳定
     return queue[0] ?? null;
+  }
+
+  lastInnerHtmlCalls = 0;
+
+  async lastInnerHtml(selector: string): Promise<string | null> {
+    this.lastInnerHtmlCalls++;
+    switch (this.throwOnLastInnerHtml) {
+      case "closed":
+        // 关闭族异常但 flags 未落地(真实 Playwright 竞态形态),不得被降级 null
+        throw new Error("Target page, context or browser has been closed");
+      case "disconnected":
+        throw new Error("browser has disconnected");
+      case "generic":
+        throw new Error("element is detached");
+    }
+    // V1.3:主读路径是 lastInnerHtml(HTML → Markdown)。未配置 answerHtmls 时,
+    // 从 answerTexts 消费同一帧合成 <p>(innerText 与 innerHTML 是同一 DOM 节点的
+    // 两种视图,不允许两套队列各自前进导致帧错位)——既有 answerTexts 剧本自动获得
+    // 与旧 lastInnerText 时代等价的回答内容。
+    const htmlQueue = this.answerHtmls;
+    if (htmlQueue.length > 0) {
+      if (htmlQueue.length > 1) {
+        return htmlQueue.shift() ?? null;
+      }
+      // 最后一条不消费:重复返回,让调用方能观察到稳定
+      return htmlQueue[0] ?? null;
+    }
+    if (this.neverStable) {
+      this.textTick += 1;
+      return `<p>streaming ${this.textTick}</p>`;
+    }
+    const textQueue = this.answerTexts;
+    if (textQueue.length === 0) {
+      return null;
+    }
+    if (textQueue.length > 1) {
+      return `<p>${escapeHtmlText(textQueue.shift() ?? "")}</p>`;
+    }
+    return `<p>${escapeHtmlText(textQueue[0] ?? "")}</p>`;
   }
 
   async click(selector: string, options?: { timeoutMs?: number }): Promise<void> {
@@ -342,6 +415,9 @@ export class FakePage implements BrowserPageHandle {
       }
       if (stop.answerTexts) {
         this.answerTexts = [...stop.answerTexts];
+      }
+      if (stop.answerHtmls) {
+        this.answerHtmls = [...stop.answerHtmls];
       }
     }
   }
@@ -558,6 +634,14 @@ export class FakeDriver implements BrowserDriver {
 }
 
 const silentLogger: Logger = createLogger("silent");
+
+/** 合成 <p> 前的文本转义:保证 answerTexts 含 < > & 时合成 HTML 仍可被解析还原 */
+function escapeHtmlText(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 export function createFakeManager(driver: FakeDriver, script?: FakePageScript): BrowserManager {
   if (script) {
