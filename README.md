@@ -32,6 +32,7 @@
 - [22. 常见问题](#22-常见问题)
 - [23. 安全说明](#23-安全说明)
 - [24. 相关仓库](#24-相关仓库)
+- [25. V1.1 模型选择（Gemini Web）](#25-v11-模型选择gemini-web)
 
 ---
 
@@ -579,13 +580,14 @@ HTTP 状态码小结：
 | `GET` | `/api/provider/status` | `200` | 查询 Provider 状态（不启动浏览器） |
 | `POST` | `/api/provider/open` | `200` | 启动 BrowserManager，打开 / 聚焦 Gemini |
 | `POST` | `/api/provider/restart` | `200` | 关闭 Context → 同 profile 重启 → 打开 Gemini；`BUSY` 时拒绝 |
+| `GET` | `/api/provider/models` | `200` | 模型目录（V1.1，实时读取 Gemini Web）；`LOGIN_REQUIRED` → 401，其余非 READY → 500 |
 | `POST` | `/api/conversations` | `201` | 创建会话（`title` 可选） |
 | `GET` | `/api/conversations` | `200` | 列表；`?status=ACTIVE\|ARCHIVED`（默认 `ACTIVE`）、`limit`（1–100，默认 30）、`cursor` |
 | `GET` | `/api/conversations/:id` | `200` | 会话详情 |
-| `PATCH` | `/api/conversations/:id` | `200` | 改 `title` 和 / 或 `status`（`ACTIVE`↔`ARCHIVED`，即重命名 / 归档 / 恢复） |
+| `PATCH` | `/api/conversations/:id` | `200` | 改 `title` / `status`（`ACTIVE`↔`ARCHIVED`）；V1.1 起支持 `preferredModelKey`（会话模型偏好，显式 `null` = 恢复默认模型） |
 | `DELETE` | `/api/conversations/:id` | `204` | 软删除（标记 `DELETED`，不可恢复） |
 | `GET` | `/api/conversations/:id/messages` | `200` | 消息列表（`position` ASC，Assistant 附带 Request 摘要） |
-| `POST` | `/api/conversations/:id/messages` | `202` / `200` | 发送消息；需 `Idempotency-Key` 头。首次创建 Request → `202`；幂等命中 → `200` |
+| `POST` | `/api/conversations/:id/messages` | `202` / `200` | 发送消息；需 `Idempotency-Key` 头；body 可选 `modelKey`（V1.1，显式指定本次模型）。首次创建 Request → `202`；幂等命中 → `200` |
 | `GET` | `/api/requests/:id` | `200` | 查询 Request 当前状态 |
 | `POST` | `/api/requests/:id/cancel` | `202` / `200` | 取消；`PROCESSING→CANCELLING` → `202`，`PENDING→CANCELLED` / noop → `200` |
 | `GET` | `/api/requests/:id/events` | `200` | SSE 事件流（`text/event-stream`） |
@@ -765,4 +767,22 @@ Backend:  https://github.com/hukaiedu/NextChatBack
 
 ---
 
-> 本 README 以冻结 commit `4dfb074a48f236b2b3fa20dc7fe88d4e562ff073` 的源码为准编写。若文档与源码冲突，以该 commit 的源码为准。
+## 25. V1.1 模型选择（Gemini Web）
+
+V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择，全部基于 Gemini Web 动态目录，无任何静态模型配置：
+
+- **请求链路定位**：NextChat Frontend → 本 Backend（REST / SSE）→ Playwright Chromium → Gemini Web；不使用 Gemini API，单用户、单实例、本地运行。
+- **模型目录**：`GET /api/provider/models`，由 Provider 页面实时读取（`listModels()`）。仅 `READY` 可用；`LOGIN_REQUIRED` → `401 PROVIDER_LOGIN_REQUIRED`，其余非 READY 状态 → `500 PROVIDER_NOT_READY`。
+- **三层模型字段**：
+  - `Conversation.preferredModelKey` —— 会话模型偏好，经 `PATCH /api/conversations/:id` 保存（显式 `null` = 恢复默认模型）；
+  - `Request.requestedModelKey` —— Request 创建时冻结的快照（`body.modelKey ?? 会话偏好 ?? null`），后续偏好修改不影响在途请求；
+  - `Request.resolvedModelKey / resolvedModelLabel` —— 执行时 `ensureModel()` 确认成功的模型，在发送 Prompt 前落库。
+- **执行链路**：Scheduler 认领 → `ensureModel`（目录校验 → 菜单切换 → 重验选中）→ resolved 落库 → `runPrompt`。切换失败（`PROVIDER_MODEL_UNAVAILABLE` / `PROVIDER_MODEL_SWITCH_FAILED`）Request 一律 `FAILED`，**Prompt 不发送**。
+- **默认模型兼容路径**：`preferredModelKey=null` 且 body 不带 `modelKey` → `requestedModelKey=null` → **完全不调用 `ensureModel`**（0 次模型菜单 DOM），resolved 字段保持 `null`，行为与 V1 冻结基线一致。
+- **模型键语义**：模型 key 是 Gemini Web 菜单的不透明 `data-mode-id`，**禁止硬编码**，不保证跨账号 / 跨会话稳定；历史偏好键不在当前目录时不会被自动清除，执行时判 `PROVIDER_MODEL_UNAVAILABLE`。
+- **Provider Page 互斥（ProviderPageLock）**：Scheduler 执行（openGemini / ensureModel / runPrompt）与 `GET /api/provider/models`（listModels）共用同一把 Page 锁，同一时刻至多一个操作进入 Gemini 页面，锁被占用时 `listModels` 立即返回 `PROVIDER_NOT_READY`；叠加 Scheduler 全局并发 = 1，模型操作与对话执行永不并发。
+- **幂等**：会话偏好不参与请求指纹（`modelKey` 显式携带时参与）；同 Key 同内容重试不受偏好变化影响。
+
+---
+
+> 本 README 以 V1 冻结 commit `4dfb074a48f236b2b3fa20dc7fe88d4e562ff073` 的源码为基础编写；V1.1 模型选择章节对应 commit `c588c8d`（M4 收口）。若文档与源码冲突，以对应 commit 的源码为准。
