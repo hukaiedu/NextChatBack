@@ -7,7 +7,7 @@ import type {
   BrowserPageHandle,
   BrowserProviderStatus,
 } from "./browser-driver.js";
-import { GeminiSessionChecker } from "./session-checker.js";
+import { GeminiSessionChecker, isGeminiChatUrl } from "./session-checker.js";
 import { extractConversationId } from "./gemini.selectors.js";
 
 export interface BrowserManagerOptions {
@@ -81,25 +81,38 @@ export class BrowserManager {
     return this.state;
   }
 
-  /** 启动浏览器并打开/聚焦 Gemini 页面,返回最终状态(READY / LOGIN_REQUIRED) */
+  /** 启动浏览器并强制导航到 Gemini 首页,返回最终状态(READY / LOGIN_REQUIRED) */
   async openGemini(): Promise<BrowserProviderStatus> {
-    return this.runExclusive(async () => {
-      // BUSY = 有 Request 正在该页面上执行;此时导航会毁掉进行中的生成。
-      // 检查放在 runExclusive 内:即使调用排在执行期间,状态落到这里时仍是实时值。
-      if (this.state === "BUSY") {
-        throw new AppError(
-          ErrorCodes.PROVIDER_NOT_READY,
-          "browser is busy executing another request",
-        );
-      }
-      // 自愈:Chromium 僵死但 context 未 close → newPage() 永久挂住 → Scheduler 静默卡死。
-      // 先 closeContext 让 ensureContextStarted 重建干净的 Chromium。
-      if (this.state === "ERROR") {
-        await this.closeContext("self-heal from ERROR");
-      }
-      await this.ensureContextStarted();
-      return this.ensureGeminiPage();
-    });
+    return this.runExclusive(() => this.ensureProvider("always"));
+  }
+
+  /**
+   * Scheduler Provider Gate 入口:确保浏览器与 Gemini 页可用即返回最终状态。
+   * 与 openGemini 唯一差异:当前页已是健康 Gemini 聊天页且确认登录时跳过导航(0 goto);
+   * 页缺失/漂移/登录态不确定等其余路径与 openGemini 完全一致。
+   */
+  async ensureReady(): Promise<BrowserProviderStatus> {
+    return this.runExclusive(() => this.ensureProvider("ifNeeded"));
+  }
+
+  private async ensureProvider(
+    navigation: "always" | "ifNeeded",
+  ): Promise<BrowserProviderStatus> {
+    // BUSY = 有 Request 正在该页面上执行;此时导航会毁掉进行中的生成。
+    // 检查放在 runExclusive 内:即使调用排在执行期间,状态落到这里时仍是实时值。
+    if (this.state === "BUSY") {
+      throw new AppError(
+        ErrorCodes.PROVIDER_NOT_READY,
+        "browser is busy executing another request",
+      );
+    }
+    // 自愈:Chromium 僵死但 context 未 close → newPage() 永久挂住 → Scheduler 静默卡死。
+    // 先 closeContext 让 ensureContextStarted 重建干净的 Chromium。
+    if (this.state === "ERROR") {
+      await this.closeContext("self-heal from ERROR");
+    }
+    await this.ensureContextStarted();
+    return this.ensureGeminiPage(navigation);
   }
 
   /**
@@ -354,7 +367,9 @@ export class BrowserManager {
   }
 
   /** 确保存在可用 Gemini Page 并完成导航与登录检测 */
-  private async ensureGeminiPage(): Promise<BrowserProviderStatus> {
+  private async ensureGeminiPage(
+    navigation: "always" | "ifNeeded" = "always",
+  ): Promise<BrowserProviderStatus> {
     const context = this.context;
     if (!context || context.isClosed()) {
       throw new AppError(ErrorCodes.PROVIDER_NOT_READY, "Browser is not ready");
@@ -366,6 +381,24 @@ export class BrowserManager {
       this.bindPageEvents(page);
       this.page = page;
       this.logger.info("gemini page created");
+    }
+
+    // FIX-04:零导航仅在「页面健康且确认已登录」时短路;一次 check=false 不得
+    // 定案 LOGIN_REQUIRED——checker 会把 DOM/关闭族异常 catch 成 false,断连竞态下
+    // url() 可能仍是旧聊天页且 isCrashed 尚未落地 → fallback 走既有 goto 流程:
+    // 真未登录 = 导航后再判 LOGIN_REQUIRED;页面已死 = goto 抛关闭族,保持原语义。
+    if (
+      navigation === "ifNeeded" &&
+      !page.isCrashed() &&
+      isGeminiChatUrl(page.url(), this.options.geminiBaseUrl)
+    ) {
+      if (await this.checker.checkLoggedIn(page)) {
+        this.transitionTo("READY", "gemini ready (navigation skipped)");
+        return this.state;
+      }
+      this.logger.info(
+        "gemini session check failed on chat page, falling back to navigation",
+      );
     }
 
     try {

@@ -5,7 +5,10 @@ import type {
   BrowserPageHandle,
 } from "../../src/providers/gemini/browser-driver.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
-import { FakeDriver, createFakeManager } from "../fakes.js";
+import { isGeminiChatUrl } from "../../src/providers/gemini/session-checker.js";
+import { FakeDriver, createFakeManager, FAKE_CONVERSATION_URL } from "../fakes.js";
+
+const BASE_URL = "https://gemini.google.com/app";
 
 describe("BrowserManager 状态机(Fake Driver,不依赖真实浏览器/Google)", () => {
   it("初始状态 STOPPED", () => {
@@ -166,6 +169,152 @@ describe("BrowserManager 状态机(Fake Driver,不依赖真实浏览器/Google)"
       code: ErrorCodes.PROVIDER_NAVIGATION_FAILED,
     });
     expect(manager.getStatus()).toBe("ERROR");
+  });
+});
+
+describe("isGeminiChatUrl(纯函数,P2 零导航判据)", () => {
+  it("接受 /app 与 /app/<conversationId>,拒绝外域、非聊天路径、坏 URL 与 /u/N 形态", () => {
+    expect(isGeminiChatUrl(BASE_URL, BASE_URL)).toBe(true);
+    expect(isGeminiChatUrl(FAKE_CONVERSATION_URL, BASE_URL)).toBe(true);
+    expect(isGeminiChatUrl(`${BASE_URL}/`, BASE_URL)).toBe(true);
+    expect(isGeminiChatUrl("https://gemini.google.com/gems", BASE_URL)).toBe(false);
+    expect(isGeminiChatUrl("https://accounts.google.com/app", BASE_URL)).toBe(false);
+    expect(isGeminiChatUrl("about:blank", BASE_URL)).toBe(false);
+    // FIX-01:/u/N/app 多账号形态不在本阶段支持范围(避免两套 URL 语义)
+    expect(isGeminiChatUrl("https://gemini.google.com/u/1/app", BASE_URL)).toBe(false);
+  });
+});
+
+describe("BrowserManager.ensureReady(Provider Gate 零导航,P2)", () => {
+  it("BM-ER-00 冷启动(页缺失):新建页 + 恰一次 goto 首页 → READY", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+
+    const status = await manager.ensureReady();
+
+    expect(status).toBe("READY");
+    expect(driver.launchCount).toBe(1);
+    expect(driver.latestContext!.lastPage!.gotoCalls).toEqual([BASE_URL]);
+  });
+
+  it("BM-ER-A 健康 Gemini 聊天页(会话页)ensureReady 零导航直达 READY", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+    await manager.openGemini();
+    const page = driver.latestContext!.lastPage!;
+    // 模拟上一轮执行后页面停在某个会话(真实落点不经 goto)
+    page.currentUrl = FAKE_CONVERSATION_URL;
+
+    const status = await manager.ensureReady();
+
+    expect(status).toBe("READY");
+    expect(page.gotoCalls).toEqual([BASE_URL]);
+    expect(manager.requireGeminiPage()).toBe(page);
+  });
+
+  it("BM-ER-A2 页面漂到同域非聊天路径 → fallback 恰一次 goto 回首页", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+    await manager.openGemini();
+    const page = driver.latestContext!.lastPage!;
+    page.currentUrl = "https://gemini.google.com/gems";
+
+    const status = await manager.ensureReady();
+
+    expect(status).toBe("READY");
+    expect(page.gotoCalls).toEqual([BASE_URL, BASE_URL]);
+  });
+
+  it("BM-ER-B 聊天页上登录检查失败 → fallback goto 后仍 false → LOGIN_REQUIRED(恰一次 fallback 导航)", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+    await manager.openGemini();
+    const page = driver.latestContext!.lastPage!;
+    page.currentUrl = FAKE_CONVERSATION_URL;
+    page.showSignInLink = true; // 登录态失效:无 composer、有 Sign in 链接
+
+    const status = await manager.ensureReady();
+
+    // FIX-04:一次 check=false 不定案,必须先 fallback 导航,导航后仍 false 才 LOGIN_REQUIRED
+    expect(status).toBe("LOGIN_REQUIRED");
+    expect(page.gotoCalls).toEqual([BASE_URL, BASE_URL]);
+  });
+
+  it("BM-ER-C 会话检查抛关闭族 + goto 恒抛(断连竞态)→ NAVIGATION_FAILED,不误报 LOGIN_REQUIRED", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+    await manager.openGemini();
+    const page = driver.latestContext!.lastPage!;
+    page.currentUrl = FAKE_CONVERSATION_URL;
+    page.countElements = async () => {
+      throw new Error("Target page, context or browser has been closed");
+    };
+    page.goto = async () => {
+      throw new Error("Target page, context or browser has been closed");
+    };
+
+    await expect(manager.ensureReady()).rejects.toMatchObject({
+      code: ErrorCodes.PROVIDER_NAVIGATION_FAILED,
+    });
+    expect(manager.getStatus()).toBe("ERROR");
+  });
+
+  it("BM-ER-D BUSY 状态下 ensureReady 与 openGemini 均抛 PROVIDER_NOT_READY", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+    await manager.openGemini();
+    manager.setBusy();
+
+    await expect(manager.ensureReady()).rejects.toMatchObject({
+      code: ErrorCodes.PROVIDER_NOT_READY,
+    });
+    await expect(manager.openGemini()).rejects.toMatchObject({
+      code: ErrorCodes.PROVIDER_NOT_READY,
+    });
+    expect(driver.latestContext!.lastPage!.gotoCalls).toEqual([BASE_URL]);
+  });
+
+  it("BM-ER-E 页面 crash → ERROR;ensureReady 走自愈重启恢复 READY", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+    await manager.openGemini();
+    driver.latestContext!.lastPage!.emitCrashed();
+    expect(manager.getStatus()).toBe("ERROR");
+
+    const status = await manager.ensureReady();
+
+    expect(status).toBe("READY");
+    expect(driver.launchCount).toBe(2);
+    expect(driver.latestContext!.lastPage!.gotoCalls).toEqual([BASE_URL]);
+  });
+
+  it("BM-ER-F 页面被用户关闭 → STOPPED;ensureReady 同 Context 重建页(不二次 launch)", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+    await manager.openGemini();
+    driver.latestContext!.lastPage!.emitClosed();
+    expect(manager.getStatus()).toBe("STOPPED");
+
+    const status = await manager.ensureReady();
+
+    expect(status).toBe("READY");
+    expect(driver.launchCount).toBe(1);
+    expect(driver.latestContext!.lastPage!.gotoCalls).toEqual([BASE_URL]);
+  });
+
+  it("BM-ER-G openGemini/restart 语义回归:页面健康时仍强制导航首页", async () => {
+    const driver = new FakeDriver();
+    const manager = createFakeManager(driver);
+    await manager.openGemini();
+    await manager.ensureReady(); // 零导航
+    expect(driver.latestContext!.lastPage!.gotoCalls).toEqual([BASE_URL]);
+
+    await manager.openGemini();
+    expect(driver.latestContext!.lastPage!.gotoCalls).toEqual([BASE_URL, BASE_URL]);
+
+    await manager.restart();
+    expect(driver.launchCount).toBe(2);
+    expect(driver.latestContext!.lastPage!.gotoCalls).toEqual([BASE_URL]);
   });
 });
 

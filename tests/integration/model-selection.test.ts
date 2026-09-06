@@ -53,7 +53,8 @@ function managerWithStatus(
     get(target, prop, receiver): unknown {
       if (prop === "openGeminiCalls") return openGeminiCalls;
       if (prop === "getStatus") return () => status;
-      if (prop === "openGemini")
+      // openGeminiCalls:gate 调用计数(P3 后 Scheduler 走 ensureReady,与 openGemini 同计数器)
+      if (prop === "openGemini" || prop === "ensureReady")
         return async () => {
           openGeminiCalls++;
           if (opts?.openGeminiDelayMs) {
@@ -658,7 +659,7 @@ describe("M4 会话偏好接入执行链路(Case A/B/C)", () => {
 });
 
 describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
-  it("LOCK-00:openGemini 与 listModels 最大并发 = 1(FIX-08)", async () => {
+  it("LOCK-00:ensureReady 与 listModels 最大并发 = 1(FIX-08)", async () => {
     const adapter = new FakeGeminiAdapter({ listModelsDelayMs: 200 });
     const browserManager = managerWithStatus("READY", { openGeminiDelayMs: 200 });
     const ctx = await setupTestContext({
@@ -671,7 +672,7 @@ describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
       const conv = await createConversation(ctx.baseUrl);
       await sendMessage(ctx.baseUrl, conv.id, "触发执行", "lock-00-key");
 
-      // Fire both concurrently: scheduler (openGemini) + GET /models (listModels)
+      // Fire both concurrently: scheduler (ensureReady) + GET /models (listModels)
       const schedulerPromise = ctx.scheduler!.runOnce();
       const modelsPromise = fetch(`${ctx.baseUrl}/api/provider/models`);
 
@@ -679,8 +680,8 @@ describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
 
       // One got the lock, the other either waited or was rejected.
       // Key assertion: no concurrent DOM operations.
-      // If models got through, it must have been before or after openGemini.
-      // If models was rejected, it proves scheduler held lock during openGemini.
+      // If models got through, it must have been before or after ensureReady.
+      // If models was rejected, it proves scheduler held lock during ensureReady.
       const modelsBody = (await modelsRes.json()) as { error?: { code: string }; data?: unknown };
       const modelsRejected =
         modelsRes.status === 500 && modelsBody.error?.code === "PROVIDER_NOT_READY";
@@ -698,7 +699,7 @@ describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
     }
   });
 
-  it("LOCK-01:listModels 持锁期间 Scheduler 不调 openGemini(FIX-08)", async () => {
+  it("LOCK-01:listModels 持锁期间 Scheduler 不调 ensureReady(FIX-08)", async () => {
     const adapter = new FakeGeminiAdapter({ listModelsDelayMs: 300 });
     const browserManager = managerWithStatus("READY");
     const ctx = await setupTestContext({
@@ -717,7 +718,7 @@ describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // Scheduler tries to run — must wait for lock (acquire blocks)
-      // At this point openGeminiCalls must still be 0
+      // At this point gate calls (openGeminiCalls counter) must still be 0
       expect(browserManager.openGeminiCalls).toBe(0);
 
       // Wait for listModels to finish and release lock
@@ -751,9 +752,9 @@ describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
       const conv = await createConversation(ctx.baseUrl);
       await sendMessage(ctx.baseUrl, conv.id, "触发执行", "lock-02-key");
 
-      // Start scheduler — it acquires lock BEFORE openGemini
+      // Start scheduler — it acquires lock BEFORE ensureReady
       void ctx.scheduler!.runOnce();
-      // Small delay to let scheduler acquire lock and enter openGemini delay
+      // Small delay to let scheduler acquire lock and enter ensureReady delay
       await new Promise((r) => setTimeout(r, 50));
 
       // GET /models must be rejected immediately (scheduler holds lock)

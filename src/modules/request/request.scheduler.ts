@@ -130,8 +130,8 @@ export class RequestScheduler {
       return false;
     }
 
-    // FIX-08:锁必须在第一次 Provider Page 操作(openGemini)之前获得,
-    // 否则 gateProvider.openGemini() 与 listModels() 存在并发窗口。
+    // FIX-08:锁必须在第一次 Provider Page 操作(ensureReady)之前获得,
+    // 否则 gateProvider.ensureReady() 与 listModels() 存在并发窗口。
     await this.deps.pageLock.acquire();
     try {
       const status = await this.gateProvider(pending.id);
@@ -382,7 +382,7 @@ export class RequestScheduler {
    */
   private async gateProvider(requestId: string): Promise<BrowserProviderStatus | "WAIT"> {
     try {
-      const status = await this.deps.browserManager.openGemini();
+      const status = await this.deps.browserManager.ensureReady();
       if (status === "READY" || status === "LOGIN_REQUIRED") {
         return status;
       }

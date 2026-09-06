@@ -31,7 +31,7 @@ import type {
   GeminiPromptRunInput,
   ResolvedGeminiModel,
 } from "./gemini.types.js";
-import { isGeminiOriginUrl } from "./session-checker.js";
+import { isGeminiChatUrl, isGeminiOriginUrl } from "./session-checker.js";
 
 /** 节奏默认值:全部来自 2026-09-03 真实页面实测,只有 responseTimeoutMs 走 env */
 const DEFAULTS = {
@@ -116,12 +116,63 @@ export class GeminiWebAdapter implements GeminiAdapter {
 
   async openConversation(existingUrl: string | null): Promise<void> {
     const page = this.deps.manager.requireGeminiPage();
+    const current = page.url();
+
+    // 短路 1(FIX-02/06):目标会话就是当前页 → 0 goto,跳过 urlGraceMs 与水合等待。
+    // 双侧 origin 校验缺一不可:isSameConversation 只比 conversation id,
+    // existingUrl 被污染成非 Gemini origin 的同 id URL 时,仅凭 id 相等短路
+    // 会绕过旧版 landed-origin 校验。
+    if (
+      existingUrl !== null &&
+      !page.isCrashed() &&
+      isGeminiOriginUrl(current, this.deps.baseUrl) &&
+      isGeminiOriginUrl(existingUrl, this.deps.baseUrl) &&
+      isSameConversation(current, existingUrl)
+    ) {
+      this.logger.info(
+        { navigationSkipped: true, reason: "SAME_CONVERSATION" },
+        "openConversation navigation skipped",
+      );
+      return;
+    }
+
+    // 短路 2(FIX-02):已在 /app 待输入页上开新会话,/app 本身就是待输入状态。
+    // current 是 /app/<id> 时绝不短路 —— 必须回首页,防串会话。
+    if (
+      existingUrl === null &&
+      !page.isCrashed() &&
+      isGeminiChatUrl(current, this.deps.baseUrl) &&
+      extractConversationId(current) === null
+    ) {
+      this.logger.info(
+        { navigationSkipped: true, reason: "NEW_CONVERSATION_HOME" },
+        "openConversation navigation skipped",
+      );
+      return;
+    }
+
+    // 导航路径:reason 只含枚举,不记 URL / conversation id(§14 脱敏)
+    const navigationStartedAt = Date.now();
+    const reason =
+      current === "about:blank"
+        ? "FIRST_PAGE_INIT"
+        : isGeminiOriginUrl(current, this.deps.baseUrl)
+          ? "SWITCH_CONVERSATION"
+          : "RECOVERY";
     const target = existingUrl ?? this.deps.baseUrl;
     try {
       await page.goto(target);
     } catch (err) {
       throw navigationFailed(err);
     }
+    this.logger.info(
+      {
+        navigationSkipped: false,
+        reason,
+        navigationElapsedMs: Date.now() - navigationStartedAt,
+      },
+      "openConversation navigated",
+    );
     if (!existingUrl) {
       // 新会话首页:/app 本身就是待输入状态,无需校验会话身份
       return;

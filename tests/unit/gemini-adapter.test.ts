@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { Writable } from "node:stream";
+import pino from "pino";
+import type { Logger } from "pino";
+
 import { AppError } from "../../src/common/errors/app-error.js";
 import { createLogger } from "../../src/common/logger/logger.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
@@ -88,6 +92,46 @@ function runInput(overrides: Partial<RunInput> = {}): RunInput {
   };
 }
 
+/** 捕获 Adapter 日志(JSON 行):导航 reason 枚举与脱敏断言用 */
+function captureLogger(): { logger: Logger; lines: string[] } {
+  const lines: string[] = [];
+  const logger = pino(
+    { level: "info" },
+    new Writable({
+      write(chunk, _enc, cb) {
+        lines.push(chunk.toString());
+        cb();
+      },
+    }),
+  );
+  return { logger, lines };
+}
+
+/** 同 setup(),但 Adapter 用捕获式 logger(GA 导航日志断言用) */
+async function setupWithLogger(
+  script: FakePageScript = {},
+  options: Partial<GeminiAdapterOptions> = {},
+): Promise<{ adapter: GeminiWebAdapter; page: FakePage; lines: string[] }> {
+  const { logger, lines } = captureLogger();
+  const driver = new FakeDriver();
+  const manager = createFakeManager(driver, {
+    ...script,
+    domCounts: { ...FRESH_DOM, ...(script.domCounts ?? {}) },
+  });
+  await manager.openGemini();
+  const page = driver.latestContext?.lastPage;
+  if (!page) {
+    throw new Error("fake page was not created");
+  }
+  const adapter = new GeminiWebAdapter({
+    manager,
+    baseUrl: BASE_URL,
+    options: { ...FAST, ...options },
+    logger,
+  });
+  return { adapter, page, lines };
+}
+
 describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
   it("未登录时两个入口都抛 PROVIDER_LOGIN_REQUIRED,且不碰页面", async () => {
     const driver = new FakeDriver();
@@ -116,12 +160,12 @@ describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
     expect(page.fillCalls).toEqual([]);
   });
 
-  it("新会话入口 = 直接 goto 首页,不点侧栏按钮", async () => {
+  it("GA-01 已在 /app 首页时 openConversation(null) 零导航(不再 goto 首页)", async () => {
     const { adapter, page } = await setup();
 
     await adapter.openConversation(null);
 
-    expect(page.gotoCalls).toEqual([BASE_URL, BASE_URL]);
+    expect(page.gotoCalls).toEqual([BASE_URL]);
   });
 
   it("输入框存在但不可写 → PROVIDER_DOM_CHANGED,且不按 Enter", async () => {
@@ -401,6 +445,92 @@ describe("GeminiWebAdapter(FakePage 剧本,不依赖真实浏览器)", () => {
     });
     expect(page.fillCalls).toHaveLength(0);
     expect(page.pressCalls).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // openConversation 导航短路(P4,FIX-02/FIX-06)
+  // ---------------------------------------------------------------------------
+
+  it("GA-02 停在 /app/<id> 旧会话页上发新会话 → 必须 goto 回首页(防串会话)", async () => {
+    const { adapter, page } = await setup();
+    page.currentUrl = CONVERSATION_URL;
+
+    await adapter.openConversation(null);
+
+    expect(page.gotoCalls).toEqual([BASE_URL, BASE_URL]);
+    expect(page.url()).toBe(BASE_URL);
+  });
+
+  it("GA-03 SAME_CONVERSATION 短路:跳过 goto 与历史水合等待(永不收敛剧本也不超时)", async () => {
+    const ramp = Array.from({ length: 400 }, (_, i) => i);
+    const { adapter, page } = await setup(
+      { turnSamples: ramp },
+      { historySettleTimeoutMs: 30 },
+    );
+    page.currentUrl = CONVERSATION_URL;
+
+    // 若未短路,waitForHistorySettled 会在 30ms 内以 DOM_CHANGED 失败
+    await adapter.openConversation(CONVERSATION_URL);
+
+    expect(page.gotoCalls).toEqual([BASE_URL]);
+  });
+
+  it("GA-04 冷页 about:blank → goto 首页,日志 reason=FIRST_PAGE_INIT", async () => {
+    const { adapter, page, lines } = await setupWithLogger();
+    page.currentUrl = "about:blank";
+
+    await adapter.openConversation(null);
+
+    expect(page.gotoCalls).toEqual([BASE_URL, BASE_URL]);
+    expect(lines.join("\n")).toContain("FIRST_PAGE_INIT");
+  });
+
+  it("GA-05 页面漂到外域后恢复 → goto 目标会话,日志 reason=RECOVERY", async () => {
+    const { adapter, page, lines } = await setupWithLogger();
+    page.currentUrl = "https://example.com/somewhere-else";
+
+    await adapter.openConversation(CONVERSATION_URL);
+
+    expect(page.gotoCalls).toEqual([BASE_URL, CONVERSATION_URL]);
+    expect(lines.join("\n")).toContain("RECOVERY");
+  });
+
+  it("GA-06 页面已 crash(状态未落地)→ 不命中 NEW_CONVERSATION_HOME 短路,仍 goto", async () => {
+    const { adapter, page } = await setup();
+    page.isCrashed = () => true;
+
+    await adapter.openConversation(null);
+
+    expect(page.gotoCalls).toEqual([BASE_URL, BASE_URL]);
+  });
+
+  it("GA-07 导航日志只含枚举与计时,不含会话 URL / conversation id", async () => {
+    const { adapter, page, lines } = await setupWithLogger();
+    page.currentUrl = CONVERSATION_URL;
+    await adapter.openConversation(CONVERSATION_URL); // SAME_CONVERSATION 短路
+
+    page.currentUrl = BASE_URL;
+    await adapter.openConversation(OTHER_CONVERSATION_URL); // SWITCH_CONVERSATION goto
+
+    const all = lines.join("\n");
+    expect(all).toContain("SAME_CONVERSATION");
+    expect(all).toContain("SWITCH_CONVERSATION");
+    // 脱敏红线:完整会话 URL 与 conversation id 都不得出现
+    expect(all).not.toContain("b386795e14915155");
+    expect(all).not.toContain("7f21c9ab04de6612");
+    expect(all).not.toContain("gemini.google.com/app/");
+  });
+
+  it("GA-08(FIX-06)existingUrl 非 Gemini origin 同 id → 不短路,走导航校验报 LOGIN_REQUIRED", async () => {
+    const { adapter, page } = await setup();
+    page.currentUrl = CONVERSATION_URL;
+    const polluted = "https://evil.example.com/app/b386795e14915155";
+
+    await expect(adapter.openConversation(polluted)).rejects.toMatchObject({
+      code: ErrorCodes.PROVIDER_LOGIN_REQUIRED,
+    });
+    // 没有短路:确实对 existingUrl 发起了导航,再由 landed-origin 校验拦截
+    expect(page.gotoCalls).toEqual([BASE_URL, polluted]);
   });
 
   // ---------------------------------------------------------------------------

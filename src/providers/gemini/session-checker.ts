@@ -1,5 +1,5 @@
 import type { BrowserPageHandle } from "./browser-driver.js";
-import { GEMINI_SELECTORS } from "./gemini.selectors.js";
+import { extractConversationId, GEMINI_SELECTORS } from "./gemini.selectors.js";
 
 /**
  * Gemini 登录状态检测(第 3 阶段:URL + 页面特征,不依赖真实 Google 账号)。
@@ -50,6 +50,26 @@ export function isGeminiOriginUrl(currentUrl: string, geminiBaseUrl: string): bo
     const base = new URL(geminiBaseUrl);
     const current = new URL(currentUrl);
     return current.origin === base.origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 判断 URL 是否落在 Gemini 聊天页(/app 或 /app/<conversationId>)。
+ *
+ * 比 isGeminiOriginUrl 收窄一层:裸同 origin 还包括 /gems 等非聊天路由,
+ * 直接拿来当「健康页可跳过导航」判据会把非聊天页误判成已就绪。
+ * 会话 id 判定刻意复用 extractConversationId,不另写正则;
+ * 不支持 /u/N/app... 多账号形态(否则引入两套 URL 语义),将来支持需统一改。
+ */
+export function isGeminiChatUrl(currentUrl: string, geminiBaseUrl: string): boolean {
+  if (!isGeminiOriginUrl(currentUrl, geminiBaseUrl)) {
+    return false;
+  }
+  try {
+    const pathname = new URL(currentUrl).pathname.replace(/\/+$/, "");
+    return pathname === "/app" || extractConversationId(currentUrl) !== null;
   } catch {
     return false;
   }
