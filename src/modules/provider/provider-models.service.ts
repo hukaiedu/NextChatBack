@@ -3,6 +3,7 @@ import { ErrorCodes } from "../../common/errors/error-codes.js";
 import type { BrowserProviderStatus } from "../../providers/gemini/browser-driver.js";
 import type { BrowserManager } from "../../providers/gemini/browser-manager.js";
 import type { GeminiAdapter, GeminiModelCatalog } from "../../providers/gemini/gemini.types.js";
+import type { ProviderPageLock } from "../../providers/gemini/provider-page-lock.js";
 
 /**
  * M1:模型目录读取服务 —— Provider 状态矩阵(Review FIX-03):
@@ -24,19 +25,32 @@ export class ProviderModelsService {
   constructor(
     private readonly geminiAdapter: GeminiAdapter,
     private readonly browserManager: BrowserManager,
+    private readonly pageLock: ProviderPageLock,
   ) {}
 
   async listModels(): Promise<GeminiModelCatalog> {
-    const status = this.browserManager.getStatus();
-    if (status !== "READY") {
-      if (status === "LOGIN_REQUIRED") {
-        throw new AppError(ErrorCodes.PROVIDER_LOGIN_REQUIRED, "Gemini login is required");
-      }
+    // FIX-06:非阻塞获取锁,Scheduler 持锁时立即返回 PROVIDER_NOT_READY
+    if (!this.pageLock.tryAcquire()) {
       throw new AppError(
         ErrorCodes.PROVIDER_NOT_READY,
-        `Provider is not ready (status: ${status}), cannot read the model catalog`,
+        "Provider page is locked by scheduler, cannot read the model catalog",
       );
     }
-    return this.geminiAdapter.listModels();
+    try {
+      // FIX-06:获锁后重新检查状态(TOCTOU 防护)
+      const status = this.browserManager.getStatus();
+      if (status !== "READY") {
+        if (status === "LOGIN_REQUIRED") {
+          throw new AppError(ErrorCodes.PROVIDER_LOGIN_REQUIRED, "Gemini login is required");
+        }
+        throw new AppError(
+          ErrorCodes.PROVIDER_NOT_READY,
+          `Provider is not ready (status: ${status}), cannot read the model catalog`,
+        );
+      }
+      return this.geminiAdapter.listModels();
+    } finally {
+      this.pageLock.release();
+    }
   }
 }

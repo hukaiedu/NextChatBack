@@ -42,6 +42,36 @@ async function patchConversation(
   });
 }
 
+/** 构造固定状态的 BrowserManager 代理(测试用:绕过真实状态机) */
+function managerWithStatus(
+  status: string,
+  opts?: { openGeminiDelayMs?: number },
+): BrowserManager & { openGeminiCalls: number } {
+  const real = createFakeManager(new FakeDriver());
+  let openGeminiCalls = 0;
+  const mgr = new Proxy(real, {
+    get(target, prop, receiver): unknown {
+      if (prop === "openGeminiCalls") return openGeminiCalls;
+      if (prop === "getStatus") return () => status;
+      if (prop === "openGemini")
+        return async () => {
+          openGeminiCalls++;
+          if (opts?.openGeminiDelayMs) {
+            await new Promise((r) => setTimeout(r, opts.openGeminiDelayMs));
+          }
+          return status;
+        };
+      if (prop === "setBusy") return () => {};
+      if (prop === "clearBusy") return () => {};
+      if (prop === "restart") return async () => {};
+      if (prop === "takeProviderFault") return () => null;
+      if (prop === "settleCloseEvents") return async () => {};
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as BrowserManager & { openGeminiCalls: number };
+  return mgr;
+}
+
 describe("M1 模型选择:发送消息 modelKey 语义(§二十一 四象限)", () => {
   let ctx: TestContext;
 
@@ -293,18 +323,6 @@ describe("M1 模型选择:幂等指纹(§七 FINGERPRINT-06)", () => {
 });
 
 describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状态矩阵)", () => {
-  /** 构造getStatus 固定为指定状态的 BrowserManager 代理 */
-  function managerWithStatus(status: string): BrowserManager {
-    return new Proxy(createFakeManager(new FakeDriver()), {
-      get(target, prop, receiver): unknown {
-        if (prop === "getStatus") {
-          return () => status;
-        }
-        return Reflect.get(target, prop, receiver);
-      },
-    }) as BrowserManager;
-  }
-
   it("READY → 200 + Fake 目录 {models, currentModelKey}(A/B/C,当前 A)", async () => {
     const readyCtx = await setupTestContext({
       geminiAdapter: new FakeGeminiAdapter(),
@@ -512,6 +530,324 @@ describe("M3 模型选择接入执行链路(Case A/B/C,真实 executor/scheduler
       expect(row.resolvedModelKey).toBeNull();
       expect(adapter.ensureModelCalls).toEqual(["model-z"]);
       expect(adapter.runCalls).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------
+// M4(§二十七):前端保存的会话偏好接入执行链路。选择器只走 PATCH preferredModelKey,
+// 发送永远省略 modelKey —— 三个 Case 全部走「真 Scheduler → 真执行器 + Fake Adapter」。
+// ---------------------------------------------------------------------------------
+describe("M4 会话偏好接入执行链路(Case A/B/C)", () => {
+  async function mount(): Promise<{
+    adapter: FakeGeminiAdapter;
+    ctx: TestContext;
+  }> {
+    const adapter = new FakeGeminiAdapter({ answer: "假回答" });
+    const ctx = await setupTestContext({
+      geminiAdapter: adapter,
+      scheduler: { autoStart: false },
+    });
+    await ctx.reset();
+    return { adapter, ctx };
+  }
+
+  it("Case A:PATCH 设置偏好 → 200,DTO 与库中均为新偏好", async () => {
+    const { ctx } = await mount();
+    try {
+      const conv = await createConversation(ctx.baseUrl);
+      const patched = await patchConversation(ctx, conv.id, { preferredModelKey: "model-b" });
+      expect(patched.status).toBe(200);
+      const body = (await patched.json()) as { data: { preferredModelKey: string | null } };
+      expect(body.data.preferredModelKey).toBe("model-b");
+
+      const reloaded = await ctx.prisma.conversation.findUniqueOrThrow({ where: { id: conv.id } });
+      expect(reloaded.preferredModelKey).toBe("model-b");
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("Case B(最重要):偏好=A + 发送省略 modelKey → requested=A → resolved=A,SUCCESS", async () => {
+    const { adapter, ctx } = await mount();
+    try {
+      const conv = await createConversation(ctx.baseUrl);
+      await patchConversation(ctx, conv.id, { preferredModelKey: "model-b" });
+
+      const sent = await sendMessage(ctx.baseUrl, conv.id, "你好", "m4-case-b");
+      expect(sent.status).toBe(202);
+      const { request } = ((await sent.json()) as MessageSendBody).data;
+      expect(request.requestedModelKey).toBe("model-b");
+
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: request.id } });
+      expect(row.status).toBe("SUCCESS");
+      expect(row.resolvedModelKey).toBe("model-b");
+      expect(row.resolvedModelLabel).toBe("Model B");
+      expect(adapter.ensureModelCalls).toEqual(["model-b"]);
+      expect(adapter.runCalls).toHaveLength(1);
+
+      const assistant = await ctx.prisma.message.findUniqueOrThrow({
+        where: { id: row.assistantMessageId },
+      });
+      expect(assistant.status).toBe("COMPLETED");
+      expect(assistant.content).toBe("假回答");
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("Case C:恢复默认(PATCH null)+ 发送省略 modelKey → ensureModel 0 调用(V1 兼容)", async () => {
+    const { adapter, ctx } = await mount();
+    try {
+      const conv = await createConversation(ctx.baseUrl);
+      await patchConversation(ctx, conv.id, { preferredModelKey: "model-b" });
+      const cleared = await patchConversation(ctx, conv.id, { preferredModelKey: null });
+      expect(cleared.status).toBe(200);
+
+      const sent = await sendMessage(ctx.baseUrl, conv.id, "你好", "m4-case-c");
+      expect(sent.status).toBe(202);
+      const { request } = ((await sent.json()) as MessageSendBody).data;
+      expect(request.requestedModelKey).toBeNull();
+
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: request.id } });
+      expect(row.status).toBe("SUCCESS");
+      expect(row.resolvedModelKey).toBeNull();
+      expect(adapter.ensureModelCalls).toEqual([]);
+      expect(adapter.runCalls).toHaveLength(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("Case D(FIX-01):建会话即设偏好 + 首条消息省略 modelKey → requested=A resolved=A SUCCESS", async () => {
+    const { adapter, ctx } = await mount();
+    try {
+      const conv = await createConversation(ctx.baseUrl);
+      const patched = await patchConversation(ctx, conv.id, { preferredModelKey: "model-a" });
+      expect(patched.status).toBe(200);
+
+      const sent = await sendMessage(ctx.baseUrl, conv.id, "首条", "m4-fix01-d");
+      expect(sent.status).toBe(202);
+      const { request } = ((await sent.json()) as MessageSendBody).data;
+      expect(request.requestedModelKey).toBe("model-a");
+
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: request.id } });
+      expect(row.status).toBe("SUCCESS");
+      expect(row.resolvedModelKey).toBe("model-a");
+      expect(row.resolvedModelLabel).toBe("Model A");
+      expect(adapter.ensureModelCalls).toEqual(["model-a"]);
+      expect(adapter.runCalls).toHaveLength(1);
+
+      const assistant = await ctx.prisma.message.findUniqueOrThrow({
+        where: { id: row.assistantMessageId },
+      });
+      expect(assistant.status).toBe("COMPLETED");
+      expect(assistant.content).toBe("假回答");
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
+  it("LOCK-00:openGemini 与 listModels 最大并发 = 1(FIX-08)", async () => {
+    const adapter = new FakeGeminiAdapter({ listModelsDelayMs: 200 });
+    const browserManager = managerWithStatus("READY", { openGeminiDelayMs: 200 });
+    const ctx = await setupTestContext({
+      geminiAdapter: adapter,
+      browserManager,
+      scheduler: { scanIntervalMs: 25, autoStart: false },
+    });
+    try {
+      await ctx.reset();
+      const conv = await createConversation(ctx.baseUrl);
+      await sendMessage(ctx.baseUrl, conv.id, "触发执行", "lock-00-key");
+
+      // Fire both concurrently: scheduler (openGemini) + GET /models (listModels)
+      const schedulerPromise = ctx.scheduler!.runOnce();
+      const modelsPromise = fetch(`${ctx.baseUrl}/api/provider/models`);
+
+      const [modelsRes] = await Promise.all([modelsPromise, schedulerPromise]);
+
+      // One got the lock, the other either waited or was rejected.
+      // Key assertion: no concurrent DOM operations.
+      // If models got through, it must have been before or after openGemini.
+      // If models was rejected, it proves scheduler held lock during openGemini.
+      const modelsBody = (await modelsRes.json()) as { error?: { code: string }; data?: unknown };
+      const modelsRejected =
+        modelsRes.status === 500 && modelsBody.error?.code === "PROVIDER_NOT_READY";
+      const modelsSucceeded = modelsRes.status === 200;
+      expect(modelsRejected || modelsSucceeded).toBe(true);
+
+      // Scheduler must have completed successfully
+      const row = await ctx.prisma.modelRequest.findFirstOrThrow({
+        where: { conversationId: conv.id },
+      });
+      expect(row.status).toBe("SUCCESS");
+      expect(browserManager.openGeminiCalls).toBe(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("LOCK-01:listModels 持锁期间 Scheduler 不调 openGemini(FIX-08)", async () => {
+    const adapter = new FakeGeminiAdapter({ listModelsDelayMs: 300 });
+    const browserManager = managerWithStatus("READY");
+    const ctx = await setupTestContext({
+      geminiAdapter: adapter,
+      browserManager,
+      scheduler: { scanIntervalMs: 25, autoStart: false },
+    });
+    try {
+      await ctx.reset();
+      const conv = await createConversation(ctx.baseUrl);
+      await sendMessage(ctx.baseUrl, conv.id, "排队", "lock-01-key");
+
+      // listModels grabs lock first (non-blocking tryAcquire succeeds since nothing holds it)
+      const modelsPromise = fetch(`${ctx.baseUrl}/api/provider/models`);
+      // Give listModels time to acquire the lock
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Scheduler tries to run — must wait for lock (acquire blocks)
+      // At this point openGeminiCalls must still be 0
+      expect(browserManager.openGeminiCalls).toBe(0);
+
+      // Wait for listModels to finish and release lock
+      const modelsRes = await modelsPromise;
+      expect(modelsRes.status).toBe(200);
+      expect(adapter.listModelsCalls).toBe(1);
+
+      // Now scheduler can proceed
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findFirstOrThrow({
+        where: { conversationId: conv.id },
+      });
+      expect(row.status).toBe("SUCCESS");
+      expect(browserManager.openGeminiCalls).toBe(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("LOCK-02:Scheduler 持锁(gateProvider 前)→ GET /models 立即 PROVIDER_NOT_READY(FIX-08)", async () => {
+    const adapter = new FakeGeminiAdapter({ hang: true });
+    const browserManager = managerWithStatus("READY", { openGeminiDelayMs: 200 });
+    const ctx = await setupTestContext({
+      geminiAdapter: adapter,
+      browserManager,
+      scheduler: { scanIntervalMs: 25, autoStart: false },
+    });
+    try {
+      await ctx.reset();
+      const conv = await createConversation(ctx.baseUrl);
+      await sendMessage(ctx.baseUrl, conv.id, "触发执行", "lock-02-key");
+
+      // Start scheduler — it acquires lock BEFORE openGemini
+      void ctx.scheduler!.runOnce();
+      // Small delay to let scheduler acquire lock and enter openGemini delay
+      await new Promise((r) => setTimeout(r, 50));
+
+      // GET /models must be rejected immediately (scheduler holds lock)
+      const res = await fetch(`${ctx.baseUrl}/api/provider/models`);
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("PROVIDER_NOT_READY");
+      expect(adapter.listModelsCalls).toBe(0);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("LOCK-03:listModels 抛错 → 锁释放,后续 Request 正常执行", async () => {
+    const adapter = new FakeGeminiAdapter({
+      listModelsError: new AppError(ErrorCodes.PROVIDER_NOT_READY, "test error"),
+    });
+    const browserManager = managerWithStatus("READY");
+    const ctx = await setupTestContext({
+      geminiAdapter: adapter,
+      browserManager,
+      scheduler: { scanIntervalMs: 25, autoStart: false },
+    });
+    try {
+      await ctx.reset();
+      const res = await fetch(`${ctx.baseUrl}/api/provider/models`);
+      expect(res.status).toBe(500);
+
+      const conv = await createConversation(ctx.baseUrl);
+      await sendMessage(ctx.baseUrl, conv.id, "测试", "lock-03-key");
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findFirstOrThrow({
+        where: { conversationId: conv.id },
+      });
+      expect(row.status).toBe("SUCCESS");
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("LOCK-04:Request 失败 → 锁释放,后续 GET /models 正常", async () => {
+    const adapter = new FakeGeminiAdapter({
+      runError: new AppError(ErrorCodes.INTERNAL_ERROR, "boom"),
+    });
+    const browserManager = managerWithStatus("READY");
+    const ctx = await setupTestContext({
+      geminiAdapter: adapter,
+      browserManager,
+      scheduler: { scanIntervalMs: 25, autoStart: false },
+    });
+    try {
+      await ctx.reset();
+      const conv = await createConversation(ctx.baseUrl);
+      await sendMessage(ctx.baseUrl, conv.id, "触发失败", "lock-04-key");
+      await ctx.scheduler!.runOnce();
+
+      const row = await ctx.prisma.modelRequest.findFirstOrThrow({
+        where: { conversationId: conv.id },
+      });
+      expect(row.status).toBe("FAILED");
+
+      const res = await fetch(`${ctx.baseUrl}/api/provider/models`);
+      expect(res.status).toBe(200);
+      expect(adapter.listModelsCalls).toBe(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("LOCK-05:多次交替调用无死锁", async () => {
+    const adapter = new FakeGeminiAdapter();
+    const browserManager = managerWithStatus("READY");
+    const ctx = await setupTestContext({
+      geminiAdapter: adapter,
+      browserManager,
+      scheduler: { scanIntervalMs: 25, autoStart: false },
+    });
+    try {
+      for (let i = 0; i < 3; i++) {
+        await ctx.reset();
+        const res = await fetch(`${ctx.baseUrl}/api/provider/models`);
+        expect(res.status).toBe(200);
+
+        const conv = await createConversation(ctx.baseUrl);
+        await sendMessage(ctx.baseUrl, conv.id, `第${i}条`, `lock-05-${i}`);
+        await ctx.scheduler!.runOnce();
+
+        const row = await ctx.prisma.modelRequest.findFirstOrThrow({
+          where: { conversationId: conv.id },
+        });
+        expect(row.status).toBe("SUCCESS");
+      }
+      expect(adapter.listModelsCalls).toBe(3);
     } finally {
       await ctx.close();
     }

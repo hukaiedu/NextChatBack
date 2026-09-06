@@ -11,6 +11,7 @@ import type { RequestRepository } from "./request.repository.js";
 import type { RequestService } from "./request.service.js";
 import type { CancellationRegistry } from "./request.cancellation.js";
 import { isContextClosedError } from "../../providers/gemini/gemini.errors.js";
+import type { ProviderPageLock } from "../../providers/gemini/provider-page-lock.js";
 
 const DEFAULT_SCAN_INTERVAL_MS = 1_000;
 /**
@@ -41,6 +42,7 @@ export interface RequestSchedulerDeps {
   browserManager: BrowserManager;
   logger: Logger;
   cancellation: CancellationRegistry;
+  pageLock: ProviderPageLock;
   options?: { scanIntervalMs?: number; executionTimeoutMs?: number };
 }
 
@@ -128,104 +130,107 @@ export class RequestScheduler {
       return false;
     }
 
-    const status = await this.gateProvider(pending.id);
-    if (status === "WAIT") {
-      return false;
-    }
-    if (status === "LOGIN_REQUIRED") {
-      if (await this.deps.requestService.claim(pending.id)) {
+    // FIX-08:锁必须在第一次 Provider Page 操作(openGemini)之前获得,
+    // 否则 gateProvider.openGemini() 与 listModels() 存在并发窗口。
+    await this.deps.pageLock.acquire();
+    try {
+      const status = await this.gateProvider(pending.id);
+      if (status === "WAIT") {
+        return false;
+      }
+      if (status === "LOGIN_REQUIRED") {
+        if (await this.deps.requestService.claim(pending.id)) {
+          await this.deps.requestService.fail(
+            pending.id,
+            "FAILED",
+            ErrorCodes.PROVIDER_LOGIN_REQUIRED,
+            "Gemini login is required",
+          );
+          this.logger.warn(
+            { requestId: pending.id, conversationId: pending.conversationId, code: ErrorCodes.PROVIDER_LOGIN_REQUIRED },
+            "request failed before execution",
+          );
+        }
+        return true;
+      }
+
+      // 在 claim 之前登记 controller:保证「PROCESSING ⇒ controller 已注册」是不变量,
+      // cancel() 的 abort 不可能落空。
+      const controller = this.deps.cancellation.register(pending.id);
+
+      if (!(await this.deps.requestService.claim(pending.id))) {
+        this.deps.cancellation.unregister(pending.id);
+        return true;
+      }
+      const userMessage = await this.deps.messageRepo.findById(this.deps.prisma, pending.userMessageId);
+      if (!userMessage) {
         await this.deps.requestService.fail(
           pending.id,
           "FAILED",
-          ErrorCodes.PROVIDER_LOGIN_REQUIRED,
-          "Gemini login is required",
+          ErrorCodes.DATABASE_ERROR,
+          "request references missing user message",
         );
-        this.logger.warn(
-          { requestId: pending.id, conversationId: pending.conversationId, code: ErrorCodes.PROVIDER_LOGIN_REQUIRED },
-          "request failed before execution",
-        );
+        this.deps.cancellation.unregister(pending.id);
+        return true;
       }
-      return true;
-    }
 
-    // 在 claim 之前登记 controller:保证「PROCESSING ⇒ controller 已注册」是不变量,
-    // cancel() 的 abort 不可能落空。
-    const controller = this.deps.cancellation.register(pending.id);
-
-    if (!(await this.deps.requestService.claim(pending.id))) {
-      this.deps.cancellation.unregister(pending.id);
-      return true;
-    }
-    const userMessage = await this.deps.messageRepo.findById(this.deps.prisma, pending.userMessageId);
-    if (!userMessage) {
-      await this.deps.requestService.fail(
-        pending.id,
-        "FAILED",
-        ErrorCodes.DATABASE_ERROR,
-        "request references missing user message",
-      );
-      this.deps.cancellation.unregister(pending.id);
-      return true;
-    }
-
-    this.deps.browserManager.setBusy();
-    try {
-      const outcome = await this.runGuarded(pending, userMessage, controller);
-      if (outcome.timedOut) {
-        // watchdog 触发:即使 adapter 返回了 cancelled:true,也优先落 TIMEOUT
-        // (否则会出现「用户没取消但被标为 CANCELLED」)
-        const code = this.deps.browserManager.takeProviderFault() ?? ErrorCodes.PROVIDER_RESPONSE_TIMEOUT;
-        await this.deps.requestService.fail(
-          pending.id,
-          "TIMEOUT",
-          code,
-          `Request execution exceeded ${this.opts.executionTimeoutMs}ms`,
-        );
-        this.logger.warn(
-          { requestId: pending.id, code },
-          "request timed out",
-        );
-      } else if (outcome.result.cancelled) {
-        await this.deps.requestService.cancelled(pending.id, outcome.result.answer);
-        this.logger.info(
-          { requestId: pending.id, answerLength: outcome.result.answer.length },
-          "request cancelled",
-        );
-      } else {
-        this.logger.info(
-          {
-            requestId: pending.id,
-            conversationId: pending.conversationId,
-            answerLength: outcome.result.answer.length,
-            // prd §14 / ISSUE-02:不记未脱敏的 Provider 会话 URL(含 Gemini conversation id)。
-            // 需定位时凭 conversationId 查库,日志只保留长度类非敏感字段。
-          },
-          "request completed",
-        );
-      }
-    } catch (err) {
-      const appErr = err instanceof AppError ? err : undefined;
-      const code = await this.classifyExecutorError(err, appErr);
-      const message =
-        appErr?.message ??
-        (err instanceof Error ? err.message : "unexpected executor failure");
-      const nextStatus = code === ErrorCodes.PROVIDER_RESPONSE_TIMEOUT ? "TIMEOUT" : "FAILED";
+      this.deps.browserManager.setBusy();
       try {
-        await this.deps.requestService.fail(pending.id, nextStatus, code, message);
-      } finally {
-        this.logger.warn(
-          {
-            requestId: pending.id,
-            conversationId: pending.conversationId,
+        const outcome = await this.runGuarded(pending, userMessage, controller);
+        if (outcome.timedOut) {
+          const code = this.deps.browserManager.takeProviderFault() ?? ErrorCodes.PROVIDER_RESPONSE_TIMEOUT;
+          await this.deps.requestService.fail(
+            pending.id,
+            "TIMEOUT",
             code,
-            requestStatus: nextStatus,
-          },
-          "request failed",
-        );
+            `Request execution exceeded ${this.opts.executionTimeoutMs}ms`,
+          );
+          this.logger.warn(
+            { requestId: pending.id, code },
+            "request timed out",
+          );
+        } else if (outcome.result.cancelled) {
+          await this.deps.requestService.cancelled(pending.id, outcome.result.answer);
+          this.logger.info(
+            { requestId: pending.id, answerLength: outcome.result.answer.length },
+            "request cancelled",
+          );
+        } else {
+          this.logger.info(
+            {
+              requestId: pending.id,
+              conversationId: pending.conversationId,
+              answerLength: outcome.result.answer.length,
+            },
+            "request completed",
+          );
+        }
+      } catch (err) {
+        const appErr = err instanceof AppError ? err : undefined;
+        const code = await this.classifyExecutorError(err, appErr);
+        const message =
+          appErr?.message ??
+          (err instanceof Error ? err.message : "unexpected executor failure");
+        const nextStatus = code === ErrorCodes.PROVIDER_RESPONSE_TIMEOUT ? "TIMEOUT" : "FAILED";
+        try {
+          await this.deps.requestService.fail(pending.id, nextStatus, code, message);
+        } finally {
+          this.logger.warn(
+            {
+              requestId: pending.id,
+              conversationId: pending.conversationId,
+              code,
+              requestStatus: nextStatus,
+            },
+            "request failed",
+          );
+        }
+      } finally {
+        this.deps.cancellation.unregister(pending.id);
+        await this.releaseSlot();
       }
     } finally {
-      this.deps.cancellation.unregister(pending.id);
-      await this.releaseSlot();
+      this.deps.pageLock.release();
     }
     return true;
   }

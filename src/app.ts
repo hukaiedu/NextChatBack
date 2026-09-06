@@ -29,6 +29,7 @@ import { GeminiStreamService } from "./modules/provider/gemini-stream.service.js
 import { RequestEventEmitter } from "./modules/sse/event-emitter.js";
 import { createSseRouter } from "./modules/sse/sse.controller.js";
 import { SseService } from "./modules/sse/sse.service.js";
+import { ProviderPageLock } from "./providers/gemini/provider-page-lock.js";
 
 export interface SchedulerConfig {
   /** PENDING 扫描周期(ms),默认 1000 */
@@ -122,6 +123,8 @@ export function createApp(deps: AppDeps): AppHandle {
     deps.prisma,
     requestRepo,
   );
+  // FIX-06:Provider Page 操作互斥锁,Scheduler 与 GET /models 共享同一实例
+  const pageLock = new ProviderPageLock();
   const scheduler = new RequestScheduler({
     prisma: deps.prisma,
     requestRepo,
@@ -131,6 +134,7 @@ export function createApp(deps: AppDeps): AppHandle {
     browserManager: deps.browserManager,
     logger: deps.logger,
     cancellation,
+    pageLock,
     options: {
       scanIntervalMs: deps.scheduler?.scanIntervalMs,
       executionTimeoutMs: deps.scheduler?.executionTimeoutMs,
@@ -149,7 +153,7 @@ export function createApp(deps: AppDeps): AppHandle {
     events,
     logger: deps.logger,
   });
-  const providerModelsService = new ProviderModelsService(deps.geminiAdapter, deps.browserManager);
+  const providerModelsService = new ProviderModelsService(deps.geminiAdapter, deps.browserManager, pageLock);
 
   app.use("/api/conversations", createConversationRouter(conversationService));
   app.use(

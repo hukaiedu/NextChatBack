@@ -598,6 +598,8 @@ export interface FakeAdapterBehavior {
   modelCatalog?: GeminiModelCatalog;
   /** listModels 抛出的错误;优先于 modelCatalog */
   listModelsError?: unknown;
+  /** FIX-06:listModels 人为延迟(ms),用于锁竞态测试 */
+  listModelsDelayMs?: number;
   /** ensureModel 抛出的错误(signal 未 abort 时);省略 = 从目录查 label 直接返回 */
   ensureModelError?: unknown;
 }
@@ -718,6 +720,9 @@ export class FakeGeminiAdapter implements GeminiAdapter {
 
   async listModels(): Promise<GeminiModelCatalog> {
     this.listModelsCalls += 1;
+    if (this.behavior.listModelsDelayMs) {
+      await new Promise((r) => setTimeout(r, this.behavior.listModelsDelayMs));
+    }
     if (this.behavior.listModelsError !== undefined) {
       throw this.behavior.listModelsError;
     }
