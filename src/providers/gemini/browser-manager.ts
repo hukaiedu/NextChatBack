@@ -42,6 +42,12 @@ export class BrowserManager {
    * takeProviderFault() 读并清;只由 bindContextEvents/bindPageEvents 写入。
    */
   private providerFault: string | null = null;
+  /** 最近一次成功启动 Persistent Context 的时间;closeContext 时清空(浏览器状态 API 用) */
+  private startedAt: Date | null = null;
+  /** restart() 进行中:浏览器状态 API 据此报 RESTARTING */
+  private restarting = false;
+  /** 最近一次浏览器故障摘要(≤200 字符,不含堆栈;浏览器状态 API 展示用) */
+  private lastBrowserError: { code: string; message: string } | null = null;
 
   private readonly checker: GeminiSessionChecker;
 
@@ -120,9 +126,14 @@ export class BrowserManager {
   /** 关闭当前 Context → 用同一个 Persistent Profile 重新启动 → 重新打开 Gemini */
   async restart(): Promise<BrowserProviderStatus> {
     return this.runExclusive(async () => {
-      await this.closeContext("browser restart requested");
-      await this.ensureContextStarted();
-      return this.ensureGeminiPage();
+      this.restarting = true;
+      try {
+        await this.closeContext("browser restart requested");
+        await this.ensureContextStarted();
+        return await this.ensureGeminiPage();
+      } finally {
+        this.restarting = false;
+      }
     });
   }
 
@@ -189,6 +200,28 @@ export class BrowserManager {
     return fault;
   }
 
+  // ---- 浏览器状态 API 的只读观察位(docs/browser-status-api.md) ----
+
+  getStartedAt(): Date | null {
+    return this.startedAt;
+  }
+
+  isRestarting(): boolean {
+    return this.restarting;
+  }
+
+  getLastBrowserError(): { code: string; message: string } | null {
+    return this.lastBrowserError;
+  }
+
+  getProfileDir(): string {
+    return this.options.profileDir;
+  }
+
+  isHeadless(): boolean {
+    return this.options.headless;
+  }
+
   /**
    * 等待关闭类事件收敛(§8.8 异常分类用):onClose/onCrash 是异步事件,执行异常可能先到。
    * 短暂轮询内部状态,任一信号落地立即返回;窗口耗尽返回 "none"。
@@ -243,6 +276,15 @@ export class BrowserManager {
     this.state = next;
   }
 
+  /** 记录最近一次浏览器故障的可读摘要(响应里不允许出现堆栈与凭据) */
+  private recordBrowserError(code: string, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    this.lastBrowserError = {
+      code,
+      message: message.length > 200 ? message.slice(0, 200) : message,
+    };
+  }
+
   private async ensureContextStarted(): Promise<void> {
     if (this.context && !this.context.isClosed()) {
       return;
@@ -261,6 +303,8 @@ export class BrowserManager {
       this.context = started;
       this.page = null;
       this.bindContextEvents(started);
+      this.startedAt = new Date();
+      this.lastBrowserError = null;
       this.logger.info(
         { profileDir: this.options.profileDir, elapsedMs: Date.now() - startedAt },
         "browser ready",
@@ -269,6 +313,12 @@ export class BrowserManager {
       this.context = null;
       this.page = null;
       this.transitionTo("ERROR");
+      this.recordBrowserError(
+        isProfileInUseError(err)
+          ? ErrorCodes.PROVIDER_PROFILE_IN_USE
+          : ErrorCodes.PROVIDER_BROWSER_START_FAILED,
+        err,
+      );
       if (isProfileInUseError(err)) {
         this.logger.error({ err }, "browser profile is in use by another process");
         throw new AppError(
@@ -293,6 +343,10 @@ export class BrowserManager {
       }
       this.logger.warn({ from: this.state }, "browser context closed unexpectedly");
       this.providerFault = ErrorCodes.PROVIDER_BROWSER_CRASHED;
+      this.recordBrowserError(
+        ErrorCodes.PROVIDER_BROWSER_CRASHED,
+        "browser context closed unexpectedly",
+      );
       this.context = null;
       this.page = null;
       this.transitionTo("STOPPED");
@@ -354,6 +408,7 @@ export class BrowserManager {
         "gemini page crashed",
       );
       this.providerFault = ErrorCodes.PROVIDER_BROWSER_CRASHED;
+      this.recordBrowserError(ErrorCodes.PROVIDER_BROWSER_CRASHED, "gemini page crashed");
       this.page = null;
       this.transitionTo("ERROR");
     });
@@ -379,6 +434,7 @@ export class BrowserManager {
     const handle = this.context;
     this.context = null;
     this.page = null;
+    this.startedAt = null;
     if (handle && !handle.isClosed()) {
       try {
         await handle.close();

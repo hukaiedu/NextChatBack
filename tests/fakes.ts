@@ -93,6 +93,8 @@ export interface FakePageScript {
   neverStable?: boolean;
   /** 模拟输入框存在但不可写(Playwright fill 会抛错) */
   throwOnFill?: boolean;
+  /** goto 时抛错(模拟导航失败,如连接拒绝;浏览器状态 API 重启失败分类用) */
+  throwOnGoto?: boolean;
   /** click 时对这些选择器(完整串精确匹配)抛错,模拟元素存在但不可点 */
   throwOnClickSelectors?: string[];
   /** goto 之后页面实际落到的 URL(模拟无效会话被重定向回 /app) */
@@ -130,6 +132,7 @@ export class FakePage implements BrowserPageHandle {
   answerTexts: string[];
   neverStable: boolean;
   throwOnFill: boolean;
+  throwOnGoto: boolean;
   throwOnClickSelectors: string[];
   navLandsUrl: string | null;
   private turnSamples: number[];
@@ -168,6 +171,7 @@ export class FakePage implements BrowserPageHandle {
     this.answerTexts = [...(script.answerTexts ?? [])];
     this.neverStable = script.neverStable ?? false;
     this.throwOnFill = script.throwOnFill ?? false;
+    this.throwOnGoto = script.throwOnGoto ?? false;
     this.throwOnClickSelectors = [...(script.throwOnClickSelectors ?? [])];
     this.navLandsUrl = script.navLandsUrl ?? null;
     this.turnSamples = [...(script.turnSamples ?? [])];
@@ -186,6 +190,9 @@ export class FakePage implements BrowserPageHandle {
 
   async goto(url: string): Promise<void> {
     this.gotoCalls.push(url);
+    if (this.throwOnGoto) {
+      throw new Error("net::ERR_CONNECTION_REFUSED");
+    }
     if (this.redirectToLogin) {
       this.currentUrl = LOGIN_URL;
     } else if (this.navLandsUrl) {
@@ -519,6 +526,8 @@ export class FakeDriver implements BrowserDriver {
   contexts: FakeContext[] = [];
   /** launch 时抛出的错误(模拟启动失败 / profile 占用) */
   throwOnLaunch: Error | null = null;
+  /** launch 前的人为延迟(ms);构造「重启进行中」的观察窗口用 */
+  launchDelayMs = 0;
   /** 新 page 导航后落在 Google 登录页(模拟重定向未登录) */
   redirectToLogin = false;
   /** 新 page 停留在 Gemini 同域但显示 Sign in 链接(模拟同域未登录) */
@@ -528,6 +537,9 @@ export class FakeDriver implements BrowserDriver {
 
   async launchPersistentContext(): Promise<BrowserContextHandle> {
     this.launchCount++;
+    if (this.launchDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.launchDelayMs));
+    }
     if (this.throwOnLaunch) {
       throw this.throwOnLaunch;
     }
