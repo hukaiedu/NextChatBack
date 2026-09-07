@@ -259,8 +259,11 @@ describe("AUTH-09..11 token 校验(requireAuth)", () => {
       const raw = cookieHeader(loginRes)!;
       const token = raw.slice(AUTH_COOKIE_NAME.length + 1);
       const [payloadB64, sigB64] = token.split(".");
-      const flipped = sigB64!.at(-1) === "A" ? "B" : "A";
-      const tampered = `${payloadB64}.${sigB64!.slice(0, -1)}${flipped}`;
+      // base64url 末字符的低 4 位是填充位,解码端忽略;只翻转末字符有概率
+      // 解出完全相同的签名字节导致校验通过。首字符参与首字节高 6 位,
+      // 翻转必然改变解码结果
+      const flipped = sigB64!.at(0) === "A" ? "B" : "A";
+      const tampered = `${payloadB64}.${flipped}${sigB64!.slice(1)}`;
 
       const res = await fetch(`${ctx.baseUrl}/api/conversations`, {
         headers: { Cookie: sessionCookie(tampered) },
