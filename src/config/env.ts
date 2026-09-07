@@ -35,6 +35,23 @@ const envSchema = z.object({
    * 只节流数据库压力:SSE 事件按每次回答文本变化立即推送,不等落库。
    */
   STREAMING_UPDATE_INTERVAL_MS: z.coerce.number().int().min(0).default(300),
+
+  // SEC-1 服务端鉴权(docs/SEC1_AUTH_DESIGN.md §3.3)
+  AUTH_ENABLED: boolFromString.default("false"),
+  /** AUTH_ENABLED=true 时必填;min 12 门槛在 refine 中按开关条件执行 */
+  AUTH_PASSWORD: z.string().optional(),
+  /** AUTH_ENABLED=true 时必填;≥32 字符为最低门槛(HMAC-SHA256 签名密钥) */
+  AUTH_SESSION_SECRET: z.string().optional(),
+  AUTH_SESSION_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .max(2_592_000)
+    .default(604_800),
+  /** 只影响 req.ip(登录限流键/审计),不影响 Cookie Secure */
+  AUTH_TRUST_PROXY: boolFromString.default("false"),
+  /** 逗号分隔 Origin 白名单;每项规范化校验见 auth 模块(§7.2) */
+  AUTH_ALLOWED_ORIGINS: z.string().optional(),
 }).refine(
   // 跨字段约束(ISSUE-03):执行 watchdog 上限必须严格高于单次 Prompt 响应上限,
   // 否则 watchdog 可能早于 Adapter 自身超时触发,把正常执行误判成 TIMEOUT。
@@ -44,6 +61,60 @@ const envSchema = z.object({
     message:
       "REQUEST_EXECUTION_TIMEOUT_MS must be greater than GEMINI_RESPONSE_TIMEOUT_MS",
     path: ["REQUEST_EXECUTION_TIMEOUT_MS"],
+  },
+)
+// SEC-1 跨字段约束(docs/SEC1_AUTH_DESIGN.md §3.2):全部 fail-fast
+.refine(
+  (env) => env.NODE_ENV !== "production" || env.AUTH_ENABLED,
+  {
+    message:
+      "AUTH_ENABLED must be true when NODE_ENV=production (refusing to run unauthenticated)",
+    path: ["AUTH_ENABLED"],
+  },
+)
+.refine(
+  (env) =>
+    !env.AUTH_ENABLED ||
+    (env.AUTH_PASSWORD !== undefined && env.AUTH_PASSWORD.length >= 12),
+  {
+    message: "AUTH_ENABLED=true requires AUTH_PASSWORD (min 12 characters)",
+    path: ["AUTH_PASSWORD"],
+  },
+)
+.refine(
+  (env) =>
+    !env.AUTH_ENABLED ||
+    (env.AUTH_SESSION_SECRET !== undefined &&
+      env.AUTH_SESSION_SECRET.length >= 32),
+  {
+    message:
+      "AUTH_ENABLED=true requires AUTH_SESSION_SECRET (min 32 characters)",
+    path: ["AUTH_SESSION_SECRET"],
+  },
+)
+.refine(
+  (env) =>
+    env.NODE_ENV !== "production" ||
+    !env.AUTH_ENABLED ||
+    (env.AUTH_ALLOWED_ORIGINS ?? "").trim().length > 0,
+  {
+    message:
+      "AUTH_ENABLED=true in production requires a non-empty AUTH_ALLOWED_ORIGINS",
+    path: ["AUTH_ALLOWED_ORIGINS"],
+  },
+)
+.refine(
+  (env) => {
+    if (env.NODE_ENV !== "production" || !env.AUTH_ENABLED) return true;
+    return (env.AUTH_ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .every((item) => item.length === 0 || item.startsWith("https://"));
+  },
+  {
+    message:
+      "AUTH_ALLOWED_ORIGINS must be https-only when NODE_ENV=production and AUTH_ENABLED=true",
+    path: ["AUTH_ALLOWED_ORIGINS"],
   },
 );
 

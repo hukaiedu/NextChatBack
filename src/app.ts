@@ -32,6 +32,11 @@ import { RequestEventEmitter } from "./modules/sse/event-emitter.js";
 import { createSseRouter } from "./modules/sse/sse.controller.js";
 import { SseService } from "./modules/sse/sse.service.js";
 import { ProviderPageLock } from "./providers/gemini/provider-page-lock.js";
+import { createAuthRouter } from "./modules/auth/auth.controller.js";
+import { originCheck, requireAuth } from "./modules/auth/auth.middleware.js";
+import { AuthService } from "./modules/auth/auth.service.js";
+import type { LoginRateLimiter } from "./modules/auth/auth.rate-limit.js";
+import type { AuthDeps } from "./modules/auth/auth.types.js";
 
 export interface SchedulerConfig {
   /** PENDING 扫描周期(ms),默认 1000 */
@@ -53,6 +58,10 @@ export interface AppDeps {
   logger: Logger;
   browserManager: BrowserManager;
   geminiAdapter: GeminiAdapter;
+  /** SEC-1 鉴权;null = 不鉴权(AUTH_ENABLED=false)。组装根必须显式做这个决定 */
+  auth: AuthDeps | null;
+  /** SEC-1 测试接缝:注入带假时钟的 limiter 验证限流窗口(AUTH-07);生产不传 */
+  loginRateLimiter?: LoginRateLimiter;
   scheduler?: SchedulerConfig;
   streaming?: StreamingConfig;
 }
@@ -78,12 +87,34 @@ export interface AppHandle {
 export function createApp(deps: AppDeps): AppHandle {
   const app = express();
 
+  // §10.2:仅影响 req.ip(登录限流键/审计),必须在挂任何路由前设置
+  if (deps.auth?.trustProxy === true) {
+    app.set("trust proxy", "loopback");
+  }
+
   app.disable("x-powered-by");
   app.use(requestId());
   app.use(express.json());
 
+  // §7:unsafe method Origin 校验,始终挂载(不随 AUTH_ENABLED 关闭)
+  app.use(originCheck(deps.auth?.allowedOrigins ?? null));
+
   // Health
   app.use(HEALTH_PATH, createHealthRouter(deps));
+
+  // SEC-1 §12.1:三个 auth 端点始终挂载(disabled 模式);requireAuth 之后全部受保护
+  const authService =
+    deps.auth?.enabled === true
+      ? new AuthService({
+          password: deps.auth.password,
+          secret: deps.auth.secret,
+          ttlSeconds: deps.auth.ttlSeconds,
+        })
+      : null;
+  app.use("/api/auth", createAuthRouter(deps.auth ?? null, authService, deps.loginRateLimiter));
+  if (authService !== null) {
+    app.use(requireAuth(authService));
+  }
 
   // 模块组装:Controller → Service → Scheduler → GeminiPromptService → Adapter(prd §3.1)
   // 第 6 阶段的流式通道单向向外:RequestService / GeminiStreamService 发布, SSE 只订阅读取

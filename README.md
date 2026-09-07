@@ -33,6 +33,7 @@
 - [23. 安全说明](#23-安全说明)
 - [24. 相关仓库](#24-相关仓库)
 - [25. V1.1 模型选择（Gemini Web）](#25-v11-模型选择gemini-web)
+- [26. 访问鉴权（SEC-1）](#26-访问鉴权sec-1)
 
 ---
 
@@ -618,10 +619,11 @@ curl -X POST http://127.0.0.1:3010/api/conversations/<CONV_ID>/messages \
 | HTTP | 错误码 |
 | --- | --- |
 | `400` | `VALIDATION_ERROR` |
-| `401` | `PROVIDER_LOGIN_REQUIRED` |
+| `401` | `PROVIDER_LOGIN_REQUIRED`、`AUTH_REQUIRED`、`AUTH_INVALID_CREDENTIALS` |
+| `403` | `AUTH_CSRF_REJECTED` |
 | `404` | `CONVERSATION_NOT_FOUND`、`REQUEST_NOT_FOUND` |
 | `409` | `CONVERSATION_DELETED`、`CONVERSATION_ARCHIVED`、`CONVERSATION_REQUEST_IN_PROGRESS`、`IDEMPOTENCY_KEY_REUSED`、`REQUEST_NOT_CANCELLABLE`、`PROVIDER_CONVERSATION_UNAVAILABLE` |
-| `429` | `PROVIDER_RATE_LIMITED`（仅保留映射，无可靠真实判据，见 [§21](#21-已知限制)） |
+| `429` | `PROVIDER_RATE_LIMITED`（仅保留映射，无可靠真实判据，见 [§21](#21-已知限制)）、`AUTH_RATE_LIMITED`（携带 `Retry-After`） |
 | `500` | `SERVER_RESTARTED_DURING_PROCESSING`、`SERVER_RESTARTED_DURING_CANCELLING`、`STREAMING_UPDATE_FAILED`、`SSE_CONNECTION_ERROR`、`PROVIDER_NOT_READY`、`PROVIDER_PROFILE_IN_USE`、`PROVIDER_BROWSER_START_FAILED`、`PROVIDER_PAGE_CLOSED`、`PROVIDER_BROWSER_CRASHED`、`PROVIDER_NAVIGATION_FAILED`、`PROVIDER_DOM_CHANGED`、`PROVIDER_RESPONSE_TIMEOUT`、`PROVIDER_CANCELLATION_UNCONFIRMED`、`DATABASE_ERROR`、`INTERNAL_ERROR` |
 
 错误响应体：
@@ -732,6 +734,7 @@ SQLite + 单 Browser Profile + 全局单飞，决定只能单实例运行。同�
 **不要提交到 Git：**
 
 - `.env`
+- `AUTH_PASSWORD` / `AUTH_SESSION_SECRET`（[§26](#26-访问鉴权sec-1)）
 - Google Cookie / Token
 - Browser Profile（`BROWSER_PROFILE_DIR`）
 - SQLite 正式数据（`DATABASE_URL` 指向的 DB 文件）
@@ -786,3 +789,38 @@ V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择�
 ---
 
 > 本 README 以 V1 冻结 commit `4dfb074a48f236b2b3fa20dc7fe88d4e562ff073` 的源码为基础编写；V1.1 模型选择章节对应 commit `c588c8d`（M4 收口）。若文档与源码冲突，以对应 commit 的源码为准。
+
+---
+
+## 26. 访问鉴权（SEC-1）
+
+服务端鉴权（设计唯一来源：[docs/SEC1_AUTH_DESIGN.md](docs/SEC1_AUTH_DESIGN.md)）：Shared Password + 无状态 HMAC Session Cookie，零新依赖（无 Session 表 / Redis / JWT 库），Prisma Schema 零改动。
+
+**端点（始终挂载；`AUTH_ENABLED=false` 时进入 disabled 模式，恒返回 `authenticated: true`）：**
+
+| 端点 | 行为 |
+| --- | --- |
+| `POST /api/auth/login` | body `{ password }`；成功 200 并 Set-Cookie，密码错 401 `AUTH_INVALID_CREDENTIALS`，限流 429 `AUTH_RATE_LIMITED`（带 `Retry-After`） |
+| `GET /api/auth/session` | 永不 401；返回 `{ authenticated, expiresAt }`，认证状态每次读 Backend 当前事实 |
+| `POST /api/auth/logout` | 幂等 204，`Max-Age=0` 清除 Session Cookie |
+
+三个端点响应统一携带 `Cache-Control: no-store`。`AUTH_ENABLED=true` 时，除 Health 外的全部 `/api/*` 经 `requireAuth` 保护，未认证统一 401 `AUTH_REQUIRED`。
+
+**环境变量（`AUTH_ENABLED=true` 时 fail-fast 校验）：**
+
+| 变量 | 说明 |
+| --- | --- |
+| `AUTH_ENABLED` | 默认 `false`；`NODE_ENV=production` 时必须为 `true`（拒绝无鉴权上线） |
+| `AUTH_PASSWORD` | 开启时必填，min 12 字符；sha256 后恒定时间比较，不落日志 |
+| `AUTH_SESSION_SECRET` | 开启时必填，≥32 字符；推荐 `openssl rand -hex 32`；HMAC-SHA256 签名密钥 |
+| `AUTH_SESSION_TTL_SECONDS` | Session 有效期，默认 604800（7 天），范围 300~2592000 |
+| `AUTH_TRUST_PROXY` | 默认 `false`；只影响 `req.ip`（登录限流键），**不**影响 Cookie Secure |
+| `AUTH_ALLOWED_ORIGINS` | 逗号分隔 Origin 白名单；production + 开启时必填且每项必须 https |
+
+**Cookie 与 CSRF**：`personchat_session` = `base64url(payload).base64url(HMAC)`，payload 为 `{v,iat,exp,sid}` 紧凑 JSON；属性恒 `HttpOnly` + `SameSite=Strict` + `Path=/`，production 恒 `Secure`（dev http 场景无 `Secure` 属预期）。CSRF 防线 = SameSite=Strict + unsafe method（POST/PUT/PATCH/DELETE）Origin 白名单校验，无 Origin 头（curl/supertest）放行，`Origin: null` 或非法 Origin → 403 `AUTH_CSRF_REJECTED`；禁止通配与子串匹配。
+
+**登录限流**：仅 login 端点；进程内 fixed window（5 次失败 / 10 分钟）按 `req.ip` 分桶；只计密码错误（400 不计、成功清零）；触发返回 429 + `Retry-After`。`AUTH_TRUST_PROXY=false`（默认）时键 = socket remoteAddress——防伪造的安全 fallback；公网部署且全部流量经同一本地代理时退化为全局共享桶（可用性限制，非安全问题）。`AUTH_TRUST_PROXY=true` 仅在真实反向代理覆盖/清洗 XFF 的部署中评估，且启用前必须重测限流键解析与伪造 XFF 两项验收（对应实施报告 REAL-09A/09B）。
+
+**Session 吊销**：无状态设计无在线撤销列表；**全局吊销 = 轮换 `AUTH_SESSION_SECRET` 并重启**（全部旧 Cookie 立即失效）；单设备登出 = `POST /api/auth/logout`。
+
+**前端配套**（front 仓库）：AuthGate 登录门 + `useAuthStore` 状态机（probe/login/logout/markUnauthorized）；业务 API 401 `AUTH_REQUIRED` 与 SSE 探测失效统一触发全局登出并关闭活跃 SSE（后端 Request 不取消，继续执行落库）。

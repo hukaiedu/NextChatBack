@@ -6,6 +6,7 @@ import { createApp } from "./app.js";
 import { createLogger } from "./common/logger/logger.js";
 import { parseEnv } from "./config/env.js";
 import { createPrismaClient, probeDatabase } from "./database/prisma.js";
+import { buildAuthDeps } from "./modules/auth/auth.middleware.js";
 import { BrowserManager } from "./providers/gemini/browser-manager.js";
 import { GeminiWebAdapter } from "./providers/gemini/gemini.adapter.js";
 import { PlaywrightBrowserDriver } from "./providers/gemini/playwright-driver.js";
@@ -29,6 +30,7 @@ async function main(): Promise<void> {
     probeDatabase: () => probeDatabase(prisma),
     logger,
     browserManager,
+    auth: buildAuthDeps(env),
     geminiAdapter: new GeminiWebAdapter({
       manager: browserManager,
       baseUrl: env.GEMINI_BASE_URL,

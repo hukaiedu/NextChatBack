@@ -5,6 +5,8 @@ import type { Express } from "express";
 import { createApp } from "../src/app.js";
 import type { SchedulerConfig, StreamingConfig } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
+import type { LoginRateLimiter } from "../src/modules/auth/auth.rate-limit.js";
+import type { AuthDeps } from "../src/modules/auth/auth.types.js";
 import type { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import type { GeminiAdapter } from "../src/providers/gemini/gemini.types.js";
 import type { GeminiPromptService } from "../src/modules/provider/gemini-prompt.service.js";
@@ -44,6 +46,10 @@ export async function setupTestContext(options?: {
   scheduler?: SchedulerConfig;
   /** 第 6 阶段:流式内容写库节流间隔;SSE 集成测试传 0 让每次 delta 都立即落库 */
   streaming?: StreamingConfig;
+  /** SEC-1:鉴权依赖;默认 null = 不鉴权(既有测试零语义变化) */
+  auth?: AuthDeps | null;
+  /** SEC-1 测试接缝:注入带假时钟的 limiter(AUTH-07 限流窗口推进) */
+  loginRateLimiter?: LoginRateLimiter;
 }): Promise<TestContext> {
   const prisma = await createPrismaClient(TEST_DATABASE_URL);
   const logger = createLogger("silent");
@@ -56,6 +62,8 @@ export async function setupTestContext(options?: {
     probeDatabase: () => probeDatabase(prisma),
     logger,
     browserManager,
+    auth: options?.auth ?? null,
+    loginRateLimiter: options?.loginRateLimiter,
     geminiAdapter: options?.geminiAdapter ?? new FakeGeminiAdapter(),
     scheduler: {
       scanIntervalMs: options?.scheduler?.scanIntervalMs ?? 25,
