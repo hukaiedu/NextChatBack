@@ -253,6 +253,138 @@ describe("Conversation API", () => {
     expect(new Set(ids).size).toBe(3);
   });
 
+  it("PAG-BE-03+06:完整翻页无重复无漏项,同 updatedAt 并列组按 id DESC 稳定", async () => {
+    const convs: { id: string }[] = [];
+    for (const title of ["pag-a", "pag-b", "pag-c", "pag-d", "pag-e", "pag-f", "pag-g"]) {
+      convs.push(await createConversation(ctx.baseUrl, title));
+    }
+    // 3 条独立 updatedAt + 3 条并列同一 updatedAt(故意跨页边界) + 1 条最新
+    const base = new Date("2026-09-07T00:00:00.000Z").getTime();
+    for (const [offset, conv] of [convs[0]!, convs[1]!, convs[2]!].entries()) {
+      await ctx.prisma.conversation.update({
+        where: { id: conv.id },
+        data: { updatedAt: new Date(base + offset * 60_000) },
+      });
+    }
+    const tied = [convs[3]!, convs[4]!, convs[5]!];
+    for (const conv of tied) {
+      await ctx.prisma.conversation.update({
+        where: { id: conv.id },
+        data: { updatedAt: new Date(base + 180_000) },
+      });
+    }
+    await ctx.prisma.conversation.update({
+      where: { id: convs[6]!.id },
+      data: { updatedAt: new Date(base + 240_000) },
+    });
+
+    const ids: string[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const url = new URL(`${ctx.baseUrl}/api/conversations`);
+      url.searchParams.set("limit", "3");
+      if (cursor) url.searchParams.set("cursor", cursor);
+      const res = await fetch(url);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        data: { id: string }[];
+        meta: { nextCursor: string | null };
+      };
+      ids.push(...body.data.map((c) => c.id));
+      cursor = body.meta.nextCursor;
+      if (cursor === null) break;
+    }
+
+    expect(ids).toHaveLength(7);
+    expect(new Set(ids).size).toBe(7);
+    expect(new Set(ids)).toEqual(new Set(convs.map((c) => c.id)));
+
+    // 并列组在全局序列中连续,内部顺序 = id DESC(keyset 与排序同构)
+    const tiedIds = tied.map((c) => c.id);
+    const positions = ids
+      .map((id, index) => (tiedIds.includes(id) ? index : -1))
+      .filter((index) => index >= 0)
+      .sort((a, b) => a - b);
+    expect(positions).toEqual([positions[0]!, positions[0]! + 1, positions[0]! + 2]);
+    const tiedInOrder = positions.map((index) => ids[index]!);
+    const tiedSortedDesc = [...tiedInOrder].sort((a, b) => (a < b ? 1 : -1));
+    expect(tiedInOrder).toEqual(tiedSortedDesc);
+  });
+
+  it("PAG-BE-05:ACTIVE/ARCHIVED 分别完整翻页,互不串扰", async () => {
+    const convs: { id: string }[] = [];
+    for (let i = 0; i < 8; i++) {
+      convs.push(await createConversation(ctx.baseUrl, `隔离-${i}`));
+    }
+    // 后 3 条归档 → ACTIVE 5 条 + ARCHIVED 3 条
+    for (const conv of convs.slice(5)) {
+      const patch = await fetch(`${ctx.baseUrl}/api/conversations/${conv.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "ARCHIVED" }),
+      });
+      expect(patch.status).toBe(200);
+    }
+
+    const walk = async (status: string) => {
+      const ids: string[] = [];
+      let cursor: string | null = null;
+      for (;;) {
+        const url = new URL(`${ctx.baseUrl}/api/conversations`);
+        url.searchParams.set("status", status);
+        url.searchParams.set("limit", "2");
+        if (cursor) url.searchParams.set("cursor", cursor);
+        const res = await fetch(url);
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          data: { id: string }[];
+          meta: { nextCursor: string | null };
+        };
+        ids.push(...body.data.map((c) => c.id));
+        cursor = body.meta.nextCursor;
+        if (cursor === null) break;
+      }
+      return ids;
+    };
+
+    const activeIds = await walk("ACTIVE");
+    const archivedIds = await walk("ARCHIVED");
+
+    expect(activeIds).toHaveLength(5);
+    expect(new Set(activeIds).size).toBe(5);
+    expect(new Set(activeIds)).toEqual(
+      new Set(convs.slice(0, 5).map((c) => c.id)),
+    );
+    expect(archivedIds).toHaveLength(3);
+    expect(new Set(archivedIds)).toEqual(
+      new Set(convs.slice(5).map((c) => c.id)),
+    );
+    for (const id of archivedIds) {
+      expect(activeIds).not.toContain(id);
+    }
+  });
+
+  it("PAG-BE-07:非法 cursor 四形态均 400 VALIDATION_ERROR", async () => {
+    const cases = [
+      "!!!!", // 非 base64url 乱码
+      Buffer.from("not-json", "utf8").toString("base64url"), // 合法 base64 非 JSON
+      Buffer.from(JSON.stringify({ x: 1 }), "utf8").toString("base64url"), // 缺字段
+      Buffer.from(
+        JSON.stringify({ u: "not-a-date", i: "some-id" }),
+        "utf8",
+      ).toString("base64url"), // 坏日期字符串
+    ];
+    for (const cursor of cases) {
+      const res = await fetch(
+        `${ctx.baseUrl}/api/conversations?cursor=${encodeURIComponent(cursor)}`,
+      );
+      expect(res.status).toBe(400);
+      expect(
+        ((await res.json()) as { error: { code: string } }).error.code,
+      ).toBe("VALIDATION_ERROR");
+    }
+  });
+
   it("limit 上限 100,超限 400", async () => {
     const res = await fetch(`${ctx.baseUrl}/api/conversations?limit=101`);
     expect(res.status).toBe(400);
