@@ -7,8 +7,28 @@ import type {
   BrowserPageHandle,
   BrowserProviderStatus,
 } from "./browser-driver.js";
-import { GeminiSessionChecker, isGeminiChatUrl } from "./session-checker.js";
+import {
+  GeminiSessionChecker,
+  isGeminiChatUrl,
+  isGeminiOriginUrl,
+} from "./session-checker.js";
 import { extractConversationId } from "./gemini.selectors.js";
+
+/**
+ * P8-FIX-01/Rev3.1:导航后 Gemini SPA 会话状态稳定化窗口(数值与语义冻结见
+ * 设计文档 Revision 3.1 §33;只用于 ensureGeminiPage 成功 goto 后,不用于
+ * checkGeminiSession() 的单次检测)。
+ * - SETTLE_TIMEOUT_MS:总 deadline,届时仍无法判定 → LOGIN_REQUIRED 或 ERROR
+ * - MIN_UNAUTH_CONFIRM_ELAPSED_MS:UNAUTHENTICATED 定案最早时点(此前只累计证据)
+ * - UNAUTH_STABILITY_ROUNDS:连续 signed-out 轮数门槛(约 2s;INDETERMINATE 会清零)
+ */
+const POST_NAV_SESSION_SETTLE_TIMEOUT_MS = 25_000;
+const POST_NAV_SESSION_MIN_UNAUTH_CONFIRM_ELAPSED_MS = 20_000;
+const POST_NAV_SESSION_UNAUTH_STABILITY_ROUNDS = 8;
+const POST_NAV_SESSION_POLL_MS = 250;
+
+/** 仅内部诊断串(不进 ErrorCodes / HTTP map):deadline 仍无法判定会话状态时上报用 */
+const PROVIDER_SESSION_INDETERMINATE = "PROVIDER_SESSION_INDETERMINATE";
 
 export interface BrowserManagerOptions {
   driver: BrowserDriver;
@@ -17,6 +37,16 @@ export interface BrowserManagerOptions {
   geminiBaseUrl: string;
   logger: Logger;
   sessionChecker?: GeminiSessionChecker;
+  /**
+   * P8-FIX-01/Rev3.1 稳定化窗口覆盖(仅测试缩短用;生产保持默认
+   * 25_000ms / 250ms / 20_000ms / 8 轮,不新增 env 开关)
+   */
+  postNavSettle?: {
+    timeoutMs?: number;
+    pollMs?: number;
+    minUnauthConfirmElapsedMs?: number;
+    unauthStabilityRounds?: number;
+  };
 }
 
 /**
@@ -383,21 +413,23 @@ export class BrowserManager {
       this.logger.info("gemini page created");
     }
 
-    // FIX-04:零导航仅在「页面健康且确认已登录」时短路;一次 check=false 不得
-    // 定案 LOGIN_REQUIRED——checker 会把 DOM/关闭族异常 catch 成 false,断连竞态下
-    // url() 可能仍是旧聊天页且 isCrashed 尚未落地 → fallback 走既有 goto 流程:
-    // 真未登录 = 导航后再判 LOGIN_REQUIRED;页面已死 = goto 抛关闭族,保持原语义。
+    // FIX-04/Rev3.1:零导航仅在「页面健康且三态判定为 AUTHENTICATED」时短路;
+    // UNAUTHENTICATED 与 INDETERMINATE 都不得在导航前定案 LOGIN_REQUIRED
+    // (checker 会把 DOM/关闭族异常 catch 成 INDETERMINATE,断连竞态下 url()
+    // 可能仍是旧聊天页且 isCrashed 尚未落地)→ fallback 走既有 goto+settle 流程。
     if (
       navigation === "ifNeeded" &&
       !page.isCrashed() &&
       isGeminiChatUrl(page.url(), this.options.geminiBaseUrl)
     ) {
-      if (await this.checker.checkLoggedIn(page)) {
+      const sessionState = await this.checker.checkSessionState(page);
+      if (sessionState === "AUTHENTICATED") {
         this.transitionTo("READY", "gemini ready (navigation skipped)");
         return this.state;
       }
       this.logger.info(
-        "gemini session check failed on chat page, falling back to navigation",
+        { sessionState },
+        "gemini session not authenticated on chat page, falling back to navigation",
       );
     }
 
@@ -420,7 +452,84 @@ export class BrowserManager {
       { onConversation: extractConversationId(page.url()) !== null },
       "gemini page open",
     );
-    return this.refreshStatusFromPage();
+    return this.settleSessionAfterNavigation(page);
+  }
+
+  /**
+   * P8-FIX-01/Rev3.1:成功导航后、LOGIN_REQUIRED/ERROR 定案前的三态稳定化
+   * (决策表冻结见设计文档 Revision 3.1 §33):
+   * - 每轮先过生命周期红线:page 被替换/关闭/crash 或 context 消失 → 立即返回
+   *   现状(STOPPED/ERROR 由事件驱动),绝不把 crash 伪装成登录失效
+   * - 非 Gemini origin(accounts/consent 登录流程)→ 立即 LOGIN_REQUIRED
+   * - AUTHENTICATED → 立即 READY(正证据早退,不等窗口耗尽)
+   * - UNAUTHENTICATED 只累计连续轮数;elapsed ≥ 20s 且连续 ≥ 8 轮才定案
+   * - INDETERMINATE 清零连续计数(非连续 Tier-1 不得累加成稳定证据)
+   * - deadline 仍无法判定:连续 signed-out 足够 → LOGIN_REQUIRED,
+   *   否则 ERROR(PROVIDER_SESSION_INDETERMINATE 诊断;绝不 INDETERMINATE → LOGIN_REQUIRED)
+   */
+  private async settleSessionAfterNavigation(
+    page: BrowserPageHandle,
+  ): Promise<BrowserProviderStatus> {
+    const settle = this.options.postNavSettle;
+    const timeoutMs = settle?.timeoutMs ?? POST_NAV_SESSION_SETTLE_TIMEOUT_MS;
+    const pollMs = settle?.pollMs ?? POST_NAV_SESSION_POLL_MS;
+    const minUnauthElapsedMs =
+      settle?.minUnauthConfirmElapsedMs ?? POST_NAV_SESSION_MIN_UNAUTH_CONFIRM_ELAPSED_MS;
+    const stabilityRounds =
+      settle?.unauthStabilityRounds ?? POST_NAV_SESSION_UNAUTH_STABILITY_ROUNDS;
+    const context = this.context;
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    let consecutiveUnauthenticated = 0;
+    for (;;) {
+      if (
+        this.page !== page ||
+        !context ||
+        context.isClosed() ||
+        page.isClosed() ||
+        page.isCrashed()
+      ) {
+        return this.getStatus();
+      }
+      if (!isGeminiOriginUrl(page.url(), this.options.geminiBaseUrl)) {
+        this.transitionTo(
+          "LOGIN_REQUIRED",
+          "gemini login required (navigated away from gemini origin)",
+        );
+        return this.state;
+      }
+      const sessionState = await this.checker.checkSessionState(page);
+      if (sessionState === "AUTHENTICATED") {
+        this.transitionTo("READY", "gemini ready");
+        return this.state;
+      }
+      if (sessionState === "UNAUTHENTICATED") {
+        consecutiveUnauthenticated += 1;
+        if (
+          Date.now() - startedAt >= minUnauthElapsedMs &&
+          consecutiveUnauthenticated >= stabilityRounds
+        ) {
+          this.transitionTo("LOGIN_REQUIRED", "gemini login required");
+          return this.state;
+        }
+      } else {
+        consecutiveUnauthenticated = 0;
+      }
+      if (Date.now() >= deadline) {
+        break;
+      }
+      await sleep(pollMs);
+    }
+    if (consecutiveUnauthenticated >= stabilityRounds) {
+      this.transitionTo("LOGIN_REQUIRED", "gemini login required");
+      return this.state;
+    }
+    this.transitionTo("ERROR", "gemini session state indeterminate after navigation");
+    this.recordBrowserError(
+      PROVIDER_SESSION_INDETERMINATE,
+      "Gemini session state remained indeterminate after navigation",
+    );
+    return this.state;
   }
 
   private bindPageEvents(page: BrowserPageHandle): void {
@@ -447,16 +556,19 @@ export class BrowserManager {
     });
   }
 
-  /** 用当前 page URL 检测登录状态并更新 READY / LOGIN_REQUIRED */
+  /**
+   * 用当前 page 三态检测并更新状态:AUTHENTICATED → READY;
+   * UNAUTHENTICATED → LOGIN_REQUIRED;INDETERMINATE 不翻转当前状态。
+   */
   private async refreshStatusFromPage(): Promise<BrowserProviderStatus> {
     const page = this.page;
     if (!page || page.isClosed()) {
       return this.state;
     }
-    const loggedIn = await this.checker.checkLoggedIn(page);
-    if (loggedIn) {
+    const sessionState = await this.checker.checkSessionState(page);
+    if (sessionState === "AUTHENTICATED") {
       this.transitionTo("READY", "gemini ready");
-    } else {
+    } else if (sessionState === "UNAUTHENTICATED") {
       this.transitionTo("LOGIN_REQUIRED", "gemini login required");
     }
     return this.state;
@@ -494,4 +606,8 @@ function isProfileInUseError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   const lower = message.toLowerCase();
   return PROFILE_IN_USE_MARKERS.some((marker) => lower.includes(marker));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

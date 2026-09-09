@@ -269,3 +269,47 @@ describe("PlaywrightBrowserDriver signal ownership(FIX-02)", () => {
     expect(options.handleSIGHUP).toBeUndefined();
   });
 });
+
+/**
+ * P8(BROWSER_PROXY_URL):proxy 只在显式配置时进入 launch options —— 未配置不得
+ * 出现 proxy 键(Windows 开发环境沿用 Chromium 系统代理),配置后透传 server URL。
+ */
+describe("PlaywrightBrowserDriver proxy options(P8-PROXY)", () => {
+  function lastLaunchOptions(): Record<string, unknown> {
+    const launch = chromium.launchPersistentContext as unknown as {
+      mock: { calls: [string, Record<string, unknown>][] };
+    };
+    expect(launch.mock.calls).toHaveLength(1);
+    return launch.mock.calls[0]?.[1] ?? {};
+  }
+
+  it("P8-PROXY-01 未配置 proxyUrl → launch options 不含 proxy 键(不默认代理)", async () => {
+    const launch = chromium.launchPersistentContext as unknown as {
+      mock: { calls: unknown[][] };
+    };
+    launch.mock.calls.length = 0;
+
+    const driver = new PlaywrightBrowserDriver();
+    await driver.launchPersistentContext("./data/browser-profile-p8", { headless: true });
+
+    expect(lastLaunchOptions()).not.toHaveProperty("proxy");
+  });
+
+  it("P8-PROXY-02 配置 proxyUrl → launch options.proxy.server 透传,signal 关闭不变", async () => {
+    const launch = chromium.launchPersistentContext as unknown as {
+      mock: { calls: unknown[][] };
+    };
+    launch.mock.calls.length = 0;
+
+    const driver = new PlaywrightBrowserDriver({ proxyUrl: "http://127.0.0.1:7892" });
+    await driver.launchPersistentContext("./data/browser-profile-p8", { headless: true });
+
+    const options = lastLaunchOptions();
+    expect(options).toMatchObject({
+      headless: true,
+      handleSIGINT: false,
+      handleSIGTERM: false,
+      proxy: { server: "http://127.0.0.1:7892" },
+    });
+  });
+});

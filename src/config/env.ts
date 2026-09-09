@@ -21,6 +21,18 @@ const envSchema = z.object({
   // Browser Manager(第 3 阶段)
   BROWSER_PROFILE_DIR: z.string().min(1).default("./data/browser-profile"),
   BROWSER_HEADLESS: boolFromString.default("false"),
+  /**
+   * P8:可选显式浏览器代理(仅 Playwright Chromium 使用)。V1 只支持
+   * http/https/socks5 且禁止携带 credentials;未设置 = 不传 Playwright proxy
+   * (Windows 开发环境沿用 Chromium 继承的系统代理)。
+   */
+  BROWSER_PROXY_URL: z
+    .string()
+    .optional()
+    .refine(isValidProxyUrl, {
+      message:
+        "BROWSER_PROXY_URL must use http, https, or socks5 and must not contain credentials",
+    }),
   GEMINI_BASE_URL: z.string().url().default("https://gemini.google.com/app"),
   /** 单次 Prompt 从发送到读回最终回答的等待上限 */
   GEMINI_RESPONSE_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
@@ -133,4 +145,25 @@ export function parseEnv(raw: NodeJS.ProcessEnv): Env {
     );
   }
   return result.data;
+}
+
+const PROXY_PROTOCOLS = new Set(["http:", "https:", "socks5:"]);
+
+/**
+ * P8:BROWSER_PROXY_URL 校验 —— 只接受 http/https/socks5,且 URL 不得携带
+ * username/password(V1 不支持 proxy credentials;错误消息不打印 URL 内容)。
+ */
+function isValidProxyUrl(value: string | undefined): boolean {
+  if (value === undefined || value === "") {
+    return true;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    PROXY_PROTOCOLS.has(url.protocol) && url.username === "" && url.password === ""
+  );
 }

@@ -2,6 +2,8 @@ import type { Logger } from "pino";
 
 import { createLogger } from "../src/common/logger/logger.js";
 import { BrowserManager } from "../src/providers/gemini/browser-manager.js";
+import { GeminiSessionChecker } from "../src/providers/gemini/session-checker.js";
+import type { GeminiSessionState } from "../src/providers/gemini/session-checker.js";
 import type {
   BrowserContextHandle,
   BrowserDriver,
@@ -260,15 +262,29 @@ export class FakePage implements BrowserPageHandle {
     if (scripted !== undefined) {
       return scripted;
     }
-    // 模拟真实 Gemini DOM(2026-09-03 实测):
+    // 模拟真实 Gemini DOM(2026-09-03 实测 + Rev3.1 §33 三态判据):
     // - 已登录页:输入区存在(textarea 或升级后的 rich-textarea .ql-editor),
-    //   并存在 accounts 链接(头像 SignOutOptions)
-    // - 未登录页:无输入区,存在 accounts 链接(登录 CTA)
+    //   并存在 accounts 链接(头像 SignOutOptions)与 rail chrome(new-chat/search-chats)
+    // - 未登录页:无输入区、无 rail,存在 accounts 链接(登录 CTA)与
+    //   Tier-1 signed-out 证据(mavatar-sign-in-* / signed-out-disclaimer)
     if (selector.includes("textarea")) {
       return this.showSignInLink ? 0 : 1;
     }
     if (selector.includes("accounts.google.com")) {
       return 1; // 登录和未登录页都存在 accounts 链接,不作判据
+    }
+    if (
+      selector.includes('data-test-id="new-chat-button"') ||
+      selector.includes('data-test-id="search-chats-button"')
+    ) {
+      return this.showSignInLink ? 0 : 1;
+    }
+    if (
+      selector.includes('data-test-id="mavatar-sign-in-button"') ||
+      selector.includes('data-test-id="mavatar-sign-in-icon-button"') ||
+      selector.includes('data-test-id="signed-out-disclaimer"')
+    ) {
+      return this.showSignInLink ? 1 : 0;
     }
     return 0;
   }
@@ -635,6 +651,39 @@ export class FakeDriver implements BrowserDriver {
 
 const silentLogger: Logger = createLogger("silent");
 
+/**
+ * P8/Rev3.1:脚本化三态登录检测 —— checkSessionState 按三态剧本依次返回,
+ * 读尽后重复最后一个值(空数组 = 恒 AUTHENTICATED)。calls 计数与 onCheck
+ * 回调供会话测试插桩(如 settle 中途关闭页面)。与生产 GeminiSessionChecker
+ * 同构(extends);旧布尔 checkLoggedIn 壳由基类路由到本 override,语义由
+ * 剧本负责(水合暂态 = INDETERMINATE,稳定未登录 = UNAUTHENTICATED)。
+ */
+export class ScriptedSessionChecker extends GeminiSessionChecker {
+  calls = 0;
+  private readonly queue: GeminiSessionState[];
+  private readonly onCheck: ((call: number) => void) | undefined;
+
+  constructor(
+    geminiBaseUrl: string,
+    results: GeminiSessionState[],
+    onCheck?: (call: number) => void,
+  ) {
+    super(geminiBaseUrl);
+    this.queue = [...results];
+    this.onCheck = onCheck;
+  }
+
+  override async checkSessionState(_page: BrowserPageHandle): Promise<GeminiSessionState> {
+    this.calls += 1;
+    this.onCheck?.(this.calls);
+    const last = this.queue[this.queue.length - 1] ?? "AUTHENTICATED";
+    if (this.queue.length > 1) {
+      return this.queue.shift() ?? last;
+    }
+    return last;
+  }
+}
+
 /** 合成 <p> 前的文本转义:保证 answerTexts 含 < > & 时合成 HTML 仍可被解析还原 */
 function escapeHtmlText(text: string): string {
   return text
@@ -653,6 +702,8 @@ export function createFakeManager(driver: FakeDriver, script?: FakePageScript): 
     headless: true,
     geminiBaseUrl: GEMINI_BASE_URL,
     logger: silentLogger,
+    // P8-FIX-01:单测不真实等 8s 生产窗口;未登录判定测试用短稳定化窗口
+    postNavSettle: { timeoutMs: 120, pollMs: 10 },
   });
 }
 

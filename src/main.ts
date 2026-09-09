@@ -9,8 +9,8 @@ import { createPrismaClient, probeDatabase } from "./database/prisma.js";
 import { buildAuthDeps } from "./modules/auth/auth.middleware.js";
 import { BrowserManager } from "./providers/gemini/browser-manager.js";
 import { runBrowserPrewarm } from "./providers/gemini/browser-prewarm.js";
+import { createDriver } from "./providers/gemini/create-driver.js";
 import { GeminiWebAdapter } from "./providers/gemini/gemini.adapter.js";
-import { PlaywrightBrowserDriver } from "./providers/gemini/playwright-driver.js";
 
 async function main(): Promise<void> {
   const env = parseEnv(process.env);
@@ -19,7 +19,7 @@ async function main(): Promise<void> {
 
   // Browser Manager:进程级单实例(一个 Persistent Context)
   const browserManager = new BrowserManager({
-    driver: new PlaywrightBrowserDriver(),
+    driver: createDriver(env),
     profileDir: env.BROWSER_PROFILE_DIR,
     headless: env.BROWSER_HEADLESS,
     geminiBaseUrl: env.GEMINI_BASE_URL,

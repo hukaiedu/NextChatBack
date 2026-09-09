@@ -94,3 +94,48 @@ describe("parseEnv 超时跨字段约束(ISSUE-03)", () => {
     expect((caught as AppError).statusCode).toBe(400);
   });
 });
+
+/**
+ * P8:BROWSER_PROXY_URL 可选显式代理的启动校验(P8-PROXY-03)。
+ * 只接受 http/https/socks5 且不得携带 credentials;未设置与空串合法(不传 proxy,
+ * Windows 开发环境沿用 Chromium 继承的系统代理)。
+ */
+describe("parseEnv BROWSER_PROXY_URL(P8-PROXY-03)", () => {
+  it("合法代理协议 http/https/socks5 均解析通过并原样保留", () => {
+    for (const url of [
+      "http://127.0.0.1:7892",
+      "https://proxy.example.com:8443",
+      "socks5://127.0.0.1:1080",
+    ]) {
+      const env = parseEnv({ ...base, BROWSER_PROXY_URL: url });
+      expect(env.BROWSER_PROXY_URL).toBe(url);
+    }
+  });
+
+  it("未设置或空串通过(不强制代理)", () => {
+    expect(parseEnv({ ...base }).BROWSER_PROXY_URL).toBeUndefined();
+    expect(parseEnv({ ...base, BROWSER_PROXY_URL: "" }).BROWSER_PROXY_URL).toBe("");
+  });
+
+  it("拒绝不支持的协议(ftp/file)与畸形 URL,错误消息含 BROWSER_PROXY_URL", () => {
+    for (const url of ["ftp://proxy.local:2121", "file:///C:/proxy", "not a url", "http://"]) {
+      expect(() => parseEnv({ ...base, BROWSER_PROXY_URL: url })).toThrow(
+        /BROWSER_PROXY_URL/,
+      );
+    }
+  });
+
+  it("拒绝携带 credentials 的代理 URL,且错误消息不打印 URL 内容", () => {
+    let caught: unknown = null;
+    try {
+      parseEnv({ ...base, BROWSER_PROXY_URL: "http://user:secret@127.0.0.1:7892" });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AppError);
+    expect((caught as AppError).code).toBe(ErrorCodes.VALIDATION_ERROR);
+    const message = (caught as AppError).message;
+    expect(message).toMatch(/BROWSER_PROXY_URL/);
+    expect(message).not.toContain("secret");
+  });
+});

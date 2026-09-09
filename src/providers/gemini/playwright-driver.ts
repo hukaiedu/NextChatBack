@@ -11,12 +11,21 @@ import type {
 
 const DEFAULT_NAVIGATION_TIMEOUT_MS = 45_000;
 
+/** P8:PlaywrightBrowserDriver 构造配置(网络层归 driver,不进入 BrowserManager) */
+export interface PlaywrightBrowserDriverOptions {
+  /** 显式代理 server URL(http/https/socks5);未设置 = 不传 proxy(Chromium 走系统配置) */
+  proxyUrl?: string;
+}
+
 /** 真实 Playwright 实现(BrowserManager 的生产依赖) */
 export class PlaywrightBrowserDriver implements BrowserDriver {
+  constructor(private readonly options: PlaywrightBrowserDriverOptions = {}) {}
+
   async launchPersistentContext(
     userDataDir: string,
     options: { headless: boolean },
   ): Promise<BrowserContextHandle> {
+    const proxyUrl = this.options.proxyUrl;
     const context = await chromium.launchPersistentContext(userDataDir, {
       headless: options.headless,
       // personChat 在 main.ts 统一拥有进程 shutdown 生命周期(playwright 默认
@@ -24,6 +33,13 @@ export class PlaywrightBrowserDriver implements BrowserDriver {
       // process.exit(130) 抢占,FINDING-P7-FIX-01-1);SIGHUP 不在此列(main.ts 未监听)
       handleSIGINT: false,
       handleSIGTERM: false,
+      ...(proxyUrl
+        ? {
+            proxy: {
+              server: proxyUrl,
+            },
+          }
+        : {}),
     });
     return new PlaywrightContextHandle(context);
   }

@@ -3,15 +3,23 @@ import { randomUUID } from "node:crypto";
 
 import { AppError } from "../../src/common/errors/app-error.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { createLogger } from "../../src/common/logger/logger.js";
 import { isContextClosedError } from "../../src/providers/gemini/gemini.errors.js";
-import type { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
-import { FAKE_CONVERSATION_URL, FakeDriver, FakeGeminiAdapter, createFakeManager } from "../fakes.js";
+import { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
+import {
+  FAKE_CONVERSATION_URL,
+  FakeDriver,
+  FakeGeminiAdapter,
+  ScriptedSessionChecker,
+  createFakeManager,
+} from "../fakes.js";
 import type { FakeAdapterBehavior } from "../fakes.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
 const CONV_URL_A = "https://gemini.google.com/app/9999aaaa8888bbbb";
 const CONV_URL_B = "https://gemini.google.com/app/0a1b2c3d4e5f6071";
+const GEMINI_BASE_URL = "https://gemini.google.com/app";
 
 interface Seeded {
   conversationId: string;
@@ -26,10 +34,20 @@ describe("RequestScheduler(单进程串行调度,Fake Adapter + 真 SQLite)", ()
   let adapter: FakeGeminiAdapter;
   let sequence = 0;
 
-  async function mount(behavior: FakeAdapterBehavior = {}, executionTimeoutMs?: number): Promise<void> {
-    driver = new FakeDriver();
-    manager = createFakeManager(driver);
+  async function mount(
+    behavior: FakeAdapterBehavior = {},
+    executionTimeoutMs?: number,
+    prebuilt?: { driver: FakeDriver; manager: BrowserManager },
+  ): Promise<void> {
     adapter = new FakeGeminiAdapter(behavior);
+    if (prebuilt) {
+      // P8-SESSION-04:注入自定义 checker/settle 窗口的 manager,driver 必须同源
+      driver = prebuilt.driver;
+      manager = prebuilt.manager;
+    } else {
+      driver = new FakeDriver();
+      manager = createFakeManager(driver);
+    }
     ctx = await setupTestContext({
       browserManager: manager,
       geminiAdapter: adapter,
@@ -149,6 +167,45 @@ describe("RequestScheduler(单进程串行调度,Fake Adapter + 真 SQLite)", ()
       where: { id: { in: [first.assistantMessageId, second.assistantMessageId] } },
     });
     expect(assistants.every((m) => m.status === "FAILED")).toBe(true);
+  });
+
+  it("P8-SESSION-04 冷启动导航后水合窗口内 INDETERMINATE×2 → AUTHENTICATED → SUCCESS,不误判 PROVIDER_LOGIN_REQUIRED", async () => {
+    // P8-FIX-01/Rev3.1 回归:goto 刚返回时 Gemini SPA 尚未水合出登录证据(前两次
+    // check=INDETERMINATE —— 无 signed-out 证据也不算已登录),水合完成后第三次
+    // check=AUTHENTICATED。修复前 settle 缺失 → 一次非正判即定案 LOGIN_REQUIRED
+    // → 请求被误判 FAILED;修复后经有界轮询读到 READY → 正常执行。
+    driver = new FakeDriver();
+    const checker = new ScriptedSessionChecker(GEMINI_BASE_URL, [
+      "INDETERMINATE",
+      "INDETERMINATE",
+      "AUTHENTICATED",
+    ]);
+    const settleManager = new BrowserManager({
+      driver,
+      profileDir: "./data/browser-profile",
+      headless: true,
+      geminiBaseUrl: GEMINI_BASE_URL,
+      logger: createLogger("silent"),
+      sessionChecker: checker,
+      postNavSettle: { timeoutMs: 150, pollMs: 10 },
+    });
+    await mount({ answer: "水合后回答" }, undefined, { driver, manager: settleManager });
+    const seeded = await seedPending("冷启动问题");
+
+    await ctx.scheduler!.runOnce();
+
+    const request = await ctx.prisma.modelRequest.findUnique({ where: { id: seeded.requestId } });
+    const assistant = await ctx.prisma.message.findUnique({
+      where: { id: seeded.assistantMessageId },
+    });
+    expect(request?.status).toBe("SUCCESS");
+    expect(request?.attemptCount).toBe(1);
+    expect(assistant?.status).toBe("COMPLETED");
+    expect(assistant?.content).toBe("水合后回答");
+    expect(adapter.runCalls).toHaveLength(1);
+    expect(manager.getStatus()).toBe("READY");
+    // settle 轮询真实发生过(false→false→true),不是 goto 后单次判定放行
+    expect(checker.calls).toBeGreaterThanOrEqual(3);
   });
 
   it("Browser 启动失败 → 请求留在 PENDING 等待(§12.2),不认领不失败", async () => {

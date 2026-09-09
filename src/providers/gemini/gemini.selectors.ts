@@ -16,7 +16,23 @@ export const GEMINI_SELECTORS = {
   composer: "rich-textarea .ql-editor, textarea",
   /** 可输入的编辑器(注意:`[contenteditable="true"]` 会额外命中隐藏的 .ql-clipboard,不能用) */
   quillComposer: "rich-textarea .ql-editor",
-  /** 指向 Google 账号域的链接(只作未登录补判据:已登录页的头像菜单里也有) */
+  /**
+   * Tier-1 signed-out 证据(Revision 3.1 §33 冻结,guest 实测三种形态 run-to-run 漂移)。
+   * 任一命中即 UNAUTHENTICATED,优先级压过 composer。
+   */
+  sessionSignedOut:
+    '[data-test-id="mavatar-sign-in-button"], ' +
+    '[data-test-id="mavatar-sign-in-icon-button"], ' +
+    '[data-test-id="signed-out-disclaimer"]',
+  /**
+   * Tier-2 authenticated rail 证据(Revision 3.1 CALIB 冻结:guest 0/20、auth 28/28)。
+   * account-scoped 页面 chrome,非本地化;与 composer 同现才构成 AUTHENTICATED。
+   * 零历史新账号不依赖 conversation history,rail 是唯一进入生产判据的账号域证据。
+   */
+  sessionAuthenticatedRail:
+    '[data-test-id="new-chat-button"], ' +
+    '[data-test-id="search-chats-button"]',
+  /** 指向 Google 账号域的链接(已退出会话状态判据:登录/未登录页都存在;仅测试夹具引用故保留) */
   signInLink: 'a[href*="accounts.google.com"], a[href*="ServiceLogin"]',
   /** 一轮提问的用户气泡(每发送一次 +1;含无障碍播报前缀,不用于读内容) */
   userTurn: "user-query",
