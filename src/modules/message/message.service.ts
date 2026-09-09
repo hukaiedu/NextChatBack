@@ -12,7 +12,8 @@ import {
   USER_MESSAGE_STATUS,
   toRequestBrief,
 } from "./message.types.js";
-import type { MessageListItem, SendMessageResult } from "./message.types.js";
+import type { MessageListItem, MessageListPage, SendMessageResult } from "./message.types.js";
+import type { ListMessagesQuery } from "./message.schema.js";
 
 /** 新 Request 事务提交后的回调(app 装配时指向 Scheduler.notify) */
 export interface RequestCreationListener {
@@ -186,26 +187,57 @@ export class MessageService {
     return { request, userMessage, assistantMessage, deduplicated: true };
   }
 
-  /** 消息列表(position ASC),Assistant 消息附带 Request 摘要 */
-  async listMessages(conversationId: string): Promise<MessageListItem[]> {
+  /**
+   * 消息分页列表(PAG-2):按 position desc 取 limit+1 条探测 hasMore,页内反转为旧→新。
+   * cursor 语义 position < cursor.p;totalCount 为会话 Message 总数(与页查询并行)。
+   * Request 摘要只查页内 assistant 消息;会话不存在/DELETED → 404,ARCHIVED 可读。
+   */
+  async listMessages(
+    conversationId: string,
+    query: ListMessagesQuery,
+  ): Promise<MessageListPage> {
     const conversation = await this.conversationRepo.findById(this.prisma, conversationId);
     if (!conversation || conversation.status === "DELETED") {
       throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
     }
-    const messages = await this.messageRepo.listByConversation(this.prisma, conversationId);
-    const requests = await this.requestRepo.listByConversation(this.prisma, conversationId);
+    const cursorPosition = query.cursor ? decodeMessageCursor(query.cursor) : undefined;
+
+    const [rows, totalCount] = await Promise.all([
+      this.messageRepo.listPage(this.prisma, conversationId, {
+        cursorPosition,
+        take: query.limit + 1,
+      }),
+      this.messageRepo.countByConversation(this.prisma, conversationId),
+    ]);
+
+    const hasMore = rows.length > query.limit;
+    const pageRows = rows.slice(0, query.limit);
+    const nextCursor =
+      hasMore && pageRows.length > 0
+        ? encodeMessageCursor({ p: pageRows[pageRows.length - 1]!.position })
+        : null;
+
+    const assistantIds = pageRows.filter((m) => m.role === "ASSISTANT").map((m) => m.id);
+    const requests = await this.requestRepo.findByAssistantIds(this.prisma, assistantIds);
     const requestByAssistantId = new Map<string, ModelRequestModel>();
     for (const request of requests) {
       requestByAssistantId.set(request.assistantMessageId, request);
     }
-    // 只有 ASSISTANT 消息附带 Request 摘要,USER 消息固定 null
-    return messages.map((message) => {
-      if (message.role !== "ASSISTANT") {
-        return { ...message, request: null };
-      }
-      const request = requestByAssistantId.get(message.id);
-      return { ...message, request: request ? toRequestBrief(request) : null };
-    });
+
+    return {
+      items: pageRows
+        .slice()
+        .reverse()
+        .map((message) => {
+          if (message.role !== "ASSISTANT") {
+            return { ...message, request: null };
+          }
+          const request = requestByAssistantId.get(message.id);
+          return { ...message, request: request ? toRequestBrief(request) : null };
+        }),
+      nextCursor,
+      totalCount,
+    };
   }
 
   /**
@@ -218,4 +250,23 @@ export class MessageService {
     const updated = await this.messageRepo.updateContentIfStreaming(this.prisma, id, content);
     return updated > 0;
   }
+}
+
+/** PAG-2 Message 分页游标 = base64url({ p: position }),语义:取 position < p 的更老一页(Message 模块自有实现,不与 Conversation 游标共用) */
+function encodeMessageCursor(cursor: { p: number }): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeMessageCursor(raw: string): number {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor");
+  }
+  const value = parsed as { p?: unknown } | null;
+  if (typeof value?.p !== "number" || !Number.isInteger(value.p) || value.p < 1) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor");
+  }
+  return value.p;
 }

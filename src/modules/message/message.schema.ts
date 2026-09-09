@@ -12,6 +12,12 @@ export const sendMessageSchema = z.object({
   modelKey: z.string().trim().min(1).max(256).optional(),
 });
 
+// PAG-2:GET messages 分页 query;limit 默认 50、上限 100;cursor 为不透明 base64url 串
+export const listMessagesQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).optional(),
+});
+
 export const messageRouteParamSchema = z.object({
   conversationId: z.string().min(1),
 });
@@ -19,3 +25,4 @@ export const messageRouteParamSchema = z.object({
 export const idempotencyKeyHeaderSchema = z.string().trim().min(1).max(256);
 
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;
+export type ListMessagesQuery = z.infer<typeof listMessagesQuerySchema>;

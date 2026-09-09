@@ -282,3 +282,255 @@ describe("Message API", () => {
     });
   });
 });
+
+interface MessagePageBody {
+  data: {
+    id: string;
+    role: string;
+    position: number;
+    content: string;
+    request: unknown;
+  }[];
+  meta: { nextCursor: string | null; totalCount: number };
+}
+
+/** [a..b] 闭区间升序数组 */
+function range(a: number, b: number): number[] {
+  return Array.from({ length: b - a + 1 }, (_, i) => a + i);
+}
+
+describe("Message API pagination (PAG-2)", () => {
+  let ctx: TestContext;
+
+  beforeAll(async () => {
+    ctx = await setupTestContext();
+  });
+
+  beforeEach(async () => {
+    await ctx.reset();
+  });
+
+  afterAll(async () => {
+    await ctx.close();
+  });
+
+  /** 绕过 send 链路直接落库:position 1..count,奇数位 USER / 偶数位 ASSISTANT */
+  async function seedMessages(conversationId: string, count: number): Promise<void> {
+    await ctx.prisma.message.createMany({
+      data: range(1, count).map((position) => ({
+        conversationId,
+        role: position % 2 === 1 ? "USER" : "ASSISTANT",
+        content: `msg-${position}`,
+        status: "COMPLETED",
+        position,
+      })),
+    });
+  }
+
+  async function getMessagesPage(
+    conversationId: string,
+    query = "",
+  ): Promise<{ res: Response; body: MessagePageBody }> {
+    const res = await fetch(
+      `${ctx.baseUrl}/api/conversations/${conversationId}/messages${query}`,
+    );
+    return { res, body: (await res.json()) as MessagePageBody };
+  }
+
+  function encodeCursor(value: unknown): string {
+    return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  }
+
+  it("PAG2-BE-01: 默认返回最新 50 条(151..200),meta.nextCursor 非空,totalCount=200", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 200);
+
+    const { res, body } = await getMessagesPage(conv.id);
+    expect(res.status).toBe(200);
+    expect(body.data).toHaveLength(50);
+    expect(body.data.map((m) => m.position)).toEqual(range(151, 200));
+    expect(body.meta.totalCount).toBe(200);
+    expect(body.meta.nextCursor).not.toBeNull();
+  });
+
+  it("PAG2-BE-02: 页内 position 严格升序(旧→新)", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 200);
+
+    const { body } = await getMessagesPage(conv.id);
+    const positions = body.data.map((m) => m.position);
+    for (let i = 1; i < positions.length; i += 1) {
+      expect(positions[i]!).toBeGreaterThan(positions[i - 1]!);
+    }
+  });
+
+  it("PAG2-BE-03: cursor 取更老一页(101..150)", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 200);
+
+    const first = await getMessagesPage(conv.id);
+    const second = await getMessagesPage(conv.id, `?cursor=${first.body.meta.nextCursor}`);
+    expect(second.res.status).toBe(200);
+    expect(second.body.data.map((m) => m.position)).toEqual(range(101, 150));
+    expect(second.body.meta.totalCount).toBe(200);
+    expect(second.body.meta.nextCursor).not.toBeNull();
+  });
+
+  it("PAG2-BE-04: 200 条完整 traversal 恰好 4 次请求,无第五次空请求", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 200);
+
+    const visited: number[] = [];
+    let cursor: string | null = null;
+    let requests = 0;
+    do {
+      const { body } = await getMessagesPage(conv.id, cursor ? `?cursor=${cursor}` : "");
+      requests += 1;
+      visited.push(...body.data.map((m) => m.position));
+      cursor = body.meta.nextCursor;
+    } while (cursor !== null);
+
+    expect(requests).toBe(4);
+    expect(visited).toEqual([...range(151, 200), ...range(101, 150), ...range(51, 100), ...range(1, 50)]);
+  });
+
+  it("PAG2-BE-05: position 唯一稳定 —— traversal 每条恰好一次,无重复无遗漏", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 200);
+
+    const visited: number[] = [];
+    let cursor: string | null = null;
+    do {
+      const { body } = await getMessagesPage(conv.id, cursor ? `?cursor=${cursor}` : "");
+      visited.push(...body.data.map((m) => m.position));
+      cursor = body.meta.nextCursor;
+    } while (cursor !== null);
+
+    expect(new Set(visited).size).toBe(200);
+    expect([...visited].sort((a, b) => a - b)).toEqual(range(1, 200));
+  });
+
+  it("PAG2-BE-06: 恰好整除(100 条 × limit 50)最后一页 nextCursor=null", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 100);
+
+    const first = await getMessagesPage(conv.id);
+    expect(first.body.data.map((m) => m.position)).toEqual(range(51, 100));
+    expect(first.body.meta.nextCursor).not.toBeNull();
+
+    const second = await getMessagesPage(conv.id, `?cursor=${first.body.meta.nextCursor}`);
+    expect(second.body.data.map((m) => m.position)).toEqual(range(1, 50));
+    expect(second.body.meta.nextCursor).toBeNull();
+  });
+
+  it("PAG2-BE-06A: 201 条需要第 5 页(最后一页仅 1 条)", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 201);
+
+    const pages: MessagePageBody[] = [];
+    let cursor: string | null = null;
+    do {
+      const { body } = await getMessagesPage(conv.id, cursor ? `?cursor=${cursor}` : "");
+      pages.push(body);
+      cursor = body.meta.nextCursor;
+    } while (cursor !== null);
+
+    expect(pages).toHaveLength(5);
+    expect(pages[0]!.data.map((m) => m.position)).toEqual(range(152, 201));
+    expect(pages[3]!.data.map((m) => m.position)).toEqual(range(2, 51));
+    expect(pages[4]!.data.map((m) => m.position)).toEqual([1]);
+    expect(pages.every((p) => p.meta.totalCount === 201)).toBe(true);
+  });
+
+  it("PAG2-BE-07: A 会话 cursor 用于 B 会话不串数据", async () => {
+    const convA = await createConversation(ctx.baseUrl);
+    const convB = await createConversation(ctx.baseUrl);
+    await seedMessages(convA.id, 60);
+    await seedMessages(convB.id, 20);
+
+    const pageA = await getMessagesPage(convA.id);
+    const cursorA = pageA.body.meta.nextCursor;
+    expect(cursorA).not.toBeNull();
+
+    const pageB = await getMessagesPage(convB.id, `?cursor=${cursorA}`);
+    expect(pageB.res.status).toBe(200);
+    expect(pageB.body.data.map((m) => m.position)).toEqual(range(1, 10));
+    expect(pageB.body.data.every((m) => m.content === `msg-${m.position}`)).toBe(true);
+    expect(pageB.body.meta.totalCount).toBe(20);
+    expect(pageB.body.meta.nextCursor).toBeNull();
+  });
+
+  it("PAG2-BE-08: 非法 cursor → 400 VALIDATION_ERROR(垃圾串/p=0/p=1.5/p 为字符串/缺 p)", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 3);
+
+    for (const cursor of [
+      "not-a-cursor",
+      encodeCursor({ p: 0 }),
+      encodeCursor({ p: 1.5 }),
+      encodeCursor({ p: "1" }),
+      encodeCursor({ q: 1 }),
+    ]) {
+      const { res, body } = await getMessagesPage(conv.id, `?cursor=${cursor}`);
+      expect(res.status).toBe(400);
+      expect((body as unknown as { error: { code: string } }).error.code).toBe(
+        "VALIDATION_ERROR",
+      );
+    }
+  });
+
+  it("PAG2-BE-09: limit 边界(0/101/非数字 → 400;1/100 → 200)", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 5);
+
+    for (const limit of ["0", "101", "abc", "-1", "1.5"]) {
+      const { res } = await getMessagesPage(conv.id, `?limit=${limit}`);
+      expect(res.status).toBe(400);
+    }
+
+    const single = await getMessagesPage(conv.id, "?limit=1");
+    expect(single.res.status).toBe(200);
+    expect(single.body.data.map((m) => m.position)).toEqual([5]);
+
+    const max = await getMessagesPage(conv.id, "?limit=100");
+    expect(max.res.status).toBe(200);
+    expect(max.body.data.map((m) => m.position)).toEqual(range(1, 5));
+  });
+
+  it("PAG2-BE-10: 不存在/已删除 → 404;ARCHIVED 保持可读", async () => {
+    const { res: missing } = await getMessagesPage("no-such-conv");
+    expect(missing.status).toBe(404);
+
+    const deleted = await createConversation(ctx.baseUrl);
+    await fetch(`${ctx.baseUrl}/api/conversations/${deleted.id}`, { method: "DELETE" });
+    const { res: gone } = await getMessagesPage(deleted.id);
+    expect(gone.status).toBe(404);
+
+    const archived = await createConversation(ctx.baseUrl);
+    await seedMessages(archived.id, 2);
+    await fetch(`${ctx.baseUrl}/api/conversations/${archived.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "ARCHIVED" }),
+    });
+    const { res: stillReadable, body } = await getMessagesPage(archived.id);
+    expect(stillReadable.status).toBe(200);
+    expect(body.data.map((m) => m.position)).toEqual([1, 2]);
+  });
+
+  it("PAG2-BE-11: 每一页 meta.totalCount 都是后端总数", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await seedMessages(conv.id, 120);
+
+    const pages: MessagePageBody[] = [];
+    let cursor: string | null = null;
+    do {
+      const { body } = await getMessagesPage(conv.id, cursor ? `?cursor=${cursor}` : "");
+      pages.push(body);
+      cursor = body.meta.nextCursor;
+    } while (cursor !== null);
+
+    expect(pages).toHaveLength(3);
+    expect(pages.every((p) => p.meta.totalCount === 120)).toBe(true);
+  });
+});

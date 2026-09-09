@@ -9,6 +9,13 @@ export interface MessageCreateData {
   position: number;
 }
 
+/** PAG-2:按 position desc 取更老一页;cursor 语义 position < cursorPosition */
+export interface MessageListPageOptions {
+  /** Service 已做 limit+1 探测,原样执行,Repo 不自行 +1 */
+  take: number;
+  cursorPosition?: number;
+}
+
 export class MessageRepository {
   async create(db: DbClient, data: MessageCreateData): Promise<MessageModel> {
     return db.message.create({ data });
@@ -23,11 +30,27 @@ export class MessageRepository {
     return result._max.position;
   }
 
-  async listByConversation(db: DbClient, conversationId: string): Promise<MessageModel[]> {
+  /** PAG-2:cursor 位置向更老方向取 take 条(position desc);无 cursor = 从最新开始 */
+  async listPage(
+    db: DbClient,
+    conversationId: string,
+    options: MessageListPageOptions,
+  ): Promise<MessageModel[]> {
     return db.message.findMany({
-      where: { conversationId },
-      orderBy: { position: "asc" },
+      where: {
+        conversationId,
+        ...(options.cursorPosition !== undefined
+          ? { position: { lt: options.cursorPosition } }
+          : {}),
+      },
+      orderBy: { position: "desc" },
+      take: options.take,
     });
+  }
+
+  /** PAG-2:Conversation Message 总数(meta.totalCount) */
+  async countByConversation(db: DbClient, conversationId: string): Promise<number> {
+    return db.message.count({ where: { conversationId } });
   }
 
   async findByIds(db: DbClient, ids: string[]): Promise<MessageModel[]> {

@@ -44,6 +44,13 @@ export interface MessageListItem extends MessageModel {
   request: RequestBrief | null;
 }
 
+/** PAG-2:Message 分页页(页内旧→新;nextCursor 指向更老一页,null = 已到最老) */
+export interface MessageListPage {
+  items: MessageListItem[];
+  nextCursor: string | null;
+  totalCount: number;
+}
+
 export function toRequestBrief(request: ModelRequestModel): RequestBrief {
   return {
     id: request.id,

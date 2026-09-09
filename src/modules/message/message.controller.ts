@@ -3,6 +3,7 @@ import { Router } from "express";
 import { parseOrThrow } from "../../common/utils/parse.js";
 import {
   idempotencyKeyHeaderSchema,
+  listMessagesQuerySchema,
   messageRouteParamSchema,
   sendMessageSchema,
 } from "./message.schema.js";
@@ -13,11 +14,15 @@ export function createMessageRouter(service: MessageService): Router {
   // mergeParams: 继承父级挂载路径的 :conversationId 参数
   const router = Router({ mergeParams: true });
 
-  // GET /api/conversations/:conversationId/messages
+  // GET /api/conversations/:conversationId/messages?limit=50&cursor=...
   router.get("/", async (req, res) => {
     const params = parseOrThrow(messageRouteParamSchema, req.params, "messageParams");
-    const messages = await service.listMessages(params.conversationId);
-    res.json({ data: messages });
+    const query = parseOrThrow(listMessagesQuerySchema, req.query, "listMessagesQuery");
+    const result = await service.listMessages(params.conversationId, query);
+    res.json({
+      data: result.items,
+      meta: { nextCursor: result.nextCursor, totalCount: result.totalCount },
+    });
   });
 
   // POST /api/conversations/:conversationId/messages

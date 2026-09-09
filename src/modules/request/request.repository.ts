@@ -38,11 +38,12 @@ export class RequestRepository {
     return found !== null;
   }
 
-  async listByConversation(db: DbClient, conversationId: string): Promise<ModelRequestModel[]> {
-    return db.modelRequest.findMany({
-      where: { conversationId },
-      orderBy: { createdAt: "asc" },
-    });
+  /** PAG-2:Message 分页 Request 摘要 —— 只按页内 assistantMessageId 查,空入参不发 IN [] */
+  async findByAssistantIds(db: DbClient, ids: string[]): Promise<ModelRequestModel[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+    return db.modelRequest.findMany({ where: { assistantMessageId: { in: ids } } });
   }
 
   /** 最老的 PENDING(Scheduler 取任务;id 兜底同毫秒稳定排序) */
