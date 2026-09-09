@@ -8,6 +8,7 @@ import { parseEnv } from "./config/env.js";
 import { createPrismaClient, probeDatabase } from "./database/prisma.js";
 import { buildAuthDeps } from "./modules/auth/auth.middleware.js";
 import { BrowserManager } from "./providers/gemini/browser-manager.js";
+import { runBrowserPrewarm } from "./providers/gemini/browser-prewarm.js";
 import { GeminiWebAdapter } from "./providers/gemini/gemini.adapter.js";
 import { PlaywrightBrowserDriver } from "./providers/gemini/playwright-driver.js";
 
@@ -52,6 +53,8 @@ async function main(): Promise<void> {
   const server = http.createServer(app);
   server.listen(env.PORT, env.HOST, () => {
     logger.info(`server listening on http://${env.HOST}:${env.PORT}`);
+    // P7:HTTP 已对外服务,浏览器预热才开工;helper 内部收敛错误,不会拖垮启动
+    void runBrowserPrewarm(browserManager, logger);
   });
 
   let shuttingDown = false;

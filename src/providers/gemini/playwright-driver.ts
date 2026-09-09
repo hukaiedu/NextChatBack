@@ -19,6 +19,11 @@ export class PlaywrightBrowserDriver implements BrowserDriver {
   ): Promise<BrowserContextHandle> {
     const context = await chromium.launchPersistentContext(userDataDir, {
       headless: options.headless,
+      // personChat 在 main.ts 统一拥有进程 shutdown 生命周期(playwright 默认
+      // handleSIGINT/handleSIGTERM=true 会在应用 graceful cleanup 完成前
+      // process.exit(130) 抢占,FINDING-P7-FIX-01-1);SIGHUP 不在此列(main.ts 未监听)
+      handleSIGINT: false,
+      handleSIGTERM: false,
     });
     return new PlaywrightContextHandle(context);
   }

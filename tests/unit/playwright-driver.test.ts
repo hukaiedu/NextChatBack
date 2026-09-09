@@ -8,10 +8,20 @@
  *
  * 用最小 Fake Page 直接构造 PlaywrightPageHandle,不启动真实 Chromium。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Page } from "playwright";
 
-import { PlaywrightPageHandle } from "../../src/providers/gemini/playwright-driver.js";
+import { PlaywrightBrowserDriver, PlaywrightPageHandle } from "../../src/providers/gemini/playwright-driver.js";
+
+// FIX-02(P7-SIGNAL-01):拦截 chromium.launchPersistentContext,断言 signal ownership
+// options;不启动真实 Chromium。
+vi.mock("playwright", () => ({
+  chromium: {
+    launchPersistentContext: vi.fn(async () => ({ on: vi.fn() })),
+  },
+}));
+
+import { chromium } from "playwright";
 
 const CLOSED_MESSAGE = "Target page, context or browser has been closed";
 const CRASHED_MESSAGE = "Target crashed";
@@ -225,5 +235,37 @@ describe("PlaywrightBrowserDriver.lastInnerText(FINAL-FIX-01 DRV-TEXT)", () => {
     });
 
     await expect(handle.lastInnerText("sel")).rejects.toThrow(CLOSED_MESSAGE);
+  });
+});
+
+/**
+ * P7 FIX-02(P7-SIGNAL-01):signal ownership —— playwright 默认 handleSIGINT/
+ * handleSIGTERM=true 会在宿主进程注册自己的 SIGINT/SIGTERM handler,首次信号即
+ * gracefullyCloseAll().then(() => process.exit(130)),抢在 main.ts graceful
+ * shutdown(server.close → BrowserManager.stop → prisma disconnect → exit(0))
+ * 完成前退出(FINDING-P7-FIX-01-1)。修复 = launch options 显式关闭二者;
+ * SIGHUP 不动(main.ts 未监听,不扩大 ownership)。
+ */
+describe("PlaywrightBrowserDriver signal ownership(FIX-02)", () => {
+  it("P7-SIGNAL-01 launch 关闭宿主 SIGINT/SIGTERM 处理;headless/userDataDir 原样透传", async () => {
+    const launch = chromium.launchPersistentContext as unknown as {
+      mock: { calls: [string, Record<string, unknown>][] };
+    };
+    launch.mock.calls.length = 0;
+
+    const driver = new PlaywrightBrowserDriver();
+    const dir = "./data/browser-profile-p7";
+    await driver.launchPersistentContext(dir, { headless: true });
+
+    expect(launch.mock.calls).toHaveLength(1);
+    const [userDataDir, options] = launch.mock.calls[0];
+    expect(userDataDir).toBe(dir);
+    expect(options).toMatchObject({
+      headless: true,
+      handleSIGINT: false,
+      handleSIGTERM: false,
+    });
+    // main.ts 未监听 SIGHUP:不得擅自扩大应用 signal ownership(FIX-02 §五)
+    expect(options.handleSIGHUP).toBeUndefined();
   });
 });
