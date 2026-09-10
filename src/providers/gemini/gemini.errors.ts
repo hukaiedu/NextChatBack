@@ -84,6 +84,26 @@ export function modelSwitchFailed(detail: string, cause?: unknown): AppError {
 }
 
 /**
+ * I2-B:附件注入/就绪校验失败(残留无法复位、input 数量异常、STUCK、上传报错、
+ * Enter 前预期不符)。detail 只允许选择器名/状态名,不得带文件名或字节内容。
+ */
+export function attachmentFailed(detail: string, cause?: unknown): AppError {
+  return new AppError(
+    ErrorCodes.PROVIDER_ATTACHMENT_FAILED,
+    `Gemini attachment injection failed: ${detail}`,
+    cause,
+  );
+}
+
+/** I2-B:附件就绪等待超过上限(expectedCount 与实际上传数始终不符且无错误标记) */
+export function attachmentTimeout(timeoutMs: number, expectedCount: number): AppError {
+  return new AppError(
+    ErrorCodes.PROVIDER_ATTACHMENT_TIMEOUT,
+    `Gemini attachments were not ready within ${timeoutMs}ms (expected ${expectedCount})`,
+  );
+}
+
+/**
  * Playwright 原始异常的「关闭族」检测(§8.8 竞态)。
  *
  * Context/浏览器崩溃断开、以及 Gemini Page 被单独关闭时,Playwright 都可能直接抛出

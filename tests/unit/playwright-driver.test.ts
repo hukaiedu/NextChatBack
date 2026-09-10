@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Page } from "playwright";
 
 import { PlaywrightBrowserDriver, PlaywrightPageHandle } from "../../src/providers/gemini/playwright-driver.js";
+import { GEMINI_ATTACHMENT_SELECTORS } from "../../src/providers/gemini/gemini.selectors.js";
 
 // FIX-02(P7-SIGNAL-01):拦截 chromium.launchPersistentContext,断言 signal ownership
 // options;不启动真实 Chromium。
@@ -267,6 +268,199 @@ describe("PlaywrightBrowserDriver signal ownership(FIX-02)", () => {
     });
     // main.ts 未监听 SIGHUP:不得擅自扩大应用 signal ownership(FIX-02 §五)
     expect(options.handleSIGHUP).toBeUndefined();
+  });
+});
+
+/**
+ * I2-B:附件受控能力 —— driver 只暴露语义化快照(getAttachmentUiState)与
+ * 一次 setInputFiles;上层拿不到任何可传脚本的通用原语(§6)。
+ * 计数只认有尺寸元素(§7),普通瞬态读取失败降级、关闭族异常上抛(既有语义)。
+ */
+describe("PlaywrightBrowserDriver 附件能力(I2-B DRV-ATT)", () => {
+  interface ElementSpec {
+    sized: boolean;
+    attrs?: Record<string, string | null>;
+    /** 读取该元素时抛出的异常(模拟元素级瞬态失败/页面关闭) */
+    throws?: Error;
+  }
+
+  const EMPTY_STATE = {
+    attachmentCount: 0,
+    imageInputCount: 0,
+    plusExists: false,
+    plusSized: false,
+    plusSizedIndex: -1,
+    expanded: null,
+    generating: false,
+    uploading: false,
+    hasError: false,
+    pickerOverlay: false,
+  };
+
+  function makeLocator(elements: ElementSpec[]): unknown {
+    return {
+      count: async () => elements.length,
+      nth: (index: number) => makeLocator(elements.slice(index, index + 1)),
+      boundingBox: async () => {
+        const element = elements[0];
+        if (!element) {
+          return null;
+        }
+        if (element.throws) {
+          throw element.throws;
+        }
+        return element.sized ? { x: 0, y: 0, width: 10, height: 10 } : { x: 0, y: 0, width: 0, height: 0 };
+      },
+      getAttribute: async (name: string) => elements[0]?.attrs?.[name] ?? null,
+    };
+  }
+
+  function makeAttachmentHandle(
+    bySelector: Record<string, ElementSpec[]>,
+    locatorThrows: Record<string, Error> = {},
+  ): {
+    handle: PlaywrightPageHandle;
+    page: {
+      on: ReturnType<typeof vi.fn>;
+      locator: (selector: string) => unknown;
+      setInputFiles: ReturnType<typeof vi.fn>;
+      reload: ReturnType<typeof vi.fn>;
+    };
+  } {
+    const page = {
+      on: vi.fn(),
+      locator: (selector: string) => {
+        const failure = locatorThrows[selector];
+        if (failure) {
+          throw failure;
+        }
+        return makeLocator(bySelector[selector] ?? []);
+      },
+      setInputFiles: vi.fn(async () => undefined),
+      reload: vi.fn(async () => undefined),
+    };
+    return { handle: new PlaywrightPageHandle(page as unknown as Page), page };
+  }
+
+  it("DRV-ATT-01 快照只认有尺寸元素;plus 取第一个有尺寸下标;三态只认 true/false", async () => {
+    const { handle } = makeAttachmentHandle({
+      [GEMINI_ATTACHMENT_SELECTORS.composerAttachment]: [
+        { sized: true },
+        { sized: false },
+        { sized: true },
+      ],
+      [GEMINI_ATTACHMENT_SELECTORS.plus]: [
+        { sized: false, attrs: { "aria-expanded": "true" } },
+        { sized: true, attrs: { "aria-expanded": "true" } },
+        { sized: true, attrs: { "aria-expanded": "false" } },
+      ],
+      [GEMINI_ATTACHMENT_SELECTORS.imageInput]: [{ sized: false }],
+      [GEMINI_ATTACHMENT_SELECTORS.uploading]: [{ sized: true }],
+      [GEMINI_ATTACHMENT_SELECTORS.attachmentError]: [{ sized: false }],
+      [GEMINI_ATTACHMENT_SELECTORS.generating]: [{ sized: true }],
+      [GEMINI_ATTACHMENT_SELECTORS.pickerOverlay]: [{ sized: false }],
+    });
+
+    await expect(handle.getAttachmentUiState()).resolves.toEqual({
+      attachmentCount: 2,
+      imageInputCount: 1,
+      plusExists: true,
+      plusSized: true,
+      plusSizedIndex: 1,
+      expanded: "true",
+      generating: true,
+      uploading: true,
+      // 布尔标记按「存在」判定(隐藏也算在场 → 失败方向 fail-closed);
+      // 只有 attachmentCount 必须是有尺寸计数(§7)
+      hasError: true,
+      pickerOverlay: false,
+    });
+  });
+
+  it("DRV-ATT-02 aria-expanded 缺失 → expanded=null(占位态,不是 false)", async () => {
+    const { handle } = makeAttachmentHandle({
+      [GEMINI_ATTACHMENT_SELECTORS.plus]: [{ sized: true }],
+    });
+
+    await expect(handle.getAttachmentUiState()).resolves.toMatchObject({
+      plusExists: true,
+      plusSized: true,
+      plusSizedIndex: 0,
+      expanded: null,
+    });
+  });
+
+  it("DRV-ATT-03 元素级读取异常(BoundingBox 抛错)→ 整体上抛,绝不降级成「无尺寸」", async () => {
+    const { handle } = makeAttachmentHandle({
+      [GEMINI_ATTACHMENT_SELECTORS.composerAttachment]: [
+        { sized: true, throws: new Error(TRANSIENT_MESSAGE) },
+        { sized: true },
+      ],
+      [GEMINI_ATTACHMENT_SELECTORS.plus]: [{ sized: true }],
+    });
+
+    await expect(handle.getAttachmentUiState()).rejects.toThrow(TRANSIENT_MESSAGE);
+  });
+
+  it("DRV-ATT-03b 顶层读取异常 → 原样上抛,不得伪装成 attachmentCount=0 的空快照", async () => {
+    const { handle } = makeAttachmentHandle(
+      {},
+      { [GEMINI_ATTACHMENT_SELECTORS.plus]: new Error(TRANSIENT_MESSAGE) },
+    );
+
+    const outcome = await handle
+      .getAttachmentUiState()
+      .then((state) => ({ resolved: true as const, state }))
+      .catch((err: unknown) => ({ resolved: false as const, err }));
+
+    expect(outcome.resolved).toBe(false);
+    expect((outcome as { err: Error }).err.message).toContain(TRANSIENT_MESSAGE);
+  });
+
+  it("DRV-ATT-07 目标元素不存在(查询成功但无匹配)→ 全零状态,属有效观测而非读取失败", async () => {
+    const { handle } = makeAttachmentHandle({});
+
+    await expect(handle.getAttachmentUiState()).resolves.toEqual(EMPTY_STATE);
+  });
+
+  it("DRV-ATT-04 关闭族异常 → 原样上抛,不伪装成空快照", async () => {
+    const { handle } = makeAttachmentHandle(
+      {},
+      { [GEMINI_ATTACHMENT_SELECTORS.plus]: new Error(CLOSED_MESSAGE) },
+    );
+
+    await expect(handle.getAttachmentUiState()).rejects.toThrow(CLOSED_MESSAGE);
+  });
+
+  it("DRV-ATT-05 setInputFiles 一次传完整数组(只映射 name/mimeType/buffer)", async () => {
+    const { handle, page } = makeAttachmentHandle({});
+
+    await handle.setInputFiles(GEMINI_ATTACHMENT_SELECTORS.imageInput, [
+      { name: "a.png", mimeType: "image/png", buffer: Buffer.alloc(3, 7) },
+      { name: "b.jpg", mimeType: "image/jpeg", buffer: Buffer.alloc(5, 9) },
+    ]);
+
+    expect(page.setInputFiles).toHaveBeenCalledTimes(1);
+    expect(page.setInputFiles).toHaveBeenCalledWith(GEMINI_ATTACHMENT_SELECTORS.imageInput, [
+      { name: "a.png", mimeType: "image/png", buffer: Buffer.alloc(3, 7) },
+      { name: "b.jpg", mimeType: "image/jpeg", buffer: Buffer.alloc(5, 9) },
+    ]);
+  });
+
+  it("DRV-ATT-06 reload 用 domcontentloaded + 有界超时", async () => {
+    const { handle, page } = makeAttachmentHandle({});
+
+    await handle.reload();
+    expect(page.reload).toHaveBeenCalledWith({
+      waitUntil: "domcontentloaded",
+      timeout: expect.any(Number),
+    });
+
+    await handle.reload({ timeoutMs: 1234 });
+    expect(page.reload).toHaveBeenLastCalledWith({
+      waitUntil: "domcontentloaded",
+      timeout: 1234,
+    });
   });
 });
 

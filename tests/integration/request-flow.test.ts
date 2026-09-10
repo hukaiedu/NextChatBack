@@ -5,6 +5,7 @@ import { ErrorCodes } from "../../src/common/errors/error-codes.js";
 import type { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
 import { FAKE_CONVERSATION_URL, FakeDriver, FakeGeminiAdapter, createFakeManager } from "../fakes.js";
 import type { FakeAdapterBehavior } from "../fakes.js";
+import { attachment } from "../attachment-fixtures.js";
 import { createConversation, sendMessage, setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
@@ -116,6 +117,51 @@ describe("正式发送链路:POST /messages → Scheduler → GeminiPromptServic
     const get = await fetch(`${ctx.baseUrl}/api/requests/${body.request.id}`);
     expect(get.status).toBe(200);
     expect(((await get.json()) as { data: { status: string } }).data.status).toBe("SUCCESS");
+  });
+
+  it("I2B-PIPE-01:附件原样透传到 Adapter.runPrompt(只透传 I1 已复核的字节)", async () => {
+    await mount({ answer: "看到了" });
+    const conv = await createConversation(ctx.baseUrl);
+    const items = [attachment("image/png", 200, "a.png"), attachment("image/jpeg", 260, "b.jpg")];
+
+    const res = await sendMessage(ctx.baseUrl, conv.id, "看这两张图", "pipe-01", undefined, items);
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as SendBody;
+    const terminal = await waitFor(
+      async () => {
+        const row = await ctx.prisma.modelRequest.findUnique({
+          where: { id: body.data.request.id },
+        });
+        return row && ["SUCCESS", "FAILED", "TIMEOUT", "CANCELLED"].includes(row.status)
+          ? { status: row.status, attachmentCount: row.attachmentCount }
+          : null;
+      },
+      3000,
+      `request ${body.data.request.id} terminal`,
+    );
+
+    expect(terminal.status).toBe("SUCCESS");
+    expect(terminal.attachmentCount).toBe(2);
+    expect(adapter.runCalls).toHaveLength(1);
+    // prompt 与附件元数据一次到位;字节长度与提交的一致(内容不落 Fake)
+    expect(adapter.runCalls[0]).toMatchObject({
+      prompt: "看这两张图",
+      existingUrl: null,
+      attachments: [
+        { name: "a.png", mimeType: "image/png", byteLength: 200 },
+        { name: "b.jpg", mimeType: "image/jpeg", byteLength: 260 },
+      ],
+    });
+  });
+
+  it("I2B-PIPE-02:纯文本请求的 runPrompt 入参根本没有 attachments 键", async () => {
+    await mount({ answer: "收到" });
+    const conv = await createConversation(ctx.baseUrl);
+
+    await sendAndTerminal(ctx.baseUrl, conv.id, "只发文字", "pipe-02");
+
+    expect(adapter.runCalls).toHaveLength(1);
+    expect("attachments" in adapter.runCalls[0]!).toBe(false);
   });
 
   it("§16:URL 在回答完成之前就已落库(beforeAnswer 钩子处读库验证)", async () => {

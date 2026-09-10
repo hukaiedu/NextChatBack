@@ -5,10 +5,12 @@ import { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import { GeminiSessionChecker } from "../src/providers/gemini/session-checker.js";
 import type { GeminiSessionState } from "../src/providers/gemini/session-checker.js";
 import type {
+  AttachmentUiState,
   BrowserContextHandle,
   BrowserDriver,
   BrowserElementSnapshot,
   BrowserPageHandle,
+  BrowserUploadFile,
 } from "../src/providers/gemini/browser-driver.js";
 import type {
   GeminiAdapter,
@@ -17,7 +19,11 @@ import type {
   GeminiPromptRunInput,
   ResolvedGeminiModel,
 } from "../src/providers/gemini/gemini.types.js";
-import { GEMINI_MODEL_SELECTORS, GEMINI_SELECTORS } from "../src/providers/gemini/gemini.selectors.js";
+import {
+  GEMINI_ATTACHMENT_SELECTORS,
+  GEMINI_MODEL_SELECTORS,
+  GEMINI_SELECTORS,
+} from "../src/providers/gemini/gemini.selectors.js";
 
 const GEMINI_BASE_URL = "https://gemini.google.com/app";
 const LOGIN_URL = "https://accounts.google.com/signin/v2";
@@ -135,6 +141,58 @@ export interface FakePageScript {
   };
   /** M2:模型选择菜单剧本 */
   modelPicker?: FakeModelPickerScript;
+  /** I2-B:composer 附件/面板剧本(未配置 = 干净页面:0 附件、无面板、无 input) */
+  attachment?: FakeAttachmentScript;
+}
+
+/**
+ * I2-B:附件面板剧本(只描述状态迁移,不承载任何真实图片内容)。
+ *
+ * 状态字段与生产 `AttachmentUiState` 同构;`onPlusClick` / `onUpload` 是**按序消费**的
+ * 状态补丁:每次动作取一步,用尽后不迁移(STUCK 剧本即「连续补丁都不改变状态」)。
+ */
+export interface FakeAttachmentScript {
+  attachmentCount?: number;
+  imageInputCount?: number;
+  expanded?: "true" | "false" | null;
+  plusExists?: boolean;
+  plusSized?: boolean;
+  plusSizedIndex?: number;
+  generating?: boolean;
+  uploading?: boolean;
+  hasError?: boolean;
+  pickerOverlay?: boolean;
+  /** 每次点击 `+` 之后应用的状态补丁(按序;空 = 状态不变) */
+  onPlusClick?: Array<Partial<AttachmentUiState>>;
+  /** 每次 setInputFiles 之后应用的状态补丁(按序);默认 `{ attachmentCount: files.length }` */
+  onUpload?: Array<Partial<AttachmentUiState>>;
+  /** setInputFiles 抛普通错误(非关闭族) */
+  failUpload?: boolean;
+  /** setInputFiles 抛关闭族错误(页面在注入瞬间被关闭,分类必须走浏览器错误) */
+  failUploadClosed?: boolean;
+  /**
+   * 面板展开(state 变 "true")后,经过 N ms 让 image input 出现(模拟 ~0.9s 水合窗口)。
+   * 不配 = input 永远不会自己出现(只能靠补丁显式给)。
+   */
+  hydrateInputAfterMs?: number;
+  /** 上传后经过 N ms 自动清 uploading(模拟上传完成;不配 = 一直保持) */
+  uploadingClearAfterMs?: number;
+  /** 生成中经过 N ms 自动清 generating(模拟 wait-idle) */
+  generatingClearAfterMs?: number;
+  /** reload 之后的页面状态(默认干净复位:面板收起、附件清零、无错误) */
+  afterReload?: Partial<AttachmentUiState>;
+  /**
+   * I2-B Final Fix:快照读取抛普通(非关闭族)异常。true = 每次读取都抛,
+   * 用来证明「读取失败 ≠ 空 composer」——生产必须 FAILED 而不是继续发送。
+   */
+  failSnapshotRead?: boolean;
+  /**
+   * 首次 setInputFiles 成功后再放过 N 次成功读取,之后的读取抛普通异常
+   * (用来把读取失败精确打在 Enter 前断言上)
+   */
+  failSnapshotAfterUpload?: number;
+  /** 快照读取抛关闭族异常(必须保持 PROVIDER_PAGE_CLOSED/BROWSER_CRASHED 分类,不被附件错误覆盖) */
+  failSnapshotClosed?: boolean;
 }
 
 /** Fake Page:goto 可模拟"重定向到 Google 登录页"或"同域未登录(显示 Sign in)" */
@@ -177,6 +235,32 @@ export class FakePage implements BrowserPageHandle {
   /** M2 调用记录:readAll / clickNth 依次记下 selector 与参数 */
   readAllCalls: Array<{ selector: string; attrs: string[] | undefined }> = [];
   clickNthCalls: Array<{ selector: string; index: number }> = [];
+  /** I2-B:countElements 调用记录(断言生产代码没有去读作废判据) */
+  countElementsCalls: string[] = [];
+  /** I2-B:reload 调用次数(残留复位证据) */
+  reloadCalls: number[] = [];
+  /** I2-B:setInputFiles 调用记录 —— 只记 name/mimeType/byteLength/selector,不存字节 */
+  uploadCalls: Array<{
+    selector: string;
+    files: Array<{ name: string; mimeType: string; byteLength: number }>;
+  }> = [];
+  /** I2-B:当前附件面板状态(断言用) */
+  attachment: AttachmentUiState;
+  /**
+   * I2-B:关键动作的事件序列(只记事件名),用于断言协议顺序
+   * (reload → attach → upload → fill → press;§17/§18/§28)。
+   */
+  events: string[] = [];
+  private readonly attachmentScript: FakeAttachmentScript | null;
+  private plusClickPatchIndex = 0;
+  private uploadPatchIndex = 0;
+  private uploadingDeadline: number | null = null;
+  private generatingDeadline: number | null = null;
+  private hydrateDeadline: number | null = null;
+  /** I2-B Final Fix:快照读取计数与「已经发生过一次真实注入」标记(读失败剧本用) */
+  snapshotReadCount = 0;
+  private uploadHappened = false;
+  private postUploadReads = 0;
   /** fill 时水合剧本尚未吐出的计数个数(null = 未配置水合剧本) */
   rampPendingAtFill: number | null = null;
   lastInnerTextCalls = 0;
@@ -206,6 +290,27 @@ export class FakePage implements BrowserPageHandle {
     // 深拷贝选项:clickNth 会改写 selected,不能污染共享的剧本对象
     this.modelOptions = (script.modelPicker?.options ?? []).map((option) => ({ ...option }));
     this.optionLagRemaining = script.modelPicker?.optionLagReads ?? 0;
+    this.attachmentScript = script.attachment ?? null;
+    this.attachment = {
+      attachmentCount: script.attachment?.attachmentCount ?? 0,
+      imageInputCount: script.attachment?.imageInputCount ?? 0,
+      plusExists: script.attachment?.plusExists ?? true,
+      plusSized: script.attachment?.plusSized ?? true,
+      plusSizedIndex: script.attachment?.plusSizedIndex ?? 0,
+      expanded: script.attachment?.expanded ?? null,
+      generating: script.attachment?.generating ?? false,
+      uploading: script.attachment?.uploading ?? false,
+      hasError: script.attachment?.hasError ?? false,
+      pickerOverlay: script.attachment?.pickerOverlay ?? false,
+    };
+    this.uploadingDeadline =
+      script.attachment?.uploading && script.attachment.uploadingClearAfterMs !== undefined
+        ? Date.now() + script.attachment.uploadingClearAfterMs
+        : null;
+    this.generatingDeadline =
+      script.attachment?.generating && script.attachment.generatingClearAfterMs !== undefined
+        ? Date.now() + script.attachment.generatingClearAfterMs
+        : null;
   }
 
   url(): string {
@@ -226,7 +331,114 @@ export class FakePage implements BrowserPageHandle {
     }
   }
 
+  /**
+   * I2-B:重载。默认把 composer 复位成干净状态(真机 reload 语义);
+   * `attachment.afterReload` 可以覆盖成「复位失败仍残留」的剧本。
+   */
+  async reload(): Promise<void> {
+    this.reloadCalls.push(Date.now());
+    this.events.push("reload");
+    if (this.throwOnGoto) {
+      throw new Error("net::ERR_CONNECTION_REFUSED");
+    }
+    const patch = this.attachmentScript?.afterReload ?? {};
+    this.attachment = {
+      attachmentCount: patch.attachmentCount ?? 0,
+      imageInputCount: patch.imageInputCount ?? 0,
+      plusExists: patch.plusExists ?? true,
+      plusSized: patch.plusSized ?? true,
+      plusSizedIndex: patch.plusSizedIndex ?? 0,
+      expanded: patch.expanded ?? null,
+      generating: patch.generating ?? false,
+      uploading: patch.uploading ?? false,
+      hasError: patch.hasError ?? false,
+      pickerOverlay: patch.pickerOverlay ?? false,
+    };
+    this.uploadingDeadline = null;
+    this.generatingDeadline = null;
+    this.plusClickPatchIndex = 0;
+    this.uploadPatchIndex = 0;
+    this.hydrateDeadline = null;
+    this.uploadHappened = false;
+    this.postUploadReads = 0;
+  }
+
+  /** I2-B:附件/入口状态快照(生产的唯一判据来源;不暴露任何 DOM 细节) */
+  async getAttachmentUiState(): Promise<AttachmentUiState> {
+    if (this.closedFlag) {
+      throw new Error("Target page, context or browser has been closed");
+    }
+    const script = this.attachmentScript;
+    this.snapshotReadCount += 1;
+    // I2-B Final Fix:快照读取失败 = 真异常,绝不能等价于「空 composer」
+    if (script?.failSnapshotClosed) {
+      throw new Error("Target page, context or browser has been closed");
+    }
+    if (script?.failSnapshotRead) {
+      throw new Error("Execution context was destroyed, most likely because of a navigation");
+    }
+    if (this.uploadHappened && script?.failSnapshotAfterUpload !== undefined) {
+      if (this.postUploadReads >= script.failSnapshotAfterUpload) {
+        throw new Error("Execution context was destroyed, most likely because of a navigation");
+      }
+      this.postUploadReads += 1;
+    }
+    const now = Date.now();
+    const generating =
+      this.attachment.generating &&
+      !(this.generatingDeadline !== null && now >= this.generatingDeadline);
+    if (this.attachment.generating && !generating) {
+      // 只记一次「stop 消失」迁移,便于断言点击是否晚于 idle
+      this.attachment = { ...this.attachment, generating: false };
+      this.events.push("generating-idle");
+    }
+    const uploading =
+      this.attachment.uploading &&
+      !(this.uploadingDeadline !== null && now >= this.uploadingDeadline);
+    // 面板展开后按剧本水合出 image input(读取驱动,无需真实定时器)
+    let imageInputCount = this.attachment.imageInputCount;
+    const hydrateMs = this.attachmentScript?.hydrateInputAfterMs;
+    if (this.attachment.expanded === "true" && imageInputCount === 0 && hydrateMs !== undefined) {
+      if (this.hydrateDeadline === null) {
+        this.hydrateDeadline = now + hydrateMs;
+      }
+      if (now >= this.hydrateDeadline) {
+        imageInputCount = 1;
+      }
+    }
+    return { ...this.attachment, generating, uploading, imageInputCount };
+  }
+
+  /** I2-B:一次注入完整文件数组;只记录 name/mimeType/byteLength,不保存字节 */
+  async setInputFiles(selector: string, files: BrowserUploadFile[]): Promise<void> {
+    this.events.push("upload");
+    this.uploadCalls.push({
+      selector,
+      files: files.map((file) => ({
+        name: file.name,
+        mimeType: file.mimeType,
+        byteLength: file.buffer.length,
+      })),
+    });
+    const script = this.attachmentScript;
+    if (script?.failUploadClosed) {
+      throw new Error("Target page, context or browser has been closed");
+    }
+    if (script?.failUpload) {
+      throw new Error("File chooser was not intercepted");
+    }
+    const patch = script?.onUpload?.[this.uploadPatchIndex] ?? { attachmentCount: files.length };
+    this.uploadPatchIndex += 1;
+    this.uploadHappened = true;
+    this.attachment = { ...this.attachment, ...patch };
+    if (this.attachment.uploading) {
+      this.uploadingDeadline =
+        script?.uploadingClearAfterMs !== undefined ? Date.now() + script.uploadingClearAfterMs : null;
+    }
+  }
+
   async countElements(selector: string): Promise<number> {
+    this.countElementsCalls.push(selector);
     if (this.closedFlag) {
       return 0;
     }
@@ -311,11 +523,33 @@ export class FakePage implements BrowserPageHandle {
     if (this.throwOnFill) {
       throw new Error(`element '${selector}' is not editable`);
     }
+    // I2-B 协议守卫:上传中/附件报错时绝不允许写入输入框(生产不得提前 fill)
+    const state = await this.getAttachmentUiState();
+    if (state.uploading) {
+      throw new Error("fake protocol guard: fill() called while attachments are uploading");
+    }
+    if (state.hasError) {
+      throw new Error("fake protocol guard: fill() called while attachment error is shown");
+    }
+    this.events.push("fill");
     this.fillCalls.push({ selector, value });
   }
 
   async press(selector: string, key: string): Promise<void> {
+    // I2-B 协议守卫:上传未结束/附件报错时绝不发送(Enter 前必须已就绪)
+    const state = await this.getAttachmentUiState();
+    if (state.uploading) {
+      throw new Error("fake protocol guard: Enter pressed while attachments are uploading");
+    }
+    if (state.hasError) {
+      throw new Error("fake protocol guard: Enter pressed while attachment error is shown");
+    }
+    this.events.push(`press:${key}`);
     this.pressCalls.push({ selector, key });
+    // I2-B:发送后 composer 附件清零(真机实测:发送后页面已无 composer 附件节点)
+    if (key === "Enter" && selector === GEMINI_SELECTORS.quillComposer) {
+      this.attachment = { ...this.attachment, attachmentCount: 0, imageInputCount: 0, expanded: null };
+    }
     const send = this.afterSend;
     if (!send) {
       return;
@@ -401,10 +635,27 @@ export class FakePage implements BrowserPageHandle {
     return `<p>${escapeHtmlText(textQueue[0] ?? "")}</p>`;
   }
 
+  /** I2-B:clickNth 命中面板 `+` 时按剧本应用状态迁移(点击的真实副作用) */
+  private applyPlusClickPatch(selector: string): void {
+    if (selector !== GEMINI_ATTACHMENT_SELECTORS.plus) {
+      return;
+    }
+    this.events.push("plus-click");
+    if (this.attachmentScript === null) {
+      return;
+    }
+    const patch = this.attachmentScript.onPlusClick?.[this.plusClickPatchIndex];
+    this.plusClickPatchIndex += 1;
+    if (patch) {
+      this.attachment = { ...this.attachment, ...patch };
+    }
+  }
+
   async click(selector: string, options?: { timeoutMs?: number }): Promise<void> {
     // 记录的是「尝试过的选择器」:失败的候选也会留下痕迹,供轮换断言用
     this.clickCalls.push(selector);
     this.clickTimeoutCalls.push({ selector, timeoutMs: options?.timeoutMs });
+    this.applyPlusClickPatch(selector);
     if (this.throwOnClickSelectors.includes(selector)) {
       throw new Error(`element '${selector}' is not clickable`);
     }
@@ -494,6 +745,7 @@ export class FakePage implements BrowserPageHandle {
       throw new Error("Target page, context or browser has been closed");
     }
     this.clickNthCalls.push({ selector, index });
+    this.applyPlusClickPatch(selector);
     if (selector !== GEMINI_MODEL_SELECTORS.modeOption) {
       return;
     }
@@ -766,7 +1018,12 @@ export const FAKE_MODEL_CATALOG: GeminiModelCatalog = {
 /** 无浏览器版 Gemini Adapter:让 Provider 端点的集成测试跑真 SQLite */
 export class FakeGeminiAdapter implements GeminiAdapter {
   readonly openCalls: Array<string | null> = [];
-  readonly runCalls: Array<{ prompt: string; existingUrl: string | null }> = [];
+  /** I2-B:附件只记元数据(name/mimeType/byteLength),不保存字节;纯文本时无该键 */
+  readonly runCalls: Array<{
+    prompt: string;
+    existingUrl: string | null;
+    attachments?: Array<{ name: string; mimeType: string; byteLength: number }>;
+  }> = [];
   readonly hookUrls: string[] = [];
   /** 已推给 onText 的完整文本序列(流式用例断言用) */
   readonly streamedTexts: string[] = [];
@@ -785,7 +1042,19 @@ export class FakeGeminiAdapter implements GeminiAdapter {
   }
 
   async runPrompt(input: GeminiPromptRunInput): Promise<GeminiPromptResult> {
-    this.runCalls.push({ prompt: input.prompt, existingUrl: input.existingUrl });
+    this.runCalls.push({
+      prompt: input.prompt,
+      existingUrl: input.existingUrl,
+      ...(input.attachments
+        ? {
+            attachments: input.attachments.map((file) => ({
+              name: file.name,
+              mimeType: file.mimeType,
+              byteLength: file.buffer.length,
+            })),
+          }
+        : {}),
+    });
     if (this.behavior.runError !== undefined) {
       this.behavior.beforeRunError?.();
       throw this.behavior.runError;

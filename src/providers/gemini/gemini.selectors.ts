@@ -60,6 +60,50 @@ export const GEMINI_SELECTORS = {
 } as const;
 
 /**
+ * I2-B:图片附件相关的 selector(全部来自 2026-09-10 I2-A 真机采样与 Final Fix ③;
+ * 见 docs/PERSONCHAT_V12_IMAGE_UPLOAD_I2A_REPORT.md)。
+ *
+ * 全部非本地化 —— 只用自定义元素名、fonticon 属性、结构类名与 input 的 accept 属性。
+ * 明确作废、禁止重新引入的旧判据:`images-files-uploader img`、`img[src^="blob:"]`、
+ * `progress_activity`(493 个样本 0 次出现)、`arrow_upward` 当就绪判据、
+ * aria-label 文案、Angular 动态 class、DOM index。
+ */
+export const GEMINI_ATTACHMENT_SELECTORS = {
+  /**
+   * 图片注入 input:懒创建,`+` 面板展开后约 0.9s 才水合;命中数必须恰好 1
+   * (另两个 file input 属于文档/Drive 上传器,accept 不是 image/*)。
+   * 该 input 自身没有 data-test-id,只能按 accept 定位;隐藏也可写(不需要可见性)。
+   */
+  imageInput: 'input[type="file"][accept="image/*"]',
+  /**
+   * 面板触发按钮。**唯一合法读法**是有尺寸那个的 `aria-expanded` 三态
+   * (缺失占位 / "false" 已武装 / "true" 已展开);不得按固定次数点击。
+   */
+  plus: 'input-area-v2 button:has(mat-icon[fonticon="plus"])',
+  /**
+   * ★ composer 附件存在判据(唯一生产定义)= 该 selector 在 input-area-v2 内的
+   * **有尺寸计数**,计数即附件数。历史气泡不产生此节点(I2-B U-10 实测)。
+   */
+  composerAttachment: "input-area-v2 .gem-attachment-content",
+  /** 上传中标记:每个附件上传期存在、完成即消失(progress_activity 不是判据) */
+  uploading: "input-area-v2 .gem-attachment-loading-container",
+  /** 附件上传失败标记(0 字节图实测:出现后常驻,是终局) */
+  attachmentError: 'input-area-v2 mat-icon[fonticon="error"]',
+  /** 生成中(此时 `+` 点不动,必须先等 idle) */
+  generating: 'input-area-v2 mat-icon[fonticon="stop"]',
+  /**
+   * 附件移除按钮:仅登记备用 —— I2-B V1 复位默认走 reload(I2-A:paste 注入的 chip
+   * 命中测试不放行、2 附件时首个 close 也不放行),不做 close 快路径。
+   */
+  attachmentClose: 'input-area-v2 button:has(mat-icon[fonticon="close"])',
+  /**
+   * Google Picker iframe 遮挡(误 force click 打到菜单 Drive 条目会产生)。
+   * **只检测不处置**:Escape 撤销未获真机证据(§7 U-3),生产遇到即失败或走 reload。
+   */
+  pickerOverlay: ".picker-iframe-container, .picker-api-container, google-picker",
+} as const;
+
+/**
  * 模型选择器 selector(M2,全部来自 2026-09-05 真机采样,见 docs/GEMINI_MODEL_DOM_REPORT.md)。
  *
  * 机器 key 是 `gem-menu-item` 上的 `data-mode-id`(不透明 hash,禁止硬编码进代码/种子,

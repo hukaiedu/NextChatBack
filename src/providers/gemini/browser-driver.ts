@@ -24,10 +24,51 @@ export interface BrowserElementSnapshot {
   attrs: Record<string, string | null>;
 }
 
+/**
+ * I2-B:composer 附件与入口 UI 的一次性快照。
+ *
+ * 语义化接口而非通用 evaluate:上层拿不到任意 JS 执行能力,判据固定为
+ * `input-area-v2` 内的**有尺寸**计数(I2-A §7 定案),历史气泡不参与。
+ */
+export interface AttachmentUiState {
+  /** composer 草稿区附件数(有尺寸 `.gem-attachment-content` 计数;唯一生产判据) */
+  attachmentCount: number;
+  /** 页面内 accept 含 image 的 file input 数(就绪恒为 1) */
+  imageInputCount: number;
+  /** `+` 按钮存在(无论有无尺寸) */
+  plusExists: boolean;
+  /** 有尺寸的 `+` 按钮存在(= 此刻有可点的盒子;不表示附件有无) */
+  plusSized: boolean;
+  /** 有尺寸 `+` 在全部 `+` 中的下标(-1 = 无);点击只用它,不做 `.first()` */
+  plusSizedIndex: number;
+  /** 有尺寸 `+` 的 `aria-expanded` 三态:缺失占位 / "false" 已武装 / "true" 已展开 */
+  expanded: "true" | "false" | null;
+  /** 生成中(`stop` 图标在场;此时 `+` 点不动) */
+  generating: boolean;
+  /** 上传中(`.gem-attachment-loading-container` 在场) */
+  uploading: boolean;
+  /** 附件上传失败(error 图标在场;真机实测为终局) */
+  hasError: boolean;
+  /** Google Picker iframe 遮挡(只检测;处置未验证) */
+  pickerOverlay: boolean;
+}
+
+/** I2-B:注入 file input 的文件(内存字节,不落盘;driver 层不校验业务限额) */
+export interface BrowserUploadFile {
+  name: string;
+  mimeType: string;
+  buffer: Buffer;
+}
+
 export interface BrowserPageHandle {
   url(): string;
   /** 导航到目标地址;失败抛错(由 BrowserManager 映射 PROVIDER_NAVIGATION_FAILED) */
   goto(url: string, options?: { timeoutMs?: number }): Promise<void>;
+  /**
+   * I2-B:重载当前地址(composer 残留复位的唯一已验证手段)。
+   * 失败语义与 goto 相同,由调用方映射。
+   */
+  reload(options?: { timeoutMs?: number }): Promise<void>;
   close(): Promise<void>;
   isClosed(): boolean;
   bringToFront(): Promise<void>;
@@ -67,6 +108,16 @@ export interface BrowserPageHandle {
   clickNth(selector: string, index: number, options?: { timeoutMs?: number }): Promise<void>;
   /** renderer 是否已崩溃(与 isClosed 语义独立:crash 后 page 可能仍未 close) */
   isCrashed(): boolean;
+  /**
+   * I2-B:读取 composer 附件/入口 UI 快照。实现内部读 DOM(Playwright 侧),
+   * 上层只能拿到本结构,不能传任意脚本;页面/Context 关闭、断连等关闭族异常原样上抛。
+   */
+  getAttachmentUiState(): Promise<AttachmentUiState>;
+  /**
+   * I2-B:把文件一次性写入目标 file input(隐藏 input 也可写)。
+   * 一次传完整数组 —— 生产上限 4 图共用一次注入,不逐图开合面板。
+   */
+  setInputFiles(selector: string, files: BrowserUploadFile[]): Promise<void>;
   /** 页面被关闭(用户手动关闭 / 导航替换等) */
   onClose(listener: () => void): void;
   /** 页面崩溃(renderer crash) */

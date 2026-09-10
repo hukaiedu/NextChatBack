@@ -4,6 +4,16 @@ export interface GeminiAdapterOptions {
   responseTimeoutMs: number;
   /** 等页面渲染出可交互输入框的上限 */
   composerReadyTimeoutMs?: number;
+  /**
+   * I2-B:附件就绪等待上限(计数达到 expectedCount 且无 loading 无 error);
+   * 超过即 PROVIDER_ATTACHMENT_TIMEOUT(504),绝不降级成纯文本发送。
+   */
+  attachmentReadyTimeoutMs?: number;
+  /**
+   * I2-B:单次面板动作后等状态迁移的窗口(生产默认 5s:真机水合 max ≈1.2s 的 4 倍余量)。
+   * 只影响「等多久判定这一次动作没有迁移」,不改变三态状态机本身。
+   */
+  attachmentPanelTimeoutMs?: number;
   /** 等用户气泡出现(确认 Prompt 已被页面接受)的上限 */
   sendAckTimeoutMs?: number;
   /** 打开已有会话后,等重定向稳定下来的宽限期(实测无效会话会被踢回 /app) */
@@ -26,10 +36,26 @@ export interface GeminiAdapterOptions {
   modelTriggerBudgetMs?: number;
 }
 
+/**
+ * I2-B:注入 composer 的附件(与 I1 `AttachmentFile` 结构一致)。
+ * mimeType 白名单与 I1 相同;字节已在内存,provider 只负责注入与就绪校验。
+ */
+export interface GeminiAttachmentInput {
+  name: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+  buffer: Buffer;
+}
+
 /** 一次 Prompt 执行的输入 */
 export interface GeminiPromptRunInput {
   /** 要发送的 Prompt(已 trim 非空) */
   prompt: string;
+  /**
+   * I2-B:已通过 I1 复核的图片附件(undefined = 纯文本)。
+   * 结构上与 I1 `AttachmentFile` 一致(provider 层不反向依赖 modules);
+   * provider 侧不再做 MIME 校验 / 大小检查 / 张数限额 —— 那些属于 I1。
+   */
+  attachments?: GeminiAttachmentInput[];
   /** 本地已保存的 Provider Conversation URL;null 表示本次要开新会话 */
   existingUrl: string | null;
   /**

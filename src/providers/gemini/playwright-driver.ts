@@ -1,12 +1,15 @@
 import { chromium } from "playwright";
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, Locator, Page } from "playwright";
 
 import { isContextClosedError } from "./gemini.errors.js";
+import { GEMINI_ATTACHMENT_SELECTORS } from "./gemini.selectors.js";
 import type {
+  AttachmentUiState,
   BrowserContextHandle,
   BrowserDriver,
   BrowserElementSnapshot,
   BrowserPageHandle,
+  BrowserUploadFile,
 } from "./browser-driver.js";
 
 const DEFAULT_NAVIGATION_TIMEOUT_MS = 45_000;
@@ -89,6 +92,13 @@ export class PlaywrightPageHandle implements BrowserPageHandle {
 
   async goto(url: string, options?: { timeoutMs?: number }): Promise<void> {
     await this.page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: options?.timeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS,
+    });
+  }
+
+  async reload(options?: { timeoutMs?: number }): Promise<void> {
+    await this.page.reload({
       waitUntil: "domcontentloaded",
       timeout: options?.timeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS,
     });
@@ -214,6 +224,76 @@ export class PlaywrightPageHandle implements BrowserPageHandle {
 
   async bringToFront(): Promise<void> {
     await this.page.bringToFront();
+  }
+
+  /**
+   * I2-B:读取附件/入口快照。全部经 Playwright locator 读取 —— 连内部 evaluate 都不用,
+   * 上层更不存在可传任意脚本的公共原语(§6)。判据只认 `input-area-v2` 内的**有尺寸**计数。
+   *
+   * **读取失败 fail closed(不许伪装成空 composer)**:「查询成功但没有元素」是有效观测
+   * (count=0 / attribute=null 原样返回);真正抛异常 = 快照没有取到,原样上抛 ——
+   * 由附件协议层包装成 PROVIDER_ATTACHMENT_FAILED,关闭族异常保持既有浏览器错误分类。
+   * 降级成 `attachmentCount=0` 会让纯文本守卫把「读取失败」误判成「composer 干净」,
+   * 重新打开残留附件被下一条消息带走的串轮风险。
+   */
+  async getAttachmentUiState(): Promise<AttachmentUiState> {
+    return this.readAttachmentUiState();
+  }
+
+  private async readAttachmentUiState(): Promise<AttachmentUiState> {
+    const plusLocator = this.page.locator(GEMINI_ATTACHMENT_SELECTORS.plus);
+    const plusCount = await plusLocator.count();
+    let plusSizedIndex = -1;
+    let expandedRaw: string | null = null;
+    for (let index = 0; index < plusCount; index++) {
+      if (await this.isSized(plusLocator.nth(index))) {
+        plusSizedIndex = index;
+        expandedRaw = await plusLocator.nth(index).getAttribute("aria-expanded");
+        break;
+      }
+    }
+    return {
+      attachmentCount: await this.countSized(GEMINI_ATTACHMENT_SELECTORS.composerAttachment),
+      imageInputCount: await this.page.locator(GEMINI_ATTACHMENT_SELECTORS.imageInput).count(),
+      plusExists: plusCount > 0,
+      plusSized: plusSizedIndex >= 0,
+      plusSizedIndex,
+      expanded: expandedRaw === "true" || expandedRaw === "false" ? expandedRaw : null,
+      generating: (await this.page.locator(GEMINI_ATTACHMENT_SELECTORS.generating).count()) > 0,
+      uploading: (await this.page.locator(GEMINI_ATTACHMENT_SELECTORS.uploading).count()) > 0,
+      hasError: (await this.page.locator(GEMINI_ATTACHMENT_SELECTORS.attachmentError).count()) > 0,
+      pickerOverlay: (await this.countSized(GEMINI_ATTACHMENT_SELECTORS.pickerOverlay)) > 0,
+    };
+  }
+
+  /** 有尺寸(w>0 && h>0)计数;元素不存在 = 0,读取抛错则整体上抛(fail closed) */
+  private async countSized(selector: string): Promise<number> {
+    const locator = this.page.locator(selector);
+    const total = await locator.count();
+    let sized = 0;
+    for (let index = 0; index < total; index++) {
+      if (await this.isSized(locator.nth(index))) {
+        sized += 1;
+      }
+    }
+    return sized;
+  }
+
+  private async isSized(locator: Locator): Promise<boolean> {
+    const box = await locator.boundingBox();
+    return box !== null && box.width > 0 && box.height > 0;
+  }
+
+  /** I2-B:一次写入完整文件数组(隐藏 input 可写;不做可见性等待) */
+  async setInputFiles(selector: string, files: BrowserUploadFile[]): Promise<void> {
+    await this.page.setInputFiles(
+      selector,
+      files.map((file) => ({
+        name: file.name,
+        mimeType: file.mimeType,
+        buffer: file.buffer,
+      })),
+    );
   }
 
   onClose(listener: () => void): void {

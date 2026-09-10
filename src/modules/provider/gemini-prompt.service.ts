@@ -127,6 +127,8 @@ export class GeminiPromptService implements PromptExecutor {
     try {
       result = await this.adapter.runPrompt({
         prompt: userMessage.content,
+        // I2-B:只透传 I1 已复核的附件;provider 侧不再校验 MIME/大小/张数
+        attachments: input.attachments,
         existingUrl,
         signal: input.signal,
         // URL 一确定就落库;落库失败会一路抛出去,绝不允许"没存下 URL 还继续读回答"(§6.3)

@@ -23,6 +23,13 @@ import {
   normalizeConversationUrl,
 } from "./gemini.selectors.js";
 import { convertGeminiHtmlToMarkdown } from "./gemini-response-markdown.js";
+import {
+  assertComposerExpectedBeforeSend,
+  ensureAttachmentInput,
+  ensureNoForeignComposerAttachments,
+  injectAttachments,
+} from "./gemini.attachments.js";
+import type { AttachmentProtocolDeps } from "./gemini.attachments.js";
 import type {
   GeminiAdapter,
   GeminiAdapterOptions,
@@ -46,6 +53,10 @@ const DEFAULTS = {
   modelMenuTimeoutMs: 5_000,
   // FIX-06:trigger 点击重试总预算 = 单次点击 5s + 菜单等待 5s 的既有最坏包络
   modelTriggerBudgetMs: 10_000,
+  // I2-B:附件就绪等待上限(设计定案 20s;4 图慢上传是真机最坏窗口)
+  attachmentReadyTimeoutMs: 20_000,
+  // I2-B:单次面板动作后的状态迁移窗口(§10 允许 5s;真机水合 max ≈1.2s)
+  attachmentPanelTimeoutMs: 5_000,
 } as const;
 
 /**
@@ -112,6 +123,10 @@ export class GeminiWebAdapter implements GeminiAdapter {
         deps.options.modelMenuTimeoutMs ?? DEFAULTS.modelMenuTimeoutMs,
       modelTriggerBudgetMs:
         deps.options.modelTriggerBudgetMs ?? DEFAULTS.modelTriggerBudgetMs,
+      attachmentReadyTimeoutMs:
+        deps.options.attachmentReadyTimeoutMs ?? DEFAULTS.attachmentReadyTimeoutMs,
+      attachmentPanelTimeoutMs:
+        deps.options.attachmentPanelTimeoutMs ?? DEFAULTS.attachmentPanelTimeoutMs,
     };
   }
 
@@ -199,13 +214,22 @@ export class GeminiWebAdapter implements GeminiAdapter {
     await this.waitForComposer(page, Date.now() + this.opts.composerReadyTimeoutMs);
     const baseline = await this.snapshot(page);
 
-    try {
-      await page.fill(GEMINI_SELECTORS.quillComposer, input.prompt);
-    } catch (err) {
-      this.assertNotLoggedOut(page);
-      throw domChanged("composer is not editable", err);
+    // I2-B:带附件时先复位残留 → 状态驱动展开 → 一次注入全部图片 → 精确等就绪 → 再填文字。
+    // 顺序是刻意的:先 fill 再跑面板协议会让 UI 状态互相影响(§17)。
+    const protocol = this.attachmentProtocol(page);
+    const attachments = input.attachments ?? [];
+    if (attachments.length > 0) {
+      await ensureNoForeignComposerAttachments(protocol);
+      await ensureAttachmentInput(protocol);
+      await injectAttachments(protocol, attachments);
+      await this.fillPrompt(page, input.prompt);
+      await assertComposerExpectedBeforeSend(protocol, attachments.length);
+    } else {
+      // 纯文本唯一新增守卫(I0 R1):别人的/上一轮的残留附件不得跟着本次文字发出去
+      await ensureNoForeignComposerAttachments(protocol);
+      await this.fillPrompt(page, input.prompt);
     }
-    await sleep(FILL_SETTLE_MS);
+
     await page.press(GEMINI_SELECTORS.quillComposer, "Enter");
 
     await this.waitForSendAck(page, baseline, Date.now() + this.opts.sendAckTimeoutMs);
@@ -221,6 +245,32 @@ export class GeminiWebAdapter implements GeminiAdapter {
   // ---------------------------------------------------------------------------
   // 内部实现
   // ---------------------------------------------------------------------------
+
+  /** I2-B:附件协议依赖(复用本类的 composer 等待与日志,分类语义保持一致) */
+  private attachmentProtocol(page: BrowserPageHandle): AttachmentProtocolDeps {
+    return {
+      page,
+      logger: this.logger,
+      options: {
+        readyTimeoutMs: this.opts.attachmentReadyTimeoutMs,
+        panelWaitMs: this.opts.attachmentPanelTimeoutMs,
+        pollIntervalMs: this.opts.pollIntervalMs,
+        composerReadyTimeoutMs: this.opts.composerReadyTimeoutMs,
+      },
+      waitForComposer: (deadline) => this.waitForComposer(page, deadline),
+    };
+  }
+
+  /** 写入输入框并留一拍给 Angular 同步(附件就绪之后才调用) */
+  private async fillPrompt(page: BrowserPageHandle, prompt: string): Promise<void> {
+    try {
+      await page.fill(GEMINI_SELECTORS.quillComposer, prompt);
+    } catch (err) {
+      this.assertNotLoggedOut(page);
+      throw domChanged("composer is not editable", err);
+    }
+    await sleep(FILL_SETTLE_MS);
+  }
 
   private get logger(): Logger {
     return this.deps.logger;
