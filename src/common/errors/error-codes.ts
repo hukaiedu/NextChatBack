@@ -5,6 +5,8 @@
  */
 export const ErrorCodes = {
   VALIDATION_ERROR: "VALIDATION_ERROR",
+  // V1.2 I1:超过 express body limit。此前 PayloadTooLargeError 不匹配任何分支 → 误落 500
+  PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE",
 
   CONVERSATION_NOT_FOUND: "CONVERSATION_NOT_FOUND",
   CONVERSATION_DELETED: "CONVERSATION_DELETED",
@@ -46,6 +48,18 @@ export const ErrorCodes = {
   PROVIDER_MODEL_UNAVAILABLE: "PROVIDER_MODEL_UNAVAILABLE",
   // M1:读取模型目录 / 切换模型失败(页面未就绪、DOM 变更、菜单操作失败等)
   PROVIDER_MODEL_SWITCH_FAILED: "PROVIDER_MODEL_SWITCH_FAILED",
+
+  // V1.2 I1 附件契约(请求侧)
+  // 单图 >5MB / 总量 >10MB / 张数 >4
+  ATTACHMENT_TOO_LARGE: "ATTACHMENT_TOO_LARGE",
+  // dataURL 前缀 MIME 与真实 magic byte 不一致,或类型不在白名单
+  UNSUPPORTED_ATTACHMENT_TYPE: "UNSUPPORTED_ATTACHMENT_TYPE",
+  // AttachmentStore 内存配额不足:入口拒绝,绝不淘汰已在队列里的附件(I0.1 §3.4)
+  ATTACHMENT_CAPACITY_EXCEEDED: "ATTACHMENT_CAPACITY_EXCEEDED",
+  // V1.2 I1 登记、I2-B 抛出:附件注入/等待就绪失败。份数断言(claim 后 take 缺或份数不符)
+  // 也在 Executor 之前用它,保证「绝不降级成只发文字」
+  PROVIDER_ATTACHMENT_FAILED: "PROVIDER_ATTACHMENT_FAILED",
+  PROVIDER_ATTACHMENT_TIMEOUT: "PROVIDER_ATTACHMENT_TIMEOUT",
 
   // 浏览器状态 API(docs/browser-status-api.md:GET /api/browser/status + POST /restart)
   BROWSER_RESTART_CONFLICT: "BROWSER_RESTART_CONFLICT",

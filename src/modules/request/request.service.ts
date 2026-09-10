@@ -206,11 +206,12 @@ export class RequestService {
   }
 
   /**
-   * 启动恢复(§12.1):上一进程遗留的 PROCESSING|CANCELLING 一律 → FAILED。
+   * 启动恢复(§12.1 + V1.2 §十三):上一进程遗留的行一律 → FAILED。
    * 按行状态选错误码:PROCESSING → SERVER_RESTARTED_DURING_PROCESSING,
-   * CANCELLING → SERVER_RESTARTED_DURING_CANCELLING。
+   * CANCELLING → SERVER_RESTARTED_DURING_CANCELLING,
+   * 带附件的 PENDING → SERVER_RESTARTED_DURING_PROCESSING(附件字节已随进程丢失)。
    * Assistant 一律 → FAILED(不落 CANCELLED,否则会出现 Request FAILED + Assistant CANCELLED)。
-   * 行已被别的路径推进时返回 false(幂等,重复执行安全)。
+   * 行已被别的路径推进、或本就不需要恢复(纯文本 PENDING)时返回 false(幂等,重复执行安全)。
    */
   async recoverStaleOne(id: string): Promise<boolean> {
     return this.prisma.$transaction(async (tx) => {
@@ -218,24 +219,16 @@ export class RequestService {
       if (!request) {
         return false;
       }
-      const errorCode =
-        request.status === "CANCELLING"
-          ? ErrorCodes.SERVER_RESTARTED_DURING_CANCELLING
-          : request.status === "PROCESSING"
-            ? ErrorCodes.SERVER_RESTARTED_DURING_PROCESSING
-            : null;
-      if (!errorCode) {
+      const fault = restartFaultFor(request);
+      if (!fault) {
         return false;
       }
-      if (
-        (await this.requestRepo.markFailed(
-          tx,
-          id,
-          "FAILED",
-          errorCode,
-          `Server restarted while the request was ${request.status.toLowerCase()}; prompt delivery is unconfirmed`,
-        )) === 0
-      ) {
+      // PENDING 从没进过在飞态,markFailed 的边沿判据不适用 → 走专用条件写
+      const moved =
+        request.status === "PENDING"
+          ? await this.requestRepo.markFailedFromPending(tx, id, fault.code, fault.message)
+          : await this.requestRepo.markFailed(tx, id, "FAILED", fault.code, fault.message);
+      if (moved === 0) {
         return false;
       }
       await this.messageRepo.updateStatus(
@@ -276,5 +269,37 @@ export class RequestService {
       );
     }
     return request;
+  }
+}
+
+/**
+ * 重启遗留行 → 应写的错误码与说明;null = 该行不需要恢复。
+ *
+ * 带附件的 PENDING 也算遗留:附件字节只在内存活一次,新进程无从取回。
+ * 留给 Scheduler 重跑等于发一条「只有文字」的降级请求 —— 用户会以为 Gemini 看到了图,
+ * 所以宁可 FAILED 让用户重发。纯文本 PENDING 返回 null,重启后照旧续跑。
+ */
+function restartFaultFor(request: ModelRequestModel): { code: string; message: string } | null {
+  switch (request.status) {
+    case "CANCELLING":
+      return {
+        code: ErrorCodes.SERVER_RESTARTED_DURING_CANCELLING,
+        message: "Server restarted while the request was cancelling; prompt delivery is unconfirmed",
+      };
+    case "PROCESSING":
+      return {
+        code: ErrorCodes.SERVER_RESTARTED_DURING_PROCESSING,
+        message: "Server restarted while the request was processing; prompt delivery is unconfirmed",
+      };
+    case "PENDING":
+      return request.attachmentCount > 0
+        ? {
+            code: ErrorCodes.SERVER_RESTARTED_DURING_PROCESSING,
+            message:
+              "Server restarted before the request ran; its attachments lived only in memory and are gone",
+          }
+        : null;
+    default:
+      return null;
   }
 }

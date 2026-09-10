@@ -6,7 +6,13 @@ import type { BrowserManager } from "../../providers/gemini/browser-manager.js";
 import type { PrismaClient } from "../../generated/prisma/client.js";
 import type { MessageModel, ModelRequestModel } from "../../generated/prisma/models.js";
 import type { MessageRepository } from "../message/message.repository.js";
-import type { PromptExecutionResult, PromptExecutor } from "../provider/gemini-prompt.service.js";
+import type { AttachmentFile } from "../message/attachment.js";
+import type { AttachmentStore } from "./request.attachment-store.js";
+import type {
+  PromptExecutionInput,
+  PromptExecutionResult,
+  PromptExecutor,
+} from "../provider/gemini-prompt.service.js";
 import type { RequestRepository } from "./request.repository.js";
 import type { RequestService } from "./request.service.js";
 import type { CancellationRegistry } from "./request.cancellation.js";
@@ -43,6 +49,8 @@ export interface RequestSchedulerDeps {
   logger: Logger;
   cancellation: CancellationRegistry;
   pageLock: ProviderPageLock;
+  /** V1.2 I1:附件内存容器;claim 后取件、执行结束在同一条 finally 释放 */
+  attachmentStore: AttachmentStore;
   options?: { scanIntervalMs?: number; executionTimeoutMs?: number };
 }
 
@@ -132,6 +140,9 @@ export class RequestScheduler {
 
     // FIX-08:锁必须在第一次 Provider Page 操作(ensureReady)之前获得,
     // 否则 gateProvider.ensureReady() 与 listModels() 存在并发窗口。
+    // claimed / attachments 是跨 try 的所有权标记:只有认领过的附件才归本次执行释放。
+    let claimed = false;
+    let attachments: AttachmentFile[] | undefined;
     await this.deps.pageLock.acquire();
     try {
       const status = await this.gateProvider(pending.id);
@@ -139,7 +150,8 @@ export class RequestScheduler {
         return false;
       }
       if (status === "LOGIN_REQUIRED") {
-        if (await this.deps.requestService.claim(pending.id)) {
+        claimed = await this.deps.requestService.claim(pending.id);
+        if (claimed) {
           await this.deps.requestService.fail(
             pending.id,
             "FAILED",
@@ -158,10 +170,32 @@ export class RequestScheduler {
       // cancel() 的 abort 不可能落空。
       const controller = this.deps.cancellation.register(pending.id);
 
-      if (!(await this.deps.requestService.claim(pending.id))) {
+      claimed = await this.deps.requestService.claim(pending.id);
+      if (!claimed) {
         this.deps.cancellation.unregister(pending.id);
         return true;
       }
+
+      // §十 附件守卫(纯文本零成本:attachmentCount==0 时根本不碰 Store):
+      // 字节没拿到 / 份数对不上,一律在执行器之前 FAILED。降级发一条「只有文字」的请求
+      // 比失败更糟 —— 用户以为 Gemini 看到了图,实际没有。
+      if (pending.attachmentCount > 0) {
+        const files = this.deps.attachmentStore.take(pending.id);
+        if (files === undefined || files.length !== pending.attachmentCount) {
+          await this.deps.requestService.fail(
+            pending.id,
+            "FAILED",
+            ErrorCodes.PROVIDER_ATTACHMENT_FAILED,
+            files === undefined
+              ? "Attachments are no longer available in memory"
+              : `Expected ${pending.attachmentCount} attachments but found ${files.length}`,
+          );
+          this.deps.cancellation.unregister(pending.id);
+          return true;
+        }
+        attachments = files;
+      }
+
       const userMessage = await this.deps.messageRepo.findById(this.deps.prisma, pending.userMessageId);
       if (!userMessage) {
         await this.deps.requestService.fail(
@@ -176,7 +210,7 @@ export class RequestScheduler {
 
       this.deps.browserManager.setBusy();
       try {
-        const outcome = await this.runGuarded(pending, userMessage, controller);
+        const outcome = await this.runGuarded(pending, userMessage, controller, attachments);
         if (outcome.timedOut) {
           const code = this.deps.browserManager.takeProviderFault() ?? ErrorCodes.PROVIDER_RESPONSE_TIMEOUT;
           await this.deps.requestService.fail(
@@ -230,6 +264,11 @@ export class RequestScheduler {
         await this.releaseSlot();
       }
     } finally {
+      // §十一 附件释放与页面锁同级:凡是本次真的认领过的附件,无论成功/失败/超时/崩溃/取消都收回。
+      // 未认领(WAIT / claim 落空)一律不动 —— 那条 PENDING 稍后还要靠这份字节跑。
+      if (claimed && pending.attachmentCount > 0) {
+        this.deps.attachmentStore.drop(pending.id);
+      }
       this.deps.pageLock.release();
     }
     return true;
@@ -282,12 +321,18 @@ export class RequestScheduler {
     request: ModelRequestModel,
     userMessage: MessageModel,
     controller: AbortController,
+    attachments?: AttachmentFile[],
   ): Promise<{ timedOut: true } | { timedOut: false; result: PromptExecutionResult }> {
     const timeoutMs = this.opts.executionTimeoutMs;
     let timedOut = false;
 
+    // 纯文本入参逐字保持原样(不多一个键);附件只送到执行器门口,I2-B 才消费
+    const input: PromptExecutionInput =
+      attachments === undefined
+        ? { request, userMessage, signal: controller.signal }
+        : { request, userMessage, signal: controller.signal, attachments };
     const work = this.deps.executor
-      .execute({ request, userMessage, signal: controller.signal })
+      .execute(input)
       .then(async (result) => {
         // 只有非取消的成功路径在这里写终态;取消和超时由 processNext 分派
         if (!result.cancelled && !timedOut) {

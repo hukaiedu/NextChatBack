@@ -1,8 +1,11 @@
 import type { ModelRequestModel } from "../../generated/prisma/models.js";
+import { ATTACHMENT_SWEEP_CHUNK_SIZE } from "../../config/constants.js";
 import type { DbClient } from "../../database/prisma.js";
 import { REQUEST_ACTIVE_STATUSES, REQUEST_IN_FLIGHT_STATUSES } from "./request.types.js";
 
 export interface ModelRequestCreateData {
+  /** 缺省 = 用 schema 的 @default(uuid());附件请求必须显式传入,与 AttachmentStore 的占位 id 对齐 */
+  id?: string;
   conversationId: string;
   userMessageId: string;
   assistantMessageId: string;
@@ -12,6 +15,8 @@ export interface ModelRequestCreateData {
   provider: string;
   /** M1:客户端显式提交的模型键快照;未提交为 null,创建后不再变更 */
   requestedModelKey?: string | null;
+  /** V1.2 I1:附件份数(字节只在内存,永不落库);缺省 = 数据库默认 0 */
+  attachmentCount?: number;
 }
 
 export class RequestRepository {
@@ -46,6 +51,27 @@ export class RequestRepository {
     return db.modelRequest.findMany({ where: { assistantMessageId: { in: ids } } });
   }
 
+  /**
+   * §六 附件孤儿判据:候选 requestId 里哪些仍处于活动态(PENDING / PROCESSING / CANCELLING)。
+   *
+   * AttachmentStore 因此不按固定 TTL 删附件 —— 只要数据库还说这个 Request 没跑完,
+   * 内存里的字节就必须留着。分片查询避开 SQLite 的 IN 参数上限。
+   */
+  async findActiveByIds(db: DbClient, ids: string[]): Promise<Set<string>> {
+    const active = new Set<string>();
+    for (let offset = 0; offset < ids.length; offset += ATTACHMENT_SWEEP_CHUNK_SIZE) {
+      const chunk = ids.slice(offset, offset + ATTACHMENT_SWEEP_CHUNK_SIZE);
+      const rows = await db.modelRequest.findMany({
+        where: { id: { in: chunk }, status: { in: [...REQUEST_ACTIVE_STATUSES] } },
+        select: { id: true },
+      });
+      for (const row of rows) {
+        active.add(row.id);
+      }
+    }
+    return active;
+  }
+
   /** 最老的 PENDING(Scheduler 取任务;id 兜底同毫秒稳定排序) */
   async findFirstPending(db: DbClient): Promise<ModelRequestModel | null> {
     return db.modelRequest.findFirst({
@@ -58,6 +84,18 @@ export class RequestRepository {
   async findStaleInFlight(db: DbClient): Promise<ModelRequestModel[]> {
     return db.modelRequest.findMany({
       where: { status: { in: [...REQUEST_IN_FLIGHT_STATUSES] } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+  }
+
+  /**
+   * V1.2 §十三 启动恢复扫描:上一进程遗留的「带附件 PENDING」。
+   *
+   * 纯文本 PENDING 不在其中 —— 它不依赖内存,重启后照旧由 Scheduler 首轮扫描接走(硬回归条件)。
+   */
+  async findStalePendingWithAttachments(db: DbClient): Promise<ModelRequestModel[]> {
+    return db.modelRequest.findMany({
+      where: { status: "PENDING", attachmentCount: { gt: 0 } },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     });
   }
@@ -91,6 +129,25 @@ export class RequestRepository {
     const result = await db.modelRequest.updateMany({
       where: { id, status: { in: [...REQUEST_IN_FLIGHT_STATUSES] } },
       data: { status, errorCode, errorMessage, completedAt: new Date() },
+    });
+    return result.count;
+  }
+
+  /**
+   * V1.2 §十三:启动恢复专用的 PENDING → FAILED 条件写。
+   *
+   * 刻意不与 markFailed 合并:后者只认 PROCESSING|CANCELLING(§12.11「执行中才会失败」),
+   * 把 PENDING 并进去等于放弃这条边沿合法性。本方法只由启动恢复调用一次。
+   */
+  async markFailedFromPending(
+    db: DbClient,
+    id: string,
+    errorCode: string,
+    errorMessage: string,
+  ): Promise<number> {
+    const result = await db.modelRequest.updateMany({
+      where: { id, status: "PENDING" },
+      data: { status: "FAILED", errorCode, errorMessage, completedAt: new Date() },
     });
     return result.count;
   }

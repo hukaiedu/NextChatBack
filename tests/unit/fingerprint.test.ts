@@ -73,4 +73,45 @@ describe("computeRequestFingerprint", () => {
     expect(otherContent).not.toBe(sameKeySameContent);
     expect(otherConv).not.toBe(sameKeySameContent);
   });
+
+  // ---- V1.2 I1 FINGERPRINT-06..09:附件维度 ----
+
+  it("FINGERPRINT-06: 不传 attachmentsDigest 时 canonical 里没有这个键(V1/M1 逐字节回归)", () => {
+    // 若实现把缺失键写成 ""/null,这两条都会与独立实现不一致 —— 旧客户端幂等会整片失配
+    expect(computeRequestFingerprint("A", "hello", undefined, undefined)).toBe(V1_FIXTURE_HASH);
+    for (const [conversationId, content, modelKey] of [
+      ["conv-1", "你好", "model-a"],
+      ["conv-2", "", undefined],
+    ] as const) {
+      const canonical = JSON.stringify(
+        modelKey === undefined ? { conversationId, content } : { conversationId, content, modelKey },
+      );
+      expect(computeRequestFingerprint(conversationId, content, modelKey, undefined)).toBe(
+        createHash("sha256").update(canonical).digest("hex"),
+      );
+    }
+  });
+
+  it("FINGERPRINT-07: 同文本 + 同模型 + 同附件摘要 → 同指纹", () => {
+    const a = computeRequestFingerprint("conv-1", "看图", "model-a", "digest-1");
+    const b = computeRequestFingerprint("conv-1", "看图", "model-a", "digest-1");
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("FINGERPRINT-08: 附件摘要不同 → 指纹不同(换图 = 新提问,不得命中旧幂等)", () => {
+    const a = computeRequestFingerprint("conv-1", "看图", "model-a", "digest-1");
+    const b = computeRequestFingerprint("conv-1", "看图", "model-a", "digest-2");
+    expect(a).not.toBe(b);
+  });
+
+  it("FINGERPRINT-09: 附件维度与模型维度互不遮蔽,且带图指纹必不同于纯文本", () => {
+    const base = computeRequestFingerprint("conv-1", "看图", "model-a");
+    const withImage = computeRequestFingerprint("conv-1", "看图", "model-a", "digest-1");
+    const otherModel = computeRequestFingerprint("conv-1", "看图", "model-b", "digest-1");
+    expect(withImage).not.toBe(base);
+    expect(otherModel).not.toBe(withImage);
+    // 只有全部维度相同才是同一次提问
+    expect(computeRequestFingerprint("conv-1", "看图", "model-a", "digest-1")).toBe(withImage);
+  });
 });

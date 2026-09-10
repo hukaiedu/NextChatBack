@@ -15,6 +15,7 @@ import type {
 import type { ConversationModel, MessageModel, ModelRequestModel } from "../../generated/prisma/models.js";
 import type { PrismaClient } from "../../generated/prisma/client.js";
 import type { ConversationService } from "../conversation/conversation.service.js";
+import type { AttachmentFile } from "../message/attachment.js";
 import type { RequestRepository } from "../request/request.repository.js";
 import type { GeminiStreamService } from "./gemini-stream.service.js";
 
@@ -24,6 +25,11 @@ export interface PromptExecutionInput {
   userMessage: MessageModel;
   /** 取消信号(第 8 阶段):被 abort 时 Adapter 尝试让 Gemini 停止生成 */
   signal?: AbortSignal;
+  /**
+   * V1.2 I1:Scheduler 从 AttachmentStore 取出的附件字节,undefined = 纯文本。
+   * 本阶段只送达门口、执行器不消费;DOM 注入属 I2-B。
+   */
+  attachments?: AttachmentFile[];
 }
 
 export interface PromptExecutionResult {

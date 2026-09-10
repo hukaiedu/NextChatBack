@@ -11,6 +11,8 @@ import type { BrowserManager } from "../src/providers/gemini/browser-manager.js"
 import type { GeminiAdapter } from "../src/providers/gemini/gemini.types.js";
 import type { GeminiPromptService } from "../src/modules/provider/gemini-prompt.service.js";
 import type { RequestScheduler } from "../src/modules/request/request.scheduler.js";
+import type { AttachmentStore } from "../src/modules/request/request.attachment-store.js";
+import type { RawAttachment } from "../src/modules/message/attachment.js";
 import type { RequestRecovery } from "../src/modules/request/request.recovery.js";
 import type { RequestEventEmitter } from "../src/modules/sse/event-emitter.js";
 import type { CancellationRegistry } from "../src/modules/request/request.cancellation.js";
@@ -32,6 +34,8 @@ export interface TestContext {
   cancellation: CancellationRegistry;
   /** M3:执行器实例(直接驱动 execute,精确控制取消时点) */
   executor: GeminiPromptService;
+  /** V1.2 I1:附件内存容器(断言 liveBytes 不变量 / 手动 sweep / 观察 slot 状态) */
+  attachmentStore: AttachmentStore;
   /** 当前存活的 SSE 连接数 */
   sseConnections(): number;
   reset(): Promise<void>;
@@ -57,7 +61,7 @@ export async function setupTestContext(options?: {
   // 默认注入"永不启动"的 Browser Manager stub(provider 测试才需要真实/可操纵实例)
   const browserManager = options?.browserManager ?? createFakeManager(new FakeDriver());
 
-  const { app, scheduler, recovery, sse, events, cancellation, executor } = createApp({
+  const { app, scheduler, recovery, sse, events, cancellation, executor, attachmentStore } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
@@ -88,12 +92,18 @@ export async function setupTestContext(options?: {
     events,
     cancellation,
     executor,
+    attachmentStore,
 
     sseConnections(): number {
       return sse.connectionCount();
     },
 
     async reset(): Promise<void> {
+      // 附件字节活在进程里而不是数据库里:清库的同时必须清 slot,
+      // 否则上一个用例留下的 liveBytes 会污染下一个用例的不变量断言。
+      for (const slot of attachmentStore.stats().slots) {
+        attachmentStore.drop(slot.requestId);
+      }
       await prisma.modelRequest.deleteMany();
       await prisma.message.deleteMany();
       await prisma.conversation.deleteMany();
@@ -101,6 +111,8 @@ export async function setupTestContext(options?: {
 
     async close(): Promise<void> {
       scheduler.stop();
+      // 附件容器的孤儿清理是定时任务:不撤掉,它可能在 $disconnect 之后才发起查询
+      attachmentStore.dispose();
       // SSE 是长连接:不先结束掉,server.close() 会永远不回调
       sse.closeAll();
       // 测试拆台没有待收尾的请求:所有连接直接放掉。被 abort 的 fetch 套接字仍挂在服务端,
@@ -134,14 +146,23 @@ export async function sendMessage(
   content: string,
   idempotencyKey: string,
   modelKey?: string,
+  attachments?: RawAttachment[],
 ): Promise<Response> {
+  const body: Record<string, unknown> = { content };
+  if (modelKey !== undefined) {
+    body.modelKey = modelKey;
+  }
+  // 缺省时不写这个键:纯文本请求的 body 与今天逐字节相同
+  if (attachments !== undefined) {
+    body.attachments = attachments;
+  }
   return fetch(`${baseUrl}/api/conversations/${conversationId}/messages`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Idempotency-Key": idempotencyKey,
     },
-    body: JSON.stringify(modelKey !== undefined ? { content, modelKey } : { content }),
+    body: JSON.stringify(body),
   });
 }
 

@@ -16,6 +16,8 @@ export interface RecoveryReport {
   processingFailed: number;
   /** 本次由 CANCELLING 强制转 FAILED 的条数 */
   cancellingFailed: number;
+  /** V1.2 §十三:本次由「带附件的 PENDING」强制转 FAILED 的条数(附件字节已随上一进程丢失) */
+  pendingAttachmentFailed: number;
   /** §六 配对违规数(只发现不修复) */
   pairingViolations: number;
 }
@@ -23,7 +25,9 @@ export interface RecoveryReport {
 /**
  * 服务启动时的 Request 恢复(prd §12.1),必须先于 Scheduler 启动完成。
  *
- * - PENDING:不动。Scheduler 首轮扫描自然重新入队。
+ * - 纯文本 PENDING:不动。Scheduler 首轮扫描自然重新入队。
+ * - 带附件的 PENDING:FAILED + SERVER_RESTARTED_DURING_PROCESSING(V1.2 §十三)。
+ *   附件字节只活在内存,新进程拿不到;放过去执行就是一条「只有文字」的降级请求。
  * - PROCESSING:FAILED + SERVER_RESTARTED_DURING_PROCESSING。
  * - CANCELLING:FAILED + SERVER_RESTARTED_DURING_CANCELLING(§8.9 残留 CANCELLING 是真 bug)。
  * - Assistant 一律 → FAILED(不落 CANCELLED,否则违反 §六)。
@@ -34,14 +38,22 @@ export class RequestRecovery {
   constructor(private readonly deps: RequestRecoveryDeps) {}
 
   async run(): Promise<RecoveryReport> {
-    const stale = await this.deps.requestRepo.findStaleInFlight(this.deps.prisma);
+    // 两组残留各自按老到新取出;带附件的 PENDING 不依赖数据库外的状态,必须在
+    // Scheduler 首次扫描之前判死,否则它会被当成普通 PENDING 认领。
+    const stale = [
+      ...(await this.deps.requestRepo.findStaleInFlight(this.deps.prisma)),
+      ...(await this.deps.requestRepo.findStalePendingWithAttachments(this.deps.prisma)),
+    ];
     let processingFailed = 0;
     let cancellingFailed = 0;
+    let pendingAttachmentFailed = 0;
     for (const request of stale) {
       try {
         if (await this.deps.requestService.recoverStaleOne(request.id)) {
           if (request.status === "CANCELLING") {
             cancellingFailed++;
+          } else if (request.status === "PENDING") {
+            pendingAttachmentFailed++;
           } else {
             processingFailed++;
           }
@@ -55,7 +67,12 @@ export class RequestRecovery {
     }
     if (stale.length > 0) {
       this.deps.logger.info(
-        { processingFailed, cancellingFailed, scanned: stale.length },
+        {
+          processingFailed,
+          cancellingFailed,
+          pendingAttachmentFailed,
+          scanned: stale.length,
+        },
         "request recovery finished",
       );
     }
@@ -80,6 +97,6 @@ export class RequestRecovery {
       this.deps.logger.error({ err }, "pairing violation check failed");
     }
 
-    return { processingFailed, cancellingFailed, pairingViolations };
+    return { processingFailed, cancellingFailed, pendingAttachmentFailed, pairingViolations };
   }
 }

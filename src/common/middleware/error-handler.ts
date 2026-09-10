@@ -13,6 +13,15 @@ function isBodyParseError(err: unknown): err is SyntaxError & { body?: unknown; 
   );
 }
 
+/**
+ * 请求体超限:raw-body 的 PayloadTooLargeError。
+ * 两个特征同时成立才算 —— 只认 status 会把别处来的 413 也一并改写。
+ */
+function isPayloadTooLargeError(err: unknown): boolean {
+  const e = err as { status?: unknown; type?: unknown };
+  return e?.status === 413 && e?.type === "entity.too.large";
+}
+
 /** Prisma/SQLite 运行时异常(业务层已处理的除外,如 P2002) */
 function isDatabaseError(err: unknown): boolean {
   return (
@@ -26,6 +35,7 @@ function isDatabaseError(err: unknown): boolean {
 /**
  * 统一错误出口:
  * - AppError → 对应 statusCode + { error: { code, message, requestId } }
+ * - 请求体超过 body limit → 413 PAYLOAD_TOO_LARGE
  * - 非法 JSON body → 400 VALIDATION_ERROR
  * - Prisma/SQLite 异常 → 500 DATABASE_ERROR(内部细节只进日志,不泄露到响应)
  * - 其他错误 → 500 INTERNAL_ERROR
@@ -38,7 +48,9 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
     }
 
     let appErr: AppError;
-    if (isBodyParseError(err)) {
+    if (isPayloadTooLargeError(err)) {
+      appErr = new AppError(ErrorCodes.PAYLOAD_TOO_LARGE, "Request body too large", err);
+    } else if (isBodyParseError(err)) {
       appErr = new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid JSON body", err);
     } else if (isDatabaseError(err)) {
       appErr = new AppError(ErrorCodes.DATABASE_ERROR, "Database error", err);

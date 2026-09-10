@@ -40,6 +40,7 @@ export function createMessageRouter(service: MessageService): Router {
       body.content,
       idempotencyKey,
       body.modelKey,
+      body.attachments,
     );
     // 幂等命中返回 200,首次成功创建 Request 返回 202 Accepted
     res.status(result.deduplicated ? 200 : 202).json({ data: result });

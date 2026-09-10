@@ -10,6 +10,17 @@ export const sendMessageSchema = z.object({
     }),
   // M1:显式提交的模型键;省略 = 沿用会话偏好。键为 provider 不透明字符串,只做长度约束
   modelKey: z.string().trim().min(1).max(256).optional(),
+  // V1.2 I1:图片附件。这里只约束形状,张数/字节/MIME 真伪一律交给
+  // attachment.ts(超限 → 413、类型不符 → 415),不让 zod 抢先返回 400。
+  attachments: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(1024),
+        mimeType: z.string().min(1).max(128),
+        data: z.string().min(1),
+      }),
+    )
+    .optional(),
 });
 
 // PAG-2:GET messages 分页 query;limit 默认 50、上限 100;cursor 为不透明 base64url 串

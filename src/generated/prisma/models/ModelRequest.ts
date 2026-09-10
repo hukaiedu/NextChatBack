@@ -28,10 +28,12 @@ export type AggregateModelRequest = {
 
 export type ModelRequestAvgAggregateOutputType = {
   attemptCount: number | null
+  attachmentCount: number | null
 }
 
 export type ModelRequestSumAggregateOutputType = {
   attemptCount: number | null
+  attachmentCount: number | null
 }
 
 export type ModelRequestMinAggregateOutputType = {
@@ -47,6 +49,7 @@ export type ModelRequestMinAggregateOutputType = {
   resolvedModelKey: string | null
   resolvedModelLabel: string | null
   attemptCount: number | null
+  attachmentCount: number | null
   errorCode: string | null
   errorMessage: string | null
   startedAt: Date | null
@@ -68,6 +71,7 @@ export type ModelRequestMaxAggregateOutputType = {
   resolvedModelKey: string | null
   resolvedModelLabel: string | null
   attemptCount: number | null
+  attachmentCount: number | null
   errorCode: string | null
   errorMessage: string | null
   startedAt: Date | null
@@ -89,6 +93,7 @@ export type ModelRequestCountAggregateOutputType = {
   resolvedModelKey: number
   resolvedModelLabel: number
   attemptCount: number
+  attachmentCount: number
   errorCode: number
   errorMessage: number
   startedAt: number
@@ -101,10 +106,12 @@ export type ModelRequestCountAggregateOutputType = {
 
 export type ModelRequestAvgAggregateInputType = {
   attemptCount?: true
+  attachmentCount?: true
 }
 
 export type ModelRequestSumAggregateInputType = {
   attemptCount?: true
+  attachmentCount?: true
 }
 
 export type ModelRequestMinAggregateInputType = {
@@ -120,6 +127,7 @@ export type ModelRequestMinAggregateInputType = {
   resolvedModelKey?: true
   resolvedModelLabel?: true
   attemptCount?: true
+  attachmentCount?: true
   errorCode?: true
   errorMessage?: true
   startedAt?: true
@@ -141,6 +149,7 @@ export type ModelRequestMaxAggregateInputType = {
   resolvedModelKey?: true
   resolvedModelLabel?: true
   attemptCount?: true
+  attachmentCount?: true
   errorCode?: true
   errorMessage?: true
   startedAt?: true
@@ -162,6 +171,7 @@ export type ModelRequestCountAggregateInputType = {
   resolvedModelKey?: true
   resolvedModelLabel?: true
   attemptCount?: true
+  attachmentCount?: true
   errorCode?: true
   errorMessage?: true
   startedAt?: true
@@ -270,6 +280,7 @@ export type ModelRequestGroupByOutputType = {
   resolvedModelKey: string | null
   resolvedModelLabel: string | null
   attemptCount: number
+  attachmentCount: number
   errorCode: string | null
   errorMessage: string | null
   startedAt: Date | null
@@ -314,6 +325,7 @@ export type ModelRequestWhereInput = {
   resolvedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   resolvedModelLabel?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   attemptCount?: Prisma.IntFilter<"ModelRequest"> | number
+  attachmentCount?: Prisma.IntFilter<"ModelRequest"> | number
   errorCode?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   errorMessage?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   startedAt?: Prisma.DateTimeNullableFilter<"ModelRequest"> | Date | string | null
@@ -338,6 +350,7 @@ export type ModelRequestOrderByWithRelationInput = {
   resolvedModelKey?: Prisma.SortOrderInput | Prisma.SortOrder
   resolvedModelLabel?: Prisma.SortOrderInput | Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
+  attachmentCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrderInput | Prisma.SortOrder
   errorMessage?: Prisma.SortOrderInput | Prisma.SortOrder
   startedAt?: Prisma.SortOrderInput | Prisma.SortOrder
@@ -365,6 +378,7 @@ export type ModelRequestWhereUniqueInput = Prisma.AtLeast<{
   resolvedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   resolvedModelLabel?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   attemptCount?: Prisma.IntFilter<"ModelRequest"> | number
+  attachmentCount?: Prisma.IntFilter<"ModelRequest"> | number
   errorCode?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   errorMessage?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   startedAt?: Prisma.DateTimeNullableFilter<"ModelRequest"> | Date | string | null
@@ -389,6 +403,7 @@ export type ModelRequestOrderByWithAggregationInput = {
   resolvedModelKey?: Prisma.SortOrderInput | Prisma.SortOrder
   resolvedModelLabel?: Prisma.SortOrderInput | Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
+  attachmentCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrderInput | Prisma.SortOrder
   errorMessage?: Prisma.SortOrderInput | Prisma.SortOrder
   startedAt?: Prisma.SortOrderInput | Prisma.SortOrder
@@ -418,6 +433,7 @@ export type ModelRequestScalarWhereWithAggregatesInput = {
   resolvedModelKey?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
   resolvedModelLabel?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
   attemptCount?: Prisma.IntWithAggregatesFilter<"ModelRequest"> | number
+  attachmentCount?: Prisma.IntWithAggregatesFilter<"ModelRequest"> | number
   errorCode?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
   errorMessage?: Prisma.StringNullableWithAggregatesFilter<"ModelRequest"> | string | null
   startedAt?: Prisma.DateTimeNullableWithAggregatesFilter<"ModelRequest"> | Date | string | null
@@ -436,6 +452,7 @@ export type ModelRequestCreateInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -460,6 +477,7 @@ export type ModelRequestUncheckedCreateInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -478,6 +496,7 @@ export type ModelRequestUpdateInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -502,6 +521,7 @@ export type ModelRequestUncheckedUpdateInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -523,6 +543,7 @@ export type ModelRequestCreateManyInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -541,6 +562,7 @@ export type ModelRequestUpdateManyMutationInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -562,6 +584,7 @@ export type ModelRequestUncheckedUpdateManyInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -593,6 +616,7 @@ export type ModelRequestCountOrderByAggregateInput = {
   resolvedModelKey?: Prisma.SortOrder
   resolvedModelLabel?: Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
+  attachmentCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrder
   errorMessage?: Prisma.SortOrder
   startedAt?: Prisma.SortOrder
@@ -603,6 +627,7 @@ export type ModelRequestCountOrderByAggregateInput = {
 
 export type ModelRequestAvgOrderByAggregateInput = {
   attemptCount?: Prisma.SortOrder
+  attachmentCount?: Prisma.SortOrder
 }
 
 export type ModelRequestMaxOrderByAggregateInput = {
@@ -618,6 +643,7 @@ export type ModelRequestMaxOrderByAggregateInput = {
   resolvedModelKey?: Prisma.SortOrder
   resolvedModelLabel?: Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
+  attachmentCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrder
   errorMessage?: Prisma.SortOrder
   startedAt?: Prisma.SortOrder
@@ -639,6 +665,7 @@ export type ModelRequestMinOrderByAggregateInput = {
   resolvedModelKey?: Prisma.SortOrder
   resolvedModelLabel?: Prisma.SortOrder
   attemptCount?: Prisma.SortOrder
+  attachmentCount?: Prisma.SortOrder
   errorCode?: Prisma.SortOrder
   errorMessage?: Prisma.SortOrder
   startedAt?: Prisma.SortOrder
@@ -649,6 +676,7 @@ export type ModelRequestMinOrderByAggregateInput = {
 
 export type ModelRequestSumOrderByAggregateInput = {
   attemptCount?: Prisma.SortOrder
+  attachmentCount?: Prisma.SortOrder
 }
 
 export type ModelRequestCreateNestedManyWithoutConversationInput = {
@@ -787,6 +815,7 @@ export type ModelRequestCreateWithoutConversationInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -809,6 +838,7 @@ export type ModelRequestUncheckedCreateWithoutConversationInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -858,6 +888,7 @@ export type ModelRequestScalarWhereInput = {
   resolvedModelKey?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   resolvedModelLabel?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   attemptCount?: Prisma.IntFilter<"ModelRequest"> | number
+  attachmentCount?: Prisma.IntFilter<"ModelRequest"> | number
   errorCode?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   errorMessage?: Prisma.StringNullableFilter<"ModelRequest"> | string | null
   startedAt?: Prisma.DateTimeNullableFilter<"ModelRequest"> | Date | string | null
@@ -876,6 +907,7 @@ export type ModelRequestCreateWithoutUserMessageInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -898,6 +930,7 @@ export type ModelRequestUncheckedCreateWithoutUserMessageInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -925,6 +958,7 @@ export type ModelRequestCreateWithoutAssistantMessageInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -947,6 +981,7 @@ export type ModelRequestUncheckedCreateWithoutAssistantMessageInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -1008,6 +1043,7 @@ export type ModelRequestCreateManyConversationInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -1026,6 +1062,7 @@ export type ModelRequestUpdateWithoutConversationInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1048,6 +1085,7 @@ export type ModelRequestUncheckedUpdateWithoutConversationInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1068,6 +1106,7 @@ export type ModelRequestUncheckedUpdateManyWithoutConversationInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1088,6 +1127,7 @@ export type ModelRequestCreateManyUserMessageInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -1108,6 +1148,7 @@ export type ModelRequestCreateManyAssistantMessageInput = {
   resolvedModelKey?: string | null
   resolvedModelLabel?: string | null
   attemptCount?: number
+  attachmentCount?: number
   errorCode?: string | null
   errorMessage?: string | null
   startedAt?: Date | string | null
@@ -1126,6 +1167,7 @@ export type ModelRequestUpdateWithoutUserMessageInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1148,6 +1190,7 @@ export type ModelRequestUncheckedUpdateWithoutUserMessageInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1168,6 +1211,7 @@ export type ModelRequestUncheckedUpdateManyWithoutUserMessageInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1186,6 +1230,7 @@ export type ModelRequestUpdateWithoutAssistantMessageInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1208,6 +1253,7 @@ export type ModelRequestUncheckedUpdateWithoutAssistantMessageInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1228,6 +1274,7 @@ export type ModelRequestUncheckedUpdateManyWithoutAssistantMessageInput = {
   resolvedModelKey?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   resolvedModelLabel?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   attemptCount?: Prisma.IntFieldUpdateOperationsInput | number
+  attachmentCount?: Prisma.IntFieldUpdateOperationsInput | number
   errorCode?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   errorMessage?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   startedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
@@ -1251,6 +1298,7 @@ export type ModelRequestSelect<ExtArgs extends runtime.Types.Extensions.Internal
   resolvedModelKey?: boolean
   resolvedModelLabel?: boolean
   attemptCount?: boolean
+  attachmentCount?: boolean
   errorCode?: boolean
   errorMessage?: boolean
   startedAt?: boolean
@@ -1275,6 +1323,7 @@ export type ModelRequestSelectCreateManyAndReturn<ExtArgs extends runtime.Types.
   resolvedModelKey?: boolean
   resolvedModelLabel?: boolean
   attemptCount?: boolean
+  attachmentCount?: boolean
   errorCode?: boolean
   errorMessage?: boolean
   startedAt?: boolean
@@ -1299,6 +1348,7 @@ export type ModelRequestSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.
   resolvedModelKey?: boolean
   resolvedModelLabel?: boolean
   attemptCount?: boolean
+  attachmentCount?: boolean
   errorCode?: boolean
   errorMessage?: boolean
   startedAt?: boolean
@@ -1323,6 +1373,7 @@ export type ModelRequestSelectScalar = {
   resolvedModelKey?: boolean
   resolvedModelLabel?: boolean
   attemptCount?: boolean
+  attachmentCount?: boolean
   errorCode?: boolean
   errorMessage?: boolean
   startedAt?: boolean
@@ -1331,7 +1382,7 @@ export type ModelRequestSelectScalar = {
   updatedAt?: boolean
 }
 
-export type ModelRequestOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "conversationId" | "userMessageId" | "assistantMessageId" | "idempotencyKey" | "requestFingerprint" | "status" | "provider" | "requestedModelKey" | "resolvedModelKey" | "resolvedModelLabel" | "attemptCount" | "errorCode" | "errorMessage" | "startedAt" | "completedAt" | "createdAt" | "updatedAt", ExtArgs["result"]["modelRequest"]>
+export type ModelRequestOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "conversationId" | "userMessageId" | "assistantMessageId" | "idempotencyKey" | "requestFingerprint" | "status" | "provider" | "requestedModelKey" | "resolvedModelKey" | "resolvedModelLabel" | "attemptCount" | "attachmentCount" | "errorCode" | "errorMessage" | "startedAt" | "completedAt" | "createdAt" | "updatedAt", ExtArgs["result"]["modelRequest"]>
 export type ModelRequestInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   conversation?: boolean | Prisma.ConversationDefaultArgs<ExtArgs>
   userMessage?: boolean | Prisma.MessageDefaultArgs<ExtArgs>
@@ -1377,6 +1428,10 @@ export type $ModelRequestPayload<ExtArgs extends runtime.Types.Extensions.Intern
      */
     resolvedModelLabel: string | null
     attemptCount: number
+    /**
+     * V1.2 I1:本次请求的附件份数。字节只活在内存(AttachmentStore),永不落库;0 = 纯文本
+     */
+    attachmentCount: number
     errorCode: string | null
     errorMessage: string | null
     startedAt: Date | null
@@ -1821,6 +1876,7 @@ export interface ModelRequestFieldRefs {
   readonly resolvedModelKey: Prisma.FieldRef<"ModelRequest", 'String'>
   readonly resolvedModelLabel: Prisma.FieldRef<"ModelRequest", 'String'>
   readonly attemptCount: Prisma.FieldRef<"ModelRequest", 'Int'>
+  readonly attachmentCount: Prisma.FieldRef<"ModelRequest", 'Int'>
   readonly errorCode: Prisma.FieldRef<"ModelRequest", 'String'>
   readonly errorMessage: Prisma.FieldRef<"ModelRequest", 'String'>
   readonly startedAt: Prisma.FieldRef<"ModelRequest", 'DateTime'>

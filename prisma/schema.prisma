@@ -62,6 +62,8 @@ model ModelRequest {
   /// M1:实际执行模型的展示名(如 "3.6 Flash";M1 仅落库,M2 写入)
   resolvedModelLabel   String?
   attemptCount         Int      @default(0)
+  /// V1.2 I1:本次请求的附件份数。字节只活在内存(AttachmentStore),永不落库;0 = 纯文本
+  attachmentCount      Int      @default(0)
   errorCode            String?
   errorMessage         String?
   startedAt            DateTime?

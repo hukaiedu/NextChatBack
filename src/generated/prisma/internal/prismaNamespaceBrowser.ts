@@ -111,6 +111,7 @@ export const ModelRequestScalarFieldEnum = {
   resolvedModelKey: 'resolvedModelKey',
   resolvedModelLabel: 'resolvedModelLabel',
   attemptCount: 'attemptCount',
+  attachmentCount: 'attachmentCount',
   errorCode: 'errorCode',
   errorMessage: 'errorMessage',
   startedAt: 'startedAt',

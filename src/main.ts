@@ -26,7 +26,7 @@ async function main(): Promise<void> {
     logger,
   });
 
-  const { app, scheduler, recovery, sse } = createApp({
+  const { app, scheduler, recovery, sse, attachmentStore } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
@@ -46,7 +46,8 @@ async function main(): Promise<void> {
     streaming: { updateIntervalMs: env.STREAMING_UPDATE_INTERVAL_MS },
   });
 
-  // prd §12.1:残留 PROCESSING 先判 FAILED(禁止自动重发),PENDING 留给 Scheduler 首轮扫描
+  // prd §12.1 + V1.2 §十三:残留 PROCESSING/CANCELLING 与带附件的 PENDING 先判 FAILED(禁止自动重发),
+  // 纯文本 PENDING 留给 Scheduler 首轮扫描续跑
   await recovery.run();
   scheduler.start();
 
@@ -64,9 +65,11 @@ async function main(): Promise<void> {
     }
     shuttingDown = true;
     logger.info({ signal }, "shutting down");
-    // 关闭顺序:停 Scheduler → 结束 SSE → 停止 HTTP → 关 Browser → disconnect Prisma
+    // 关闭顺序:停 Scheduler → 释放附件 → 结束 SSE → 停止 HTTP → 关 Browser → disconnect Prisma
     // Scheduler 先停:在飞的 Request 留在 PROCESSING/CANCELLING,由下次启动的 recovery 落 FAILED
+    // AttachmentStore 紧随其后:撤掉孤儿清理定时器,否则它可能在 $disconnect 之后才发起查询
     scheduler.stop();
+    attachmentStore.dispose();
     sse.closeAll();
     // 空闲 keep-alive 立即断开(in-flight 请求不受影响),否则 server.close() 要等客户端保活超时
     server.closeIdleConnections();

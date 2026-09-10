@@ -4,7 +4,7 @@ import type { Express } from "express";
 import { errorHandler } from "./common/middleware/error-handler.js";
 import { requestId } from "./common/middleware/request-id.js";
 import type { Logger } from "./common/logger/logger.js";
-import { HEALTH_PATH } from "./config/constants.js";
+import { ATTACHMENT_BODY_LIMIT, HEALTH_PATH, MESSAGES_BODY_PATH } from "./config/constants.js";
 import type { PrismaClient } from "./generated/prisma/client.js";
 import { createHealthRouter } from "./modules/health/health.controller.js";
 import type { HealthProbe } from "./modules/health/health.controller.js";
@@ -21,6 +21,7 @@ import { createConversationRouter } from "./modules/conversation/conversation.co
 import { MessageRepository } from "./modules/message/message.repository.js";
 import { MessageService } from "./modules/message/message.service.js";
 import { createMessageRouter } from "./modules/message/message.controller.js";
+import { AttachmentStore } from "./modules/request/request.attachment-store.js";
 import { RequestRepository } from "./modules/request/request.repository.js";
 import { RequestService } from "./modules/request/request.service.js";
 import { RequestScheduler } from "./modules/request/request.scheduler.js";
@@ -82,6 +83,8 @@ export interface AppHandle {
   cancellation: CancellationRegistry;
   /** M3:执行器实例(测试直接驱动 execute,精确控制取消时点) */
   executor: GeminiPromptService;
+  /** V1.2 I1:附件内存容器(停机要 dispose;测试断言 liveBytes 不变量) */
+  attachmentStore: AttachmentStore;
 }
 
 export function createApp(deps: AppDeps): AppHandle {
@@ -94,6 +97,16 @@ export function createApp(deps: AppDeps): AppHandle {
 
   app.disable("x-powered-by");
   app.use(requestId());
+
+  // V1.2 I1 §三:带图请求的 body 上限只在 POST messages 这一条精确路径上放宽到 14MB,
+  // 且必须挂在全局默认 parser **之前** —— 请求流只能读一次,反过来则 100KB 上限先掐掉大图。
+  // 判据用锚定正则而不是 app.use(path, …):挂载是前缀匹配,会把放宽额度漏给 /messages/extra。
+  const messagesJson = express.json({ limit: ATTACHMENT_BODY_LIMIT });
+  app.use((req, res, next) =>
+    req.method === "POST" && MESSAGES_BODY_PATH.test(req.path)
+      ? messagesJson(req, res, next)
+      : next(),
+  );
   app.use(express.json());
 
   // §7:unsafe method Origin 校验,始终挂载(不随 AUTH_ENABLED 关闭)
@@ -122,6 +135,12 @@ export function createApp(deps: AppDeps): AppHandle {
   const messageRepo = new MessageRepository();
   const requestRepo = new RequestRepository();
   const events = new RequestEventEmitter();
+  // V1.2 I1:附件字节只在进程内存活,生命周期 = reserve(占位) → drop(执行结束/清理)
+  const attachmentStore = new AttachmentStore({
+    prisma: deps.prisma,
+    requestRepo,
+    logger: deps.logger,
+  });
 
   const conversationService = new ConversationService(deps.prisma, conversationRepo, requestRepo);
   const cancellation = new CancellationRegistry();
@@ -138,6 +157,7 @@ export function createApp(deps: AppDeps): AppHandle {
     messageRepo,
     conversationRepo,
     requestRepo,
+    attachmentStore,
     // scheduler 在下方创建:回调只在新 Request 提交后才运行,前向引用安全
     { onRequestCreated: () => scheduler.notify() },
   );
@@ -168,6 +188,7 @@ export function createApp(deps: AppDeps): AppHandle {
     logger: deps.logger,
     cancellation,
     pageLock,
+    attachmentStore,
     options: {
       scanIntervalMs: deps.scheduler?.scanIntervalMs,
       executionTimeoutMs: deps.scheduler?.executionTimeoutMs,
@@ -207,5 +228,14 @@ export function createApp(deps: AppDeps): AppHandle {
     scheduler.start();
   }
 
-  return { app, scheduler, recovery, sse, events, cancellation, executor: geminiPromptService };
+  return {
+    app,
+    scheduler,
+    recovery,
+    sse,
+    events,
+    cancellation,
+    executor: geminiPromptService,
+    attachmentStore,
+  };
 }

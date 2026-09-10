@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { PrismaClient } from "../../generated/prisma/client.js";
 import type { MessageModel, ModelRequestModel } from "../../generated/prisma/models.js";
 import { AppError } from "../../common/errors/app-error.js";
@@ -6,7 +8,10 @@ import { computeRequestFingerprint } from "../../common/utils/fingerprint.js";
 import { isUniqueViolation, uniqueViolationTargets } from "../../common/utils/prisma-error.js";
 import { detectTriggerAbort } from "../../common/utils/trigger-abort.js";
 import { ConversationRepository } from "../conversation/conversation.repository.js";
+import type { AttachmentStore } from "../request/request.attachment-store.js";
 import { RequestRepository } from "../request/request.repository.js";
+import { computeAttachmentsDigest, parseAttachments } from "./attachment.js";
+import type { RawAttachment } from "./attachment.js";
 import { MessageRepository } from "./message.repository.js";
 import {
   USER_MESSAGE_STATUS,
@@ -26,6 +31,7 @@ export class MessageService {
     private readonly messageRepo: MessageRepository,
     private readonly conversationRepo: ConversationRepository,
     private readonly requestRepo: RequestRepository,
+    private readonly attachmentStore: AttachmentStore,
     private readonly requestCreationListener?: RequestCreationListener,
   ) {}
 
@@ -37,15 +43,26 @@ export class MessageService {
    * - 参与幂等指纹(省略 = V1 语义,与旧指纹逐字节一致);偏好永不参与指纹
    * - requestedModelKey 快照 = 显式提交 ?? 会话偏好 ?? null(创建后不再变更)
    * - 同事务把 Conversation.preferredModelKey 同步为该键;省略则绝不触碰偏好
+   *
+   * V1.2 I1:附件按固定顺序处理 —— 复核 → 指纹 → 幂等预检 → 占位 → 事务 → 确认 → 通知。
+   * 幂等预检必须在 reserve 之前:同 Key 重放要原样返回既有 Request,既不新建 slot,
+   * 也不碰既有 slot(ATT-IDEM-01)。纯文本(attachments 缺省)一条附件路径都不走。
    */
   async sendMessage(
     conversationId: string,
     rawContent: string,
     idempotencyKey: string,
     modelKey?: string,
+    rawAttachments?: RawAttachment[],
   ): Promise<SendMessageResult> {
     const content = rawContent.trim();
-    const fingerprint = computeRequestFingerprint(conversationId, content, modelKey);
+    const attachments = parseAttachments(rawAttachments);
+    const fingerprint = computeRequestFingerprint(
+      conversationId,
+      content,
+      modelKey,
+      attachments === undefined ? undefined : computeAttachmentsDigest(attachments),
+    );
 
     // 幂等预检(同 Key 常见重复请求直接返回,避免无谓事务)
     const existing = await this.requestRepo.findByIdempotencyKey(this.prisma, idempotencyKey);
@@ -53,6 +70,13 @@ export class MessageService {
       return this.resolveIdempotent(existing, conversationId, fingerprint);
     }
 
+    // 附件字节只进内存:先按预分配 id 占位,再让同一条 id 落库,两侧才对得上。
+    // reserve 抛错(容量不足 / id 冲突)时 slot 一个都没建,下面 finally 自然 no-op。
+    let requestId: string | undefined;
+    if (attachments !== undefined) {
+      requestId = randomUUID();
+      this.attachmentStore.reserve(requestId, attachments);
+    }
     try {
       const result = await this.prisma.$transaction(async (tx) => {
         // 1. Conversation 存在 + ACTIVE
@@ -98,6 +122,8 @@ export class MessageService {
           position: start + 1,
         });
         const request = await this.requestRepo.create(tx, {
+          // 附件路径必须沿用占位时的 id:AttachmentStore 与数据库靠它对齐(纯文本传 undefined = 用默认 id)
+          id: requestId,
           conversationId,
           userMessageId: userMessage.id,
           assistantMessageId: assistantMessage.id,
@@ -106,6 +132,8 @@ export class MessageService {
           status: "PENDING",
           provider: conversation.provider,
           requestedModelKey: modelKey ?? conversation.preferredModelKey ?? null,
+          // 只落份数;字节在内存
+          attachmentCount: attachments?.length ?? 0,
         });
 
         // 4. 显式提交模型键 → 同事务同步会话偏好;省略则只刷新 updatedAt,偏好绝不变动
@@ -117,6 +145,12 @@ export class MessageService {
 
         return { request, userMessage, assistantMessage, deduplicated: false };
       });
+      // RESERVED → READY:事务已提交,字节就此交给执行链;本地所有权随即摘掉,
+      // 释放权转给 Scheduler 的 finally。交接必须早于 notify,否则 Scheduler 抢在 READY 之前 take。
+      if (requestId !== undefined) {
+        this.attachmentStore.attach(requestId);
+        requestId = undefined;
+      }
       if (!result.deduplicated) {
         // 事务已提交才通知;幂等命中(deduplicated)不重复通知
         this.requestCreationListener?.onRequestCreated(result.request.id);
@@ -159,6 +193,12 @@ export class MessageService {
         );
       }
       throw err;
+    } finally {
+      // 仍持有 requestId = 事务没成功,或竞态已让位给既有 Request(ATT-IDEM-02)。
+      // 两种情况都必须收回本次占位;让位时收的是自己那个新 id,既有 Request 的 slot 分毫不动。
+      if (requestId !== undefined) {
+        this.attachmentStore.drop(requestId);
+      }
     }
   }
 
