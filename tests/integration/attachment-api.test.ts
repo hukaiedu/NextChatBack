@@ -234,6 +234,77 @@ describe("API 附件契约(§18)", () => {
   });
 });
 
+/**
+ * I1.2:纯图片消息 —— content 空/全空白 + 有附件均放行,DB 落 canonical ""(不伪造文本);
+ * 无附件(缺省或空数组)的纯空请求仍在 schema 层 400,零副作用。
+ */
+describe("API 纯图片契约(I1.2)", () => {
+  async function sendContent(
+    content: string,
+    items: RawAttachment[] | undefined,
+    key: string,
+  ): Promise<{ status: number; body: SendBody | ErrorBody }> {
+    const res = await sendMessage(ctx.baseUrl, conversationId, content, key, undefined, items);
+    return { status: res.status, body: (await res.json()) as SendBody | ErrorBody };
+  }
+
+  it("PURE-API-01 content=\"\" + 1 张合法 PNG → 202,attachmentCount=1,USER content=\"\"", async () => {
+    const items = [attachment("image/png", 2_048)];
+    const { status, body } = await sendContent("", items, "pure-api-01");
+    expect(status).toBe(202);
+    const request = (body as SendBody).data.request;
+    expect(request.attachmentCount).toBe(1);
+
+    const user = await ctx.prisma.message.findFirstOrThrow({
+      where: { conversationId, role: "USER" },
+    });
+    expect(user.content).toBe("");
+    expect(ctx.attachmentStore.stats().liveBytes).toBe(decodedBytes(items));
+    expect(ctx.attachmentStore.stats().slots).toEqual([
+      { requestId: request.id, state: "READY", byteSize: decodedBytes(items) },
+    ]);
+    expectAttachmentInvariant(ctx.attachmentStore);
+  });
+
+  it("PURE-API-02 content=\"   \\n\\t \" + 1 PNG → 202,Service canonical trim 后落库 content=\"\"", async () => {
+    const { status } = await sendContent("   \n\t ", [attachment("image/jpeg", 1_024)], "pure-api-02");
+    expect(status).toBe(202);
+
+    const user = await ctx.prisma.message.findFirstOrThrow({
+      where: { conversationId, role: "USER" },
+    });
+    expect(user.content).toBe("");
+    // 全空白变体与 content="" 等价,绝不落 "[图片]" 之类伪造文本
+    expect(user.content).not.toMatch(/图片|image/i);
+  });
+
+  it("PURE-API-03 content=\"\" 且无 attachments → 400 VALIDATION_ERROR 且零副作用", async () => {
+    const { status, body } = await sendContent("", undefined, "pure-api-03");
+    expect(status).toBe(400);
+    expect((body as ErrorBody).error.code).toBe("VALIDATION_ERROR");
+    await expectRejectedCleanly("pure-api-03");
+  });
+
+  it("PURE-API-04 content=\"\" + attachments=[] → 400(空数组不算附件)", async () => {
+    const { status, body } = await sendContent("", [], "pure-api-04");
+    expect(status).toBe(400);
+    expect((body as ErrorBody).error.code).toBe("VALIDATION_ERROR");
+    await expectRejectedCleanly("pure-api-04");
+  });
+
+  it("PURE-API-05 content=\"hello\" + attachments=[] → 原有纯文本行为:attachmentCount=0 且不 reserve", async () => {
+    const { status, body } = await sendContent("hello", [], "pure-api-05");
+    expect(status).toBe(202);
+    expect((body as SendBody).data.request.attachmentCount).toBe(0);
+    expect(ctx.attachmentStore.stats()).toEqual({ slotCount: 0, liveBytes: 0, slots: [] });
+
+    const user = await ctx.prisma.message.findFirstOrThrow({
+      where: { conversationId, role: "USER" },
+    });
+    expect(user.content).toBe("hello");
+  });
+});
+
 describe("body limit(§三:只有 messages 一条路径放宽到 14MB)", () => {
   async function postJson(
     path: string,

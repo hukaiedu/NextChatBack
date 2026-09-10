@@ -216,13 +216,17 @@ export class GeminiWebAdapter implements GeminiAdapter {
 
     // I2-B:带附件时先复位残留 → 状态驱动展开 → 一次注入全部图片 → 精确等就绪 → 再填文字。
     // 顺序是刻意的:先 fill 再跑面板协议会让 UI 状态互相影响(§17)。
+    // I1.2:纯图片(prompt === "")没有文字要写,跳过 fill("") —— 它只会触发无意义的
+    // contenteditable 事件与 rerender 窗口;Enter 前的附件断言照常执行。
     const protocol = this.attachmentProtocol(page);
     const attachments = input.attachments ?? [];
     if (attachments.length > 0) {
       await ensureNoForeignComposerAttachments(protocol);
       await ensureAttachmentInput(protocol);
       await injectAttachments(protocol, attachments);
-      await this.fillPrompt(page, input.prompt);
+      if (input.prompt !== "") {
+        await this.fillPrompt(page, input.prompt);
+      }
       await assertComposerExpectedBeforeSend(protocol, attachments.length);
     } else {
       // 纯文本唯一新增守卫(I0 R1):别人的/上一轮的残留附件不得跟着本次文字发出去

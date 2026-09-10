@@ -587,6 +587,68 @@ describe("I2-B Final Fix:快照读取失败 fail-closed", () => {
   });
 });
 
+/**
+ * I1.2:纯图片(prompt === "")不得执行无意义的 fill("") —— 那只会触发 contenteditable
+ * 事件与 rerender 窗口;注入 → [跳过 fill] → Enter 前断言 → Enter 是正式生产语义。
+ */
+describe("I1.2 纯图片路径:跳过 fill(\"\")", () => {
+  it("PURE-PROVIDER-01:prompt=\"\" + 1 图 → upload → Enter;fill=0 / Enter=1", async () => {
+    const { adapter, page } = await setup({
+      attachment: { ...INPUT_READY },
+      ...acceptedSend(),
+    });
+
+    const result = await adapter.runPrompt(
+      runInput({ prompt: "", attachments: [imageAttachment("red.png")] }),
+    );
+
+    expect(result.answer).toBe("收到");
+    expect(page.uploadCalls).toHaveLength(1);
+    expect(page.fillCalls).toEqual([]); // 没有文字要写:fill("") 一次都不许出现
+    expect(page.pressCalls).toHaveLength(1);
+    expect(page.events).toEqual(["upload", "press:Enter"]);
+  });
+
+  it("PURE-PROVIDER-01B:纯图路径 Enter 前断言不被跳过(读失败 ⇒ Enter=0)", async () => {
+    // 纯图路径注入后的读取次序:①就绪轮询 ②Enter 前断言(fill 已跳过)。预算 1
+    // 让就绪读成功、失败落在 Enter 前断言上;若断言被跳过,Enter 会在无断言的情况下发生
+    const { adapter, page } = await setup({
+      attachment: { ...INPUT_READY, failSnapshotAfterUpload: 1 },
+    });
+
+    const err = await adapter
+      .runPrompt(runInput({ prompt: "", attachments: [imageAttachment("red.png")] }))
+      .then(() => null)
+      .catch((e: unknown) => e);
+
+    expect(err).toMatchObject({
+      code: ErrorCodes.PROVIDER_ATTACHMENT_FAILED,
+      message: expect.stringContaining("snapshot read failed"),
+    });
+    expect(page.uploadCalls).toHaveLength(1);
+    expect(page.fillCalls).toEqual([]);
+    expect(page.pressCalls).toEqual([]);
+  });
+
+  it("PURE-PROVIDER-02:prompt 非空 + 1 图 → upload → fill → 断言 → Enter(I2-B 路径零回归)", async () => {
+    const { adapter, page } = await setup({
+      attachment: { ...INPUT_READY },
+      ...acceptedSend(),
+    });
+
+    const result = await adapter.runPrompt(
+      runInput({ prompt: "这是啥", attachments: [imageAttachment("a.png")] }),
+    );
+
+    expect(result.answer).toBe("收到");
+    expect(page.events).toEqual(["upload", "fill", "press:Enter"]);
+    expect(page.fillCalls).toEqual([
+      { selector: GEMINI_SELECTORS.quillComposer, value: "这是啥" },
+    ]);
+    expect(page.pressCalls).toHaveLength(1);
+  });
+});
+
 describe("I2-B 错误码与 selector 冻结", () => {
   it("附件错误码映射 502 / 504", () => {
     expect(ERROR_CODE_HTTP_STATUS.PROVIDER_ATTACHMENT_FAILED).toBe(502);

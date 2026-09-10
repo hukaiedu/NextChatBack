@@ -48,7 +48,10 @@ export interface GeminiAttachmentInput {
 
 /** 一次 Prompt 执行的输入 */
 export interface GeminiPromptRunInput {
-  /** 要发送的 Prompt(已 trim 非空) */
+  /**
+   * 要发送的 Prompt(已 canonical trim)。
+   * 带附件的 pure-image 请求允许为空字符串 —— 此时不写入输入框,直接走注入 → Enter。
+   */
   prompt: string;
   /**
    * I2-B:已通过 I1 复核的图片附件(undefined = 纯文本)。

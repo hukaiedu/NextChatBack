@@ -164,6 +164,46 @@ describe("正式发送链路:POST /messages → Scheduler → GeminiPromptServic
     expect("attachments" in adapter.runCalls[0]!).toBe(false);
   });
 
+  it("PURE-PIPE-01:纯图片贯通全链 —— prompt=\"\" + 1 图原样到 Provider 且 SUCCESS", async () => {
+    await mount({ answer: "看到了" });
+    const conv = await createConversation(ctx.baseUrl);
+    const items = [attachment("image/png", 200, "only.png")];
+
+    const res = await sendMessage(ctx.baseUrl, conv.id, "", "pure-pipe-01", undefined, items);
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as SendBody;
+    expect(body.data.userMessage.content).toBe("");
+
+    const terminal = await waitFor(
+      async () => {
+        const row = await ctx.prisma.modelRequest.findUnique({
+          where: { id: body.data.request.id },
+        });
+        return row && ["SUCCESS", "FAILED", "TIMEOUT", "CANCELLED"].includes(row.status)
+          ? { status: row.status, attachmentCount: row.attachmentCount }
+          : null;
+      },
+      3000,
+      `request ${body.data.request.id} terminal`,
+    );
+
+    expect(terminal.status).toBe("SUCCESS");
+    expect(terminal.attachmentCount).toBe(1);
+    // MessageService → AttachmentStore → Scheduler → GeminiPromptService → Adapter:
+    // prompt 是 canonical ""、附件 1 份一次到位
+    expect(adapter.runCalls).toHaveLength(1);
+    expect(adapter.runCalls[0]).toMatchObject({
+      prompt: "",
+      attachments: [{ name: "only.png", mimeType: "image/png", byteLength: 200 }],
+    });
+
+    // 不伪造文本:USER Message 落库就是 ""
+    const user = await ctx.prisma.message.findFirstOrThrow({ where: { role: "USER" } });
+    expect(user.content).toBe("");
+    const assistant = await ctx.prisma.message.findFirstOrThrow({ where: { role: "ASSISTANT" } });
+    expect(assistant.content).toBe("看到了");
+  });
+
   it("§16:URL 在回答完成之前就已落库(beforeAnswer 钩子处读库验证)", async () => {
     let targetId = "";
     const seenBeforeAnswer: Array<string | null> = [];

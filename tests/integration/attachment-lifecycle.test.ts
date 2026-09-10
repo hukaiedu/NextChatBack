@@ -6,6 +6,7 @@ import { createLogger } from "../../src/common/logger/logger.js";
 import type { ModelRequestModel } from "../../src/generated/prisma/models.js";
 import type { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
 import { GeminiWebAdapter } from "../../src/providers/gemini/gemini.adapter.js";
+import { GEMINI_SELECTORS } from "../../src/providers/gemini/gemini.selectors.js";
 import type { AttachmentFile, RawAttachment } from "../../src/modules/message/attachment.js";
 import type { PromptExecutionInput } from "../../src/modules/provider/gemini-prompt.service.js";
 import {
@@ -220,6 +221,80 @@ describe("幂等 × 附件(§八)", () => {
     expect(ctx.attachmentStore.stats().slots).toEqual([
       { requestId: first.data.request.id, state: "READY", byteSize: decodedBytes([x, y]) },
     ]);
+    expectAttachmentInvariant(ctx.attachmentStore);
+  });
+});
+
+/**
+ * I1.2:纯图片(content 空/全空白 + 附件)沿用同一套幂等语义 —— 靠的是 Service
+ * 在指纹之前已 canonical trim,而不是改指纹算法(PURE-IDEM-03 就是这条的证明)。
+ */
+describe("纯图片幂等(I1.2)", () => {
+  async function sendPure(content: string, items: RawAttachment[], key: string): Promise<SendBody> {
+    const res = await sendMessage(ctx.baseUrl, conversationId, content, key, undefined, items);
+    return (await res.json()) as SendBody;
+  }
+
+  it("PURE-IDEM-01 同 Key 同纯图重放:deduplicated=true、同 id、store 逐字段不变", async () => {
+    await mount({}, false);
+    const items = [attachment("image/png", 3_000)];
+    const first = await sendPure("", items, "pure-idem-01");
+    const requestId = first.data.request.id;
+    expect(first.data.deduplicated).toBe(false);
+    const afterFirst = ctx.attachmentStore.stats();
+    expect(afterFirst.slots).toEqual([
+      { requestId, state: "READY", byteSize: decodedBytes(items) },
+    ]);
+
+    const second = await sendPure("", items, "pure-idem-01");
+    expect(second.data.deduplicated).toBe(true);
+    expect(second.data.request.id).toBe(requestId);
+
+    // 没有第二个 slot,liveBytes 不增加
+    expect(ctx.attachmentStore.stats()).toEqual(afterFirst);
+    expect(await ctx.prisma.modelRequest.count()).toBe(1);
+    expectAttachmentInvariant(ctx.attachmentStore);
+  });
+
+  it("PURE-IDEM-02 同 Key 换图(同为纯图):409 IDEMPOTENCY_KEY_REUSED,临时占位回收、赢家 slot 不动", async () => {
+    await mount({}, false);
+    const first = await sendPure("", [attachment("image/png", 1_000)], "pure-idem-02");
+    const before = ctx.attachmentStore.stats();
+    expect(before.slotCount).toBe(1);
+
+    const res = await sendMessage(
+      ctx.baseUrl,
+      conversationId,
+      "",
+      "pure-idem-02",
+      undefined,
+      [attachment("image/jpeg", 2_000)],
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      ErrorCodes.IDEMPOTENCY_KEY_REUSED,
+    );
+
+    expect(ctx.attachmentStore.stats()).toEqual(before);
+    expect(ctx.attachmentStore.stats().slots[0]!.requestId).toBe(first.data.request.id);
+    expect(await ctx.prisma.modelRequest.count()).toBe(1);
+    expectAttachmentInvariant(ctx.attachmentStore);
+  });
+
+  it("PURE-IDEM-03 \"   \" + 图 ≡ \"\" + 同图:canonical trim 发生在指纹之前 → deduplicated", async () => {
+    await mount({}, false);
+    const items = [attachment("image/png", 900)];
+    const first = await sendPure("   ", items, "pure-idem-03");
+    expect(first.data.deduplicated).toBe(false);
+    // Service canonical trim 后才落库:第一次请求的 USER content 就是 ""
+    const user = await ctx.prisma.message.findFirstOrThrow({
+      where: { conversationId, role: "USER" },
+    });
+    expect(user.content).toBe("");
+
+    const second = await sendPure("", items, "pure-idem-03");
+    expect(second.data.deduplicated).toBe(true);
+    expect(second.data.request.id).toBe(first.data.request.id);
     expectAttachmentInvariant(ctx.attachmentStore);
   });
 });
@@ -439,6 +514,61 @@ describe("Scheduler 附件守卫(§十)与释放(§十一)", () => {
     driver.throwOnLaunch = null;
     await ctx.scheduler!.runOnce();
     expect((await waitForTerminal(sent.data.request.id)).status).toBe("SUCCESS");
+    expect(ctx.attachmentStore.stats()).toEqual(EMPTY_STORE);
+  });
+});
+
+/**
+ * I1.2 纯文本零回归:真 Adapter 下逐动作锁定 —— 1 fill / 1 Enter、容器零接触;
+ * 纯空请求仍在 schema 层 400,绝不能让空请求一路跑到 Provider。
+ */
+describe("纯文本零回归(I1.2)", () => {
+  const CONVERSATION_URL = "https://gemini.google.com/app/f1e2d3c4b5a69788";
+
+  it("PURE-REG-01 content=\"hello\" 无 attachments:行为与 I1/I2-B 前一致,纯空请求不越 schema", async () => {
+    await mount({}, false, true);
+    // 真 Adapter 会真的驱动 FakePage:给发送一个可被页面接受的剧本
+    driver.pageScript = {
+      afterSend: {
+        url: CONVERSATION_URL,
+        domCounts: {
+          [GEMINI_SELECTORS.userTurn]: 1,
+          [GEMINI_SELECTORS.turnShell]: 1,
+          [GEMINI_SELECTORS.answer]: 1,
+        },
+        answerTexts: ["收到"],
+      },
+    };
+    const takes = spyTake();
+
+    const res = await sendMessage(ctx.baseUrl, conversationId, "hello", "pure-reg-01");
+    expect(res.status).toBe(202);
+    await ctx.scheduler!.runOnce();
+
+    const row = await ctx.prisma.modelRequest.findFirstOrThrow({
+      where: { idempotencyKey: "pure-reg-01" },
+    });
+    expect(row.status).toBe("SUCCESS");
+    expect(row.attachmentCount).toBe(0);
+    expect(takes).toEqual([]); // 零份数完全不访问容器
+    expect(ctx.attachmentStore.stats()).toEqual(EMPTY_STORE);
+
+    const page = driver.latestContext?.lastPage ?? null;
+    expect(page, "真 Adapter 应已驱动 FakePage,否则 fill 断言是空断言").not.toBeNull();
+    expect(page!.fillCalls).toEqual([
+      { selector: GEMINI_SELECTORS.quillComposer, value: "hello" },
+    ]);
+    expect(page!.pressCalls).toHaveLength(1);
+    expect(page!.uploadCalls).toEqual([]);
+
+    // 纯空请求(无 attachments)仍在 schema 层 400 —— Provider 一个动作都不该新增
+    const empty = await sendMessage(ctx.baseUrl, conversationId, "", "pure-reg-01-empty");
+    expect(empty.status).toBe(400);
+    expect(((await empty.json()) as { error: { code: string } }).error.code).toBe(
+      ErrorCodes.VALIDATION_ERROR,
+    );
+    expect(page!.fillCalls).toHaveLength(1);
+    expect(page!.pressCalls).toHaveLength(1);
     expect(ctx.attachmentStore.stats()).toEqual(EMPTY_STORE);
   });
 });
