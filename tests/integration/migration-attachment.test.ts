@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { isUniqueViolation } from "../../src/common/utils/prisma-error.js";
+import { isUniqueViolation, uniqueViolationInfo } from "../../src/common/utils/prisma-error.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
@@ -66,15 +66,6 @@ async function seedLegacyRequest(
         'fp','PENDING','GEMINI_WEB',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
   );
   return { requestId, conversationId: conversation.id };
-}
-
-/** driver adapter 的 P2002 冲突列:meta.driverAdapterError.cause.constraint.fields */
-function conflictFields(err: unknown): string[] {
-  const cause = (
-    (err as { meta?: { driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } } })
-      ?.meta?.driverAdapterError?.cause?.constraint?.fields
-  ) as unknown;
-  return Array.isArray(cause) ? cause.map(String) : [];
 }
 
 describe("attachmentCount 迁移(§五)", () => {
@@ -150,9 +141,8 @@ describe("attachmentCount 迁移(§五)", () => {
       .catch((caught: unknown) => caught);
 
     expect(isUniqueViolation(err)).toBe(true);
-    // driver adapter 的 P2002 不带索引名,真实冲突列在 meta.driverAdapterError.cause.constraint.fields。
-    // ModelRequest 上单列 conversationId 的唯一约束只有那条部分活动索引,列名即可锁定它。
-    expect(conflictFields(err)).toEqual(["conversationId"]);
+    // adapter 只报列名:ModelRequest 上单列 conversationId 的唯一约束只有那条活动态部分索引
+    expect(uniqueViolationInfo(err).fields).toEqual(["conversationId"]);
     expect(
       await ctx.prisma.modelRequest.count({
         where: { conversationId, status: { in: ["PENDING", "PROCESSING", "CANCELLING"] } },

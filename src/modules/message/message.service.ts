@@ -5,7 +5,8 @@ import type { MessageModel, ModelRequestModel } from "../../generated/prisma/mod
 import { AppError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
 import { computeRequestFingerprint } from "../../common/utils/fingerprint.js";
-import { isUniqueViolation, uniqueViolationTargets } from "../../common/utils/prisma-error.js";
+import { isUniqueViolation, uniqueViolationInfo } from "../../common/utils/prisma-error.js";
+import type { UniqueViolationInfo } from "../../common/utils/prisma-error.js";
 import { detectTriggerAbort } from "../../common/utils/trigger-abort.js";
 import { ConversationRepository } from "../conversation/conversation.repository.js";
 import type { AttachmentStore } from "../request/request.attachment-store.js";
@@ -157,19 +158,21 @@ export class MessageService {
       }
       return result;
     } catch (err) {
-      // 数据库级唯一约束兜底(并发竞态):
-      // - uk_active_request_per_conversation → 同会话活动 Request
-      // - idempotencyKey 唯一 → 并发同 Key,按幂等规则重查处理
+      // 数据库级唯一约束兜底(并发下事务外预检读到的是对方提交之前的快照):
+      // driver adapter 不报索引名,只报归属 + 冲突列,所以分类必须按精确列集合做,
+      // 不能让 ModelRequest 的单列冲突与 Message(conversationId,position) 互相冒充。
+      // - ModelRequest(conversationId) = 活动态部分索引 → 同会话已有 Request
+      // - ModelRequest(idempotencyKey) → 并发同 Key,按幂等规则重查处理
       if (isUniqueViolation(err)) {
-        const targets = uniqueViolationTargets(err);
-        if (targets.some((t) => t.includes("uk_active_request_per_conversation"))) {
+        const violation = uniqueViolationInfo(err);
+        if (isModelRequestColumn(violation, "conversationId")) {
           throw new AppError(
             ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
             "Conversation already has a request in progress",
             err,
           );
         }
-        if (targets.some((t) => t.includes("idempotencyKey"))) {
+        if (isModelRequestColumn(violation, "idempotencyKey")) {
           const winner = await this.requestRepo.findByIdempotencyKey(this.prisma, idempotencyKey);
           if (winner) {
             return this.resolveIdempotent(winner, conversationId, fingerprint);
@@ -309,4 +312,18 @@ function decodeMessageCursor(raw: string): number {
     throw new AppError(ErrorCodes.VALIDATION_ERROR, "Invalid cursor");
   }
   return value.p;
+}
+
+/**
+ * 冲突是否恰好落在 ModelRequest 的这一列上。
+ *
+ * 精确到「只有这一列」是刻意的:Message 的复合唯一会报 ["conversationId","position"],
+ * 用 includes 就把它洗成了「会话已有请求在进行」这种看似合理的业务 409。
+ */
+function isModelRequestColumn(violation: UniqueViolationInfo, column: string): boolean {
+  return (
+    (violation.modelName ?? violation.table) === "ModelRequest" &&
+    violation.fields.length === 1 &&
+    violation.fields[0] === column
+  );
 }
