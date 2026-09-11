@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { ATTACHMENT_TYPES, attachment } from "../attachment-fixtures.js";
 import { createConversation, sendMessage, setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
@@ -532,5 +533,182 @@ describe("Message API pagination (PAG-2)", () => {
 
     expect(pages).toHaveLength(3);
     expect(pages.every((p) => p.meta.totalCount === 120)).toBe(true);
+  });
+});
+
+describe("Message API attachmentCount (I3.5)", () => {
+  let ctx: TestContext;
+
+  beforeAll(async () => {
+    ctx = await setupTestContext();
+  });
+
+  beforeEach(async () => {
+    await ctx.reset();
+  });
+
+  afterAll(async () => {
+    await ctx.close();
+  });
+
+  interface I35SendBody {
+    data: {
+      request: { attachmentCount: number };
+      userMessage: { content: string; attachmentCount: number };
+      deduplicated: boolean;
+    };
+  }
+
+  interface I35PageBody {
+    data: { role: string; position: number; attachmentCount: number }[];
+    meta: { nextCursor: string | null };
+  }
+
+  async function getMessagesPage(conversationId: string, query = ""): Promise<I35PageBody> {
+    const res = await fetch(`${ctx.baseUrl}/api/conversations/${conversationId}/messages${query}`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as I35PageBody;
+  }
+
+  /** 把活动 Request 置为终态,释放「同会话无活动请求」约束,允许再发下一条 */
+  async function finishActiveRequest(key: string): Promise<void> {
+    const request = await ctx.prisma.modelRequest.findUniqueOrThrow({
+      where: { idempotencyKey: key },
+    });
+    await ctx.prisma.modelRequest.update({
+      where: { id: request.id },
+      data: { status: "SUCCESS" },
+    });
+  }
+
+  it("I35-BE-01: 纯文本 USER —— POST 与 list 的 attachmentCount 均为 0", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    const res = await sendMessage(ctx.baseUrl, conv.id, "纯文本", "i35-be-01");
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as I35SendBody;
+    expect(body.data.userMessage.attachmentCount).toBe(0);
+
+    const page = await getMessagesPage(conv.id);
+    const user = page.data.find((m) => m.role === "USER");
+    expect(user?.attachmentCount).toBe(0);
+  });
+
+  it("I35-BE-02: 1 图 —— POST userMessage.attachmentCount=1 且 list USER=1", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    const res = await sendMessage(ctx.baseUrl, conv.id, "看图", "i35-be-02", undefined, [
+      attachment(),
+    ]);
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as I35SendBody;
+    expect(body.data.userMessage.attachmentCount).toBe(1);
+
+    const page = await getMessagesPage(conv.id);
+    const user = page.data.find((m) => m.role === "USER");
+    expect(user?.attachmentCount).toBe(1);
+  });
+
+  it("I35-BE-03: 4 图(四种 MIME)—— POST 与 list 均为 4", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    const images = ATTACHMENT_TYPES.map((type) => attachment(type));
+    expect(images).toHaveLength(4);
+
+    const res = await sendMessage(ctx.baseUrl, conv.id, "四张图", "i35-be-03", undefined, images);
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as I35SendBody;
+    expect(body.data.userMessage.attachmentCount).toBe(4);
+
+    const page = await getMessagesPage(conv.id);
+    const user = page.data.find((m) => m.role === "USER");
+    expect(user?.attachmentCount).toBe(4);
+  });
+
+  it("I35-BE-04: 首次 202 —— userMessage.attachmentCount 与 request.attachmentCount 一致(2 图)", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    const res = await sendMessage(ctx.baseUrl, conv.id, "两张图", "i35-be-04", undefined, [
+      attachment(),
+      attachment("image/jpeg"),
+    ]);
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as I35SendBody;
+    expect(body.data.userMessage.attachmentCount).toBe(2);
+    expect(body.data.request.attachmentCount).toBe(2);
+  });
+
+  it("I35-BE-05: latest 页逐项正确(先纯文本后带图)", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await sendMessage(ctx.baseUrl, conv.id, "第一轮", "i35-be-05-a");
+    await finishActiveRequest("i35-be-05-a");
+    await sendMessage(ctx.baseUrl, conv.id, "第二轮", "i35-be-05-b", undefined, [attachment()]);
+
+    const page = await getMessagesPage(conv.id);
+    expect(page.data.map((m) => [m.role, m.attachmentCount])).toEqual([
+      ["USER", 0],
+      ["ASSISTANT", 0],
+      ["USER", 1],
+      ["ASSISTANT", 0],
+    ]);
+  });
+
+  it("I35-BE-06: 带图 USER 位于 older page —— count 正确,无 Request 直插消息 fallback 0", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await sendMessage(ctx.baseUrl, conv.id, "带图", "i35-be-06", undefined, [attachment()]);
+    await finishActiveRequest("i35-be-06");
+
+    // 直插 60 条纯文本(position 3..62),不带 ModelRequest
+    await ctx.prisma.message.createMany({
+      data: Array.from({ length: 60 }, (_, i) => {
+        const position = 3 + i;
+        return {
+          conversationId: conv.id,
+          role: position % 2 === 1 ? "USER" : "ASSISTANT",
+          content: `seed-${position}`,
+          status: "COMPLETED",
+          position,
+        };
+      }),
+    });
+
+    const latest = await getMessagesPage(conv.id);
+    expect(latest.data.map((m) => m.position)).toEqual(range(13, 62));
+    expect(latest.meta.nextCursor).not.toBeNull();
+    expect(latest.data.every((m) => m.attachmentCount === 0)).toBe(true);
+
+    const older = await getMessagesPage(conv.id, `?cursor=${latest.meta.nextCursor}`);
+    expect(older.data.map((m) => m.position)).toEqual(range(1, 12));
+    const imageUser = older.data.find((m) => m.position === 1);
+    expect(imageUser?.role).toBe("USER");
+    expect(imageUser?.attachmentCount).toBe(1);
+    expect(older.data.filter((m) => m.position !== 1).every((m) => m.attachmentCount === 0)).toBe(
+      true,
+    );
+  });
+
+  it("I35-BE-07: 同 Idempotency-Key 同附件重放 —— 200 deduplicated=true 且 count 保持", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    const images = [attachment()];
+    const first = await sendMessage(ctx.baseUrl, conv.id, "幂等带图", "i35-be-07", undefined, images);
+    expect(first.status).toBe(202);
+
+    const second = await sendMessage(ctx.baseUrl, conv.id, "幂等带图", "i35-be-07", undefined, images);
+    expect(second.status).toBe(200);
+    const body = (await second.json()) as I35SendBody;
+    expect(body.data.deduplicated).toBe(true);
+    expect(body.data.userMessage.attachmentCount).toBe(1);
+    expect(body.data.request.attachmentCount).toBe(1);
+
+    expect(await ctx.prisma.message.count()).toBe(2);
+    expect(await ctx.prisma.modelRequest.count()).toBe(1);
+  });
+
+  it("I35-BE-08: 带图 Request 对应 ASSISTANT 列表项 attachmentCount 恒为 0", async () => {
+    const conv = await createConversation(ctx.baseUrl);
+    await sendMessage(ctx.baseUrl, conv.id, "带图", "i35-be-08", undefined, [attachment()]);
+
+    const page = await getMessagesPage(conv.id);
+    const user = page.data.find((m) => m.role === "USER");
+    const assistant = page.data.find((m) => m.role === "ASSISTANT");
+    // 同一 Request 的 USER 侧为 1,反证 ASSISTANT 的 0 不是「查不到」
+    expect(user?.attachmentCount).toBe(1);
+    expect(assistant?.attachmentCount).toBe(0);
   });
 });

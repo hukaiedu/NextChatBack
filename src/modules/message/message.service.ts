@@ -144,7 +144,12 @@ export class MessageService {
           modelKey === undefined ? {} : { preferredModelKey: modelKey },
         );
 
-        return { request, userMessage, assistantMessage, deduplicated: false };
+        return {
+          request,
+          userMessage: { ...userMessage, attachmentCount: request.attachmentCount },
+          assistantMessage,
+          deduplicated: false,
+        };
       });
       // RESERVED → READY:事务已提交,字节就此交给执行链;本地所有权随即摘掉,
       // 释放权转给 Scheduler 的 finally。交接必须早于 notify,否则 Scheduler 抢在 READY 之前 take。
@@ -227,7 +232,12 @@ export class MessageService {
     if (!userMessage || !assistantMessage) {
       throw new AppError(ErrorCodes.DATABASE_ERROR, "Request references missing messages");
     }
-    return { request, userMessage, assistantMessage, deduplicated: true };
+    return {
+      request,
+      userMessage: { ...userMessage, attachmentCount: request.attachmentCount },
+      assistantMessage,
+      deduplicated: true,
+    };
   }
 
   /**
@@ -261,10 +271,18 @@ export class MessageService {
         : null;
 
     const assistantIds = pageRows.filter((m) => m.role === "ASSISTANT").map((m) => m.id);
-    const requests = await this.requestRepo.findByAssistantIds(this.prisma, assistantIds);
+    const userIds = pageRows.filter((m) => m.role === "USER").map((m) => m.id);
+    const [requests, userRequests] = await Promise.all([
+      this.requestRepo.findByAssistantIds(this.prisma, assistantIds),
+      this.requestRepo.findByUserMessageIds(this.prisma, userIds),
+    ]);
     const requestByAssistantId = new Map<string, ModelRequestModel>();
     for (const request of requests) {
       requestByAssistantId.set(request.assistantMessageId, request);
+    }
+    const requestByUserId = new Map<string, ModelRequestModel>();
+    for (const request of userRequests) {
+      requestByUserId.set(request.userMessageId, request);
     }
 
     return {
@@ -273,10 +291,14 @@ export class MessageService {
         .reverse()
         .map((message) => {
           if (message.role !== "ASSISTANT") {
-            return { ...message, request: null };
+            return {
+              ...message,
+              request: null,
+              attachmentCount: requestByUserId.get(message.id)?.attachmentCount ?? 0,
+            };
           }
           const request = requestByAssistantId.get(message.id);
-          return { ...message, request: request ? toRequestBrief(request) : null };
+          return { ...message, request: request ? toRequestBrief(request) : null, attachmentCount: 0 };
         }),
       nextCursor,
       totalCount,

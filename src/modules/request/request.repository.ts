@@ -52,6 +52,21 @@ export class RequestRepository {
   }
 
   /**
+   * V1.2 I3.5:按页内 USER 消息反查附件份数来源(一次批量,禁止 N+1)。
+   * createdAt/id 双排序只为异常数据(同一 USER 多个 Request)提供确定性 fallback:
+   * Map 后写覆盖前写即取最后一条;正常数据一个 USER 至多一个 Request。
+   */
+  async findByUserMessageIds(db: DbClient, ids: string[]): Promise<ModelRequestModel[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+    return db.modelRequest.findMany({
+      where: { userMessageId: { in: ids } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+  }
+
+  /**
    * §六 附件孤儿判据:候选 requestId 里哪些仍处于活动态(PENDING / PROCESSING / CANCELLING)。
    *
    * AttachmentStore 因此不按固定 TTL 删附件 —— 只要数据库还说这个 Request 没跑完,

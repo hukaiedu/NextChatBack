@@ -20,7 +20,8 @@ export const USER_MESSAGE_STATUS = "COMPLETED";
 
 export interface SendMessageResult {
   request: ModelRequestModel;
-  userMessage: MessageModel;
+  /** V1.2 I3.5:USER 消息携带 attachmentCount(与 list DTO 同契约,来源 = request.attachmentCount) */
+  userMessage: MessageModel & { attachmentCount: number };
   assistantMessage: MessageModel;
   /** true = Idempotency-Key 命中,返回既有记录,未新建任何数据 */
   deduplicated: boolean;
@@ -42,6 +43,11 @@ export interface RequestBrief {
 
 export interface MessageListItem extends MessageModel {
   request: RequestBrief | null;
+  /**
+   * V1.2 I3.5:USER = 提交时携带的图片份数(I1 起由 ModelRequest 落库,经 userMessageId 反查);
+   * ASSISTANT 恒 0。原图字节从未持久化,前端仅据此渲染「历史图片」占位。
+   */
+  attachmentCount: number;
 }
 
 /** PAG-2:Message 分页页(页内旧→新;nextCursor 指向更老一页,null = 已到最老) */
