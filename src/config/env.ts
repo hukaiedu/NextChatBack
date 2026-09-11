@@ -8,6 +8,9 @@ const boolFromString = z
   .enum(["true", "false"])
   .transform((value) => value === "true");
 
+/** V1.3 §17:AUTH_ENABLED=false 的唯一合法监听地址集合 */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
 const envSchema = z.object({
   NODE_ENV: z
     .enum(["development", "test", "production"])
@@ -48,18 +51,30 @@ const envSchema = z.object({
    */
   STREAMING_UPDATE_INTERVAL_MS: z.coerce.number().int().min(0).default(300),
 
-  // SEC-1 服务端鉴权(docs/SEC1_AUTH_DESIGN.md §3.3)
+  // SEC-1 服务端鉴权(docs/SEC1_AUTH_DESIGN.md §3.3)+ V1.3 多用户 Session(docs/V13A_MULTIUSER_DESIGN.md §15)
   AUTH_ENABLED: boolFromString.default("false"),
   /** AUTH_ENABLED=true 时必填;min 12 门槛在 refine 中按开关条件执行 */
   AUTH_PASSWORD: z.string().optional(),
-  /** AUTH_ENABLED=true 时必填;≥32 字符为最低门槛(HMAC-SHA256 签名密钥) */
-  AUTH_SESSION_SECRET: z.string().optional(),
+  /** V1.3 §15:ADMIN Session TTL(秒),滑动续期上限。B2 起本项语义从全局 TTL 改为 ADMIN TTL */
   AUTH_SESSION_TTL_SECONDS: z.coerce
     .number()
     .int()
     .min(300)
     .max(2_592_000)
     .default(604_800),
+  /** V1.3 §15:ANONYMOUS Session TTL(秒),默认 30 天 */
+  AUTH_SESSION_TTL_ANONYMOUS_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .max(2_592_000)
+    .default(2_592_000),
+  /** V1.3 §13:滑动续期阈值(秒):lastSeenAt 超过该间隔才写库续期并重发 Set-Cookie */
+  AUTH_SESSION_TOUCH_INTERVAL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(3_600),
   /** 只影响 req.ip(登录限流键/审计),不影响 Cookie Secure */
   AUTH_TRUST_PROXY: boolFromString.default("false"),
   /** 逗号分隔 Origin 白名单;每项规范化校验见 auth 模块(§7.2) */
@@ -93,17 +108,14 @@ const envSchema = z.object({
     path: ["AUTH_PASSWORD"],
   },
 )
-.refine(
-  (env) =>
-    !env.AUTH_ENABLED ||
-    (env.AUTH_SESSION_SECRET !== undefined &&
-      env.AUTH_SESSION_SECRET.length >= 32),
-  {
-    message:
-      "AUTH_ENABLED=true requires AUTH_SESSION_SECRET (min 32 characters)",
-    path: ["AUTH_SESSION_SECRET"],
-  },
-)
+// V1.3 §17:AUTH_ENABLED=false 只允许 loopback 监听 —— 免鉴权 + 网络可达 = 误暴露;
+// 要绑 0.0.0.0 就必须启用 AUTH(不自动改 HOST,让开发者显式二选一)
+.refine((env) => env.AUTH_ENABLED || LOOPBACK_HOSTS.has(env.HOST.trim().toLowerCase()), {
+  message:
+    "AUTH_ENABLED=false requires HOST to be loopback (127.0.0.1/::1/localhost): " +
+    "refusing to expose the unauthenticated COMPAT mode on the network — enable AUTH or bind loopback",
+  path: ["HOST"],
+})
 .refine(
   (env) =>
     env.NODE_ENV !== "production" ||

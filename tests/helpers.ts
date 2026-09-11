@@ -5,7 +5,9 @@ import type { Express } from "express";
 import { createApp } from "../src/app.js";
 import type { SchedulerConfig, StreamingConfig } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
+import { ADMIN_USER_ID, COMPAT_USER_ID } from "../src/config/constants.js";
 import type { LoginRateLimiter } from "../src/modules/auth/auth.rate-limit.js";
+import type { AuthSessionService } from "../src/modules/auth/auth.session.service.js";
 import type { AuthDeps } from "../src/modules/auth/auth.types.js";
 import type { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import type { GeminiAdapter } from "../src/providers/gemini/gemini.types.js";
@@ -36,6 +38,8 @@ export interface TestContext {
   executor: GeminiPromptService;
   /** V1.2 I1:附件内存容器(断言 liveBytes 不变量 / 手动 sweep / 观察 slot 状态) */
   attachmentStore: AttachmentStore;
+  /** V1.3-B2:DB Session 运行时(enabled 时非 null;测试直接驱动 sweepExpired) */
+  authSessions: AuthSessionService | null;
   /** 当前存活的 SSE 连接数 */
   sseConnections(): number;
   reset(): Promise<void>;
@@ -61,7 +65,7 @@ export async function setupTestContext(options?: {
   // 默认注入"永不启动"的 Browser Manager stub(provider 测试才需要真实/可操纵实例)
   const browserManager = options?.browserManager ?? createFakeManager(new FakeDriver());
 
-  const { app, scheduler, recovery, sse, events, cancellation, executor, attachmentStore } = createApp({
+  const { app, scheduler, recovery, sse, events, cancellation, executor, attachmentStore, authSessions } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
@@ -93,6 +97,7 @@ export async function setupTestContext(options?: {
     cancellation,
     executor,
     attachmentStore,
+    authSessions,
 
     sseConnections(): number {
       return sse.connectionCount();
@@ -107,6 +112,12 @@ export async function setupTestContext(options?: {
       await prisma.modelRequest.deleteMany();
       await prisma.message.deleteMany();
       await prisma.conversation.deleteMany();
+      // V1.3-B2:登录/匿名 bootstrap 会写 Session 与 User;ADMIN/COMPAT 哨兵行由 B1 migration
+      // 建立,必须跨用例保留(Conversation FK RESTRICT 也依赖它们)
+      await prisma.session.deleteMany();
+      await prisma.user.deleteMany({
+        where: { id: { notIn: [ADMIN_USER_ID, COMPAT_USER_ID] } },
+      });
     },
 
     async close(): Promise<void> {

@@ -1,24 +1,26 @@
-import { createHmac } from "node:crypto";
-
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
 import { AUTH_COOKIE_NAME } from "../../src/config/constants.js";
 import { parseEnv } from "../../src/config/env.js";
 import { LoginRateLimiter } from "../../src/modules/auth/auth.rate-limit.js";
+import { hashSessionToken } from "../../src/modules/auth/auth.session-token.js";
 import type { AuthDeps } from "../../src/modules/auth/auth.types.js";
 import { setupTestContext, type TestContext } from "../helpers.js";
 
 const PASSWORD = "test-password-123";
-const SECRET = "0123456789abcdef0123456789abcdef";
-const TTL = 3600;
+/** ADMIN 登录 Cookie 的 Max-Age(= AUTH_SESSION_TTL_SECONDS 语义) */
+const TTL_ADMIN = 3600;
+const TTL_ANON = 7200;
+const TOUCH_INTERVAL = 60;
 
 function authDeps(overrides: Partial<AuthDeps> = {}): AuthDeps {
   return {
     enabled: true,
     password: PASSWORD,
-    secret: SECRET,
-    ttlSeconds: TTL,
+    ttlAnonymousSeconds: TTL_ANON,
+    ttlAdminSeconds: TTL_ADMIN,
+    touchIntervalSeconds: TOUCH_INTERVAL,
     allowedOrigins: null,
     trustProxy: false,
     cookieSecureAlways: false,
@@ -69,11 +71,9 @@ function sessionCookie(token: string): string {
   return `${AUTH_COOKIE_NAME}=${token}`;
 }
 
-/** 用指定 payload + 正确 HMAC 构造 token(过期/字段异常场景) */
-function craftToken(payload: Record<string, unknown>): string {
-  const payloadB64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const signature = createHmac("sha256", SECRET).update(payloadB64, "ascii").digest();
-  return `${payloadB64}.${signature.toString("base64url")}`;
+/** 从 Set-Cookie 的 Cookie 头里取 raw token(V1.3:opaque,不含 ".") */
+function rawTokenOf(cookie: string): string {
+  return cookie.slice(AUTH_COOKIE_NAME.length + 1);
 }
 
 describe("AUTH-01 未认证访问业务 API → 401 AUTH_REQUIRED", () => {
@@ -170,7 +170,7 @@ describe("AUTH-03/04/05 login 契约", () => {
       expect(setCookie).toContain("HttpOnly");
       expect(setCookie).toMatch(/SameSite=Strict/i);
       expect(setCookie).toContain("Path=/");
-      expect(setCookie).toContain(`Max-Age=${TTL}`);
+      expect(setCookie).toContain(`Max-Age=${TTL_ADMIN}`);
       expect(setCookie).not.toContain("Secure");
     });
   });
@@ -253,17 +253,13 @@ describe("AUTH-06..08 登录限流", () => {
 });
 
 describe("AUTH-09..11 token 校验(requireAuth)", () => {
-  it("AUTH-09 篡改签名(token 尾段改 1 字符)→ 401", async () => {
+  it("AUTH-09 篡改 token(末字符翻转)→ 401(DB 摘要不再命中)", async () => {
     await withApp(async (ctx) => {
       const loginRes = await login(ctx.baseUrl, PASSWORD);
-      const raw = cookieHeader(loginRes)!;
-      const token = raw.slice(AUTH_COOKIE_NAME.length + 1);
-      const [payloadB64, sigB64] = token.split(".");
-      // base64url 末字符的低 4 位是填充位,解码端忽略;只翻转末字符有概率
-      // 解出完全相同的签名字节导致校验通过。首字符参与首字节高 6 位,
-      // 翻转必然改变解码结果
-      const flipped = sigB64!.at(0) === "A" ? "B" : "A";
-      const tampered = `${payloadB64}.${flipped}${sigB64!.slice(1)}`;
+      const raw = rawTokenOf(cookieHeader(loginRes)!);
+      const last = raw.at(-1)!;
+      // opaque token 无结构可篡改:任何字符变化 → 摘要不同 → 查不到 Session
+      const tampered = `${raw.slice(0, -1)}${last === "A" ? "B" : "A"}`;
 
       const res = await fetch(`${ctx.baseUrl}/api/conversations`, {
         headers: { Cookie: sessionCookie(tampered) },
@@ -274,29 +270,32 @@ describe("AUTH-09..11 token 校验(requireAuth)", () => {
     });
   });
 
-  it("AUTH-10 过期 token(exp 已过)→ 401", async () => {
+  it("AUTH-10 过期 Session(DB expiresAt 已过)→ 401", async () => {
     await withApp(async (ctx) => {
-      const expired = craftToken({
-        v: 1,
-        iat: Math.floor(Date.now() / 1000) - 100,
-        exp: Math.floor(Date.now() / 1000) - 1,
-        sid: "a".repeat(32),
+      const loginRes = await login(ctx.baseUrl, PASSWORD);
+      const cookie = cookieHeader(loginRes)!;
+      await ctx.prisma.session.update({
+        where: { tokenHash: hashSessionToken(rawTokenOf(cookie)) },
+        data: { expiresAt: new Date(Date.now() - 1000) },
       });
+
       const res = await fetch(`${ctx.baseUrl}/api/conversations`, {
-        headers: { Cookie: sessionCookie(expired) },
+        headers: { Cookie: cookie },
       });
       expect(res.status).toBe(401);
     });
   });
 
-  it("AUTH-11 非法格式(无点/三段/非 base64url/超长)→ 401", async () => {
+  it("AUTH-11 非法格式(无点/三段/非 base64url/长度异常/未知 token)→ 401", async () => {
     await withApp(async (ctx) => {
       const invalid = [
         "nodot",
-        "a.b.c",
+        "a.b.c", // V1.2 HMAC 形态:含 "." → parser 判 invalid(不 500)
         "abc+.def",
         `${"a".repeat(1025)}`,
-        `${Buffer.from("ok", "utf8").toString("base64url")}.a${"b".repeat(30)}`, // sig 解码 31 字节
+        `${"a".repeat(44)}`, // 长度异常
+        `${"a".repeat(42)}=`, // 非 base64url 字符
+        "a".repeat(43), // 形态合法但 DB 无此行 → 401 而非 500
       ];
       for (const token of invalid) {
         const res = await fetch(`${ctx.baseUrl}/api/conversations`, {
@@ -319,22 +318,25 @@ describe("AUTH-12/13 session 探测", () => {
     });
   });
 
-  it("AUTH-13 有效 cookie → 200 {authenticated:true, expiresAt ISO}", async () => {
+  it("AUTH-13 有效 cookie → 200 {authenticated:true, expiresAt ISO, userType ADMIN}", async () => {
     await withApp(async (ctx) => {
       const loginRes = await login(ctx.baseUrl, PASSWORD);
       const res = await fetch(`${ctx.baseUrl}/api/auth/session`, {
         headers: { Cookie: cookieHeader(loginRes)! },
       });
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { data: { authenticated: boolean; expiresAt: string } };
+      const body = (await res.json()) as {
+        data: { authenticated: boolean; expiresAt: string; userType: string };
+      };
       expect(body.data.authenticated).toBe(true);
       expect(Number.isNaN(Date.parse(body.data.expiresAt))).toBe(false);
+      expect(body.data.userType).toBe("ADMIN");
     });
   });
 });
 
 describe("AUTH-14 logout", () => {
-  it("204 + Max-Age=0;旧 token 在 exp 前重放仍有效(§5.5 无状态语义)", async () => {
+  it("204 + Max-Age=0;旧 token 重放 → 401(DB Session 已删除,V1.3 与无状态语义的明确差异)", async () => {
     await withApp(async (ctx) => {
       const loginRes = await login(ctx.baseUrl, PASSWORD);
       const cookie = cookieHeader(loginRes)!;
@@ -349,11 +351,13 @@ describe("AUTH-14 logout", () => {
       expect(setCookie).toContain("Max-Age=0");
       expect(setCookie).toContain("Path=/");
 
-      // 无状态:logout 不吊销 token 本身
+      // V1.3:服务端删 Session = 立即吊销,旧 token 不再可用
       const replay = await fetch(`${ctx.baseUrl}/api/conversations`, {
         headers: { Cookie: cookie },
       });
-      expect(replay.status).toBe(200);
+      expect(replay.status).toBe(401);
+      const body = (await replay.json()) as { error: { code: string } };
+      expect(body.error.code).toBe(ErrorCodes.AUTH_REQUIRED);
     });
   });
 });
@@ -454,24 +458,22 @@ describe("AUTH-19/20/26 env fail-fast", () => {
     DATABASE_URL: "file:./data/database/test.db",
   };
 
-  it("AUTH-19 AUTH_ENABLED=true 缺 AUTH_PASSWORD 或 SECRET → 抛错", () => {
+  it("AUTH-19 AUTH_ENABLED=true 缺 AUTH_PASSWORD → 抛错;有密码即通过(V1.3 不再要求 secret)", () => {
     expect(() =>
       parseEnv({
         ...base,
         NODE_ENV: "test",
         AUTH_ENABLED: "true",
-        AUTH_SESSION_SECRET: SECRET,
       }),
     ).toThrow(/AUTH_PASSWORD/);
 
-    expect(() =>
-      parseEnv({
-        ...base,
-        NODE_ENV: "test",
-        AUTH_ENABLED: "true",
-        AUTH_PASSWORD: PASSWORD,
-      }),
-    ).toThrow(/AUTH_SESSION_SECRET/);
+    const env = parseEnv({
+      ...base,
+      NODE_ENV: "test",
+      AUTH_ENABLED: "true",
+      AUTH_PASSWORD: PASSWORD,
+    });
+    expect(env.AUTH_ENABLED).toBe(true);
   });
 
   it("AUTH-20 NODE_ENV=production + AUTH_ENABLED=false → 抛错", () => {
@@ -487,7 +489,6 @@ describe("AUTH-19/20/26 env fail-fast", () => {
         NODE_ENV: "production",
         AUTH_ENABLED: "true",
         AUTH_PASSWORD: PASSWORD,
-        AUTH_SESSION_SECRET: SECRET,
         AUTH_ALLOWED_ORIGINS: "https://ok.example,http://bad.example",
       }),
     ).toThrow(/https/);

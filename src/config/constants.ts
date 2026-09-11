@@ -67,3 +67,14 @@ export const AUTH_LOGIN_MAX_ATTEMPTS = 5;
 
 /** 登录限流:fixed window 长度(10 分钟) */
 export const AUTH_LOGIN_WINDOW_MS = 10 * 60 * 1000;
+
+// —— V1.3 多用户:哨兵 User 常量(值必须与 B1 migration 的 INSERT OR IGNORE 逐字一致)——
+
+/** 固定 ADMIN User:共享密码登录后的唯一管理员身份 */
+export const ADMIN_USER_ID = "00000000-0000-0000-0000-000000000001";
+
+/** 固定 COMPAT User:仅 AUTH_ENABLED=false + loopback 的 test/dev 兼容身份(type=ANONYMOUS,非 ADMIN) */
+export const COMPAT_USER_ID = "00000000-0000-0000-0000-000000000002";
+
+/** 过期 Session 清理周期(ms,§19);定时器 unref,不阻止进程退出 */
+export const AUTH_SESSION_SWEEP_INTERVAL_MS = 60_000;

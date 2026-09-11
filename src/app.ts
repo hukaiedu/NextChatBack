@@ -34,8 +34,15 @@ import { createSseRouter } from "./modules/sse/sse.controller.js";
 import { SseService } from "./modules/sse/sse.service.js";
 import { ProviderPageLock } from "./providers/gemini/provider-page-lock.js";
 import { createAuthRouter } from "./modules/auth/auth.controller.js";
-import { originCheck, requireAuth } from "./modules/auth/auth.middleware.js";
+import {
+  injectCompatAuth,
+  originCheck,
+  requireAuth,
+} from "./modules/auth/auth.middleware.js";
 import { AuthService } from "./modules/auth/auth.service.js";
+import { AuthSessionRepository } from "./modules/auth/auth.session.repository.js";
+import { AuthSessionService } from "./modules/auth/auth.session.service.js";
+import { AuthUserRepository } from "./modules/auth/auth.user.repository.js";
 import type { LoginRateLimiter } from "./modules/auth/auth.rate-limit.js";
 import type { AuthDeps } from "./modules/auth/auth.types.js";
 
@@ -85,6 +92,8 @@ export interface AppHandle {
   executor: GeminiPromptService;
   /** V1.2 I1:附件内存容器(停机要 dispose;测试断言 liveBytes 不变量) */
   attachmentStore: AttachmentStore;
+  /** V1.3-B2:DB Session 运行时(enabled 时非 null;main.ts 用它启动 sweep) */
+  authSessions: AuthSessionService | null;
 }
 
 export function createApp(deps: AppDeps): AppHandle {
@@ -115,18 +124,38 @@ export function createApp(deps: AppDeps): AppHandle {
   // Health
   app.use(HEALTH_PATH, createHealthRouter(deps));
 
-  // SEC-1 §12.1:三个 auth 端点始终挂载(disabled 模式);requireAuth 之后全部受保护
-  const authService =
-    deps.auth?.enabled === true
-      ? new AuthService({
-          password: deps.auth.password,
-          secret: deps.auth.secret,
-          ttlSeconds: deps.auth.ttlSeconds,
-        })
+  // SEC-1 §12.1 + V1.3 §20:auth 端点始终挂载(disabled 模式);之后业务路由统一带 req.auth ——
+  // enabled → DB Session 认证 / disabled → COMPAT 身份注入(loopback 由 env 保证)
+  const authRuntime =
+    deps.auth !== null && deps.auth.enabled
+      ? {
+          service: new AuthService({ password: deps.auth.password }),
+          sessions: new AuthSessionService({
+            prisma: deps.prisma,
+            sessions: new AuthSessionRepository(),
+            users: new AuthUserRepository(),
+            logger: deps.logger,
+            options: {
+              ttlAnonymousSeconds: deps.auth.ttlAnonymousSeconds,
+              ttlAdminSeconds: deps.auth.ttlAdminSeconds,
+              touchIntervalSeconds: deps.auth.touchIntervalSeconds,
+            },
+          }),
+        }
       : null;
-  app.use("/api/auth", createAuthRouter(deps.auth ?? null, authService, deps.loginRateLimiter));
-  if (authService !== null) {
-    app.use(requireAuth(authService));
+  app.use(
+    "/api/auth",
+    createAuthRouter(
+      deps.auth ?? null,
+      authRuntime?.service ?? null,
+      authRuntime?.sessions ?? null,
+      deps.loginRateLimiter,
+    ),
+  );
+  if (authRuntime !== null && deps.auth !== null) {
+    app.use(requireAuth(authRuntime.sessions, deps.auth));
+  } else {
+    app.use(injectCompatAuth());
   }
 
   // 模块组装:Controller → Service → Scheduler → GeminiPromptService → Adapter(prd §3.1)
@@ -237,5 +266,6 @@ export function createApp(deps: AppDeps): AppHandle {
     cancellation,
     executor: geminiPromptService,
     attachmentStore,
+    authSessions: authRuntime?.sessions ?? null,
   };
 }

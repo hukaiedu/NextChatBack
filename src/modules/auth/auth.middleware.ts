@@ -2,9 +2,9 @@ import type { NextFunction, Request, RequestHandler, Response } from "express";
 
 import { AppError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
-import { AUTH_COOKIE_NAME } from "../../config/constants.js";
+import { AUTH_COOKIE_NAME, COMPAT_USER_ID } from "../../config/constants.js";
 import type { Env } from "../../config/env.js";
-import { AuthService } from "./auth.service.js";
+import type { AuthSessionService } from "./auth.session.service.js";
 import type { AuthDeps } from "./auth.types.js";
 
 /** 仅 unsafe method 校验 Origin;GET/HEAD/OPTIONS 放行 */
@@ -67,8 +67,9 @@ export function buildAuthDeps(env: Env): AuthDeps {
   return {
     enabled: env.AUTH_ENABLED,
     password: env.AUTH_PASSWORD ?? "",
-    secret: env.AUTH_SESSION_SECRET ?? "",
-    ttlSeconds: env.AUTH_SESSION_TTL_SECONDS,
+    ttlAnonymousSeconds: env.AUTH_SESSION_TTL_ANONYMOUS_SECONDS,
+    ttlAdminSeconds: env.AUTH_SESSION_TTL_SECONDS,
+    touchIntervalSeconds: env.AUTH_SESSION_TOUCH_INTERVAL_SECONDS,
     allowedOrigins: parseAllowedOrigins(
       env.AUTH_ALLOWED_ORIGINS,
       env.NODE_ENV === "production" && env.AUTH_ENABLED,
@@ -124,15 +125,75 @@ export function extractCookie(
   return undefined;
 }
 
-/** §12.1:cookie → verify → 失败统一 401 AUTH_REQUIRED(经既有 errorHandler 出口) */
-export function requireAuth(authService: AuthService): RequestHandler {
-  return (req: Request, _res: Response, next: NextFunction) => {
+/**
+ * §六:Cookie 属性唯一出处(登录 / 匿名 bootstrap / 滑动续期共用)。
+ * production 恒 Secure(fail-closed);dev/test 按 req.secure。
+ */
+export function setSessionCookie(
+  res: Response,
+  req: Request,
+  auth: AuthDeps,
+  rawToken: string,
+  maxAgeSeconds: number,
+): void {
+  res.cookie(AUTH_COOKIE_NAME, rawToken, {
+    httpOnly: true,
+    sameSite: "strict",
+    path: "/",
+    maxAge: maxAgeSeconds * 1000,
+    secure: auth.cookieSecureAlways || req.secure,
+  });
+}
+
+/** 登出清 Cookie(§六):同名同 Path;不覆盖 Max-Age=0 的既有 204 契约 */
+export function clearSessionCookie(res: Response): void {
+  res.cookie(AUTH_COOKIE_NAME, "", {
+    httpOnly: true,
+    sameSite: "strict",
+    path: "/",
+    maxAge: 0,
+  });
+}
+
+/**
+ * §12.1 + V1.3 §13:DB Session 认证。
+ * valid → 写 req.auth;续期 CAS 胜出 → 同步重发 Set-Cookie(同一 raw token)。
+ * 无效 / 过期 / DISABLED → 统一 401 AUTH_REQUIRED;数据库异常按内部错误出口(不伪装成 401)。
+ */
+export function requireAuth(sessions: AuthSessionService, auth: AuthDeps): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction) => {
     const token = extractCookie(req.headers.cookie, AUTH_COOKIE_NAME);
-    if (!authService.verify(token).valid) {
-      return next(
-        new AppError(ErrorCodes.AUTH_REQUIRED, "Missing or invalid session cookie"),
-      );
-    }
+    sessions
+      .resolve(token, { touch: true })
+      .then((resolved) => {
+        if (resolved.kind !== "active") {
+          return next(
+            new AppError(ErrorCodes.AUTH_REQUIRED, "Missing or invalid session cookie"),
+          );
+        }
+        req.auth = resolved.auth;
+        if (resolved.renewed) {
+          setSessionCookie(res, req, auth, resolved.rawToken, resolved.ttlSeconds);
+        }
+        next();
+      })
+      .catch(next);
+  };
+}
+
+/**
+ * §18:AUTH_ENABLED=false 的 test/dev compatibility seam(仅 loopback 可启动,见 env refine)。
+ * 注入固定 COMPAT User(type=ANONYMOUS),不建 Session/User;绝不是隐式管理员 ——
+ * B3 起 /api/admin/* 对 COMPAT 必须 403。
+ */
+export function injectCompatAuth(): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    req.auth = {
+      userId: COMPAT_USER_ID,
+      userType: "ANONYMOUS",
+      sessionId: null,
+      expiresAt: null,
+    };
     next();
   };
 }

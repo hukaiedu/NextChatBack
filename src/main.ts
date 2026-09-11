@@ -4,6 +4,7 @@ import http from "node:http";
 
 import { createApp } from "./app.js";
 import { createLogger } from "./common/logger/logger.js";
+import { AUTH_SESSION_SWEEP_INTERVAL_MS } from "./config/constants.js";
 import { parseEnv } from "./config/env.js";
 import { createPrismaClient, probeDatabase } from "./database/prisma.js";
 import { buildAuthDeps } from "./modules/auth/auth.middleware.js";
@@ -26,7 +27,7 @@ async function main(): Promise<void> {
     logger,
   });
 
-  const { app, scheduler, recovery, sse, attachmentStore } = createApp({
+  const { app, scheduler, recovery, sse, attachmentStore, authSessions } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
@@ -51,6 +52,18 @@ async function main(): Promise<void> {
   await recovery.run();
   scheduler.start();
 
+  // V1.3-B2 §19:过期 Session 轻量周期清理(先清一次);unref 不阻止退出,
+  // 失败已在 service 内收敛成日志,不会打崩服务
+  let authSweepTimer: NodeJS.Timeout | null = null;
+  if (authSessions !== null) {
+    void authSessions.sweepExpired();
+    authSweepTimer = setInterval(
+      () => void authSessions.sweepExpired(),
+      AUTH_SESSION_SWEEP_INTERVAL_MS,
+    );
+    authSweepTimer.unref();
+  }
+
   const server = http.createServer(app);
   server.listen(env.PORT, env.HOST, () => {
     logger.info(`server listening on http://${env.HOST}:${env.PORT}`);
@@ -65,10 +78,14 @@ async function main(): Promise<void> {
     }
     shuttingDown = true;
     logger.info({ signal }, "shutting down");
-    // 关闭顺序:停 Scheduler → 释放附件 → 结束 SSE → 停止 HTTP → 关 Browser → disconnect Prisma
+    // 关闭顺序:停 Scheduler → 撤定时器 → 释放附件 → 结束 SSE → 停止 HTTP → 关 Browser → disconnect Prisma
     // Scheduler 先停:在飞的 Request 留在 PROCESSING/CANCELLING,由下次启动的 recovery 落 FAILED
-    // AttachmentStore 紧随其后:撤掉孤儿清理定时器,否则它可能在 $disconnect 之后才发起查询
+    // AttachmentStore/Session sweep 紧随其后:撤掉定时器,否则它们可能在 $disconnect 之后才发起查询
     scheduler.stop();
+    if (authSweepTimer !== null) {
+      clearInterval(authSweepTimer);
+      authSweepTimer = null;
+    }
     attachmentStore.dispose();
     sse.closeAll();
     // 空闲 keep-alive 立即断开(in-flight 请求不受影响),否则 server.close() 要等客户端保活超时
