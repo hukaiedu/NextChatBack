@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { FAKE_CONVERSATION_URL, FakeDriver, FakeGeminiAdapter, createFakeManager } from "../fakes.js";
 import type { FakeAdapterBehavior } from "../fakes.js";
 import { setupTestContext, cancelRequest } from "../helpers.js";
@@ -35,7 +36,13 @@ describe("Request Cancel 集成(§八.1 取消生成)", () => {
   }> {
     sequence++;
     const conversation = await ctx.prisma.conversation.create({
-      data: { title: `cancel-int-${sequence}`, status: "ACTIVE", provider: "GEMINI_WEB" },
+      // B3-1:取消走 owner 判定,本文件 HTTP 身份 = COMPAT_USER_ID
+      data: {
+        title: `cancel-int-${sequence}`,
+        status: "ACTIVE",
+        provider: "GEMINI_WEB",
+        userId: COMPAT_USER_ID,
+      },
     });
     const userMessage = await ctx.prisma.message.create({
       data: { conversationId: conversation.id, role: "USER", content, status: "COMPLETED", position: 1 },

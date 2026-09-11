@@ -28,6 +28,18 @@ export class RequestRepository {
     return db.modelRequest.findUnique({ where: { id } });
   }
 
+  /**
+   * V1.3-B3 §16:Request 本身不存 owner,归属沿着 request → conversation.userId 判定。
+   * 关系过滤下推到数据库一次完成,不存在与属于别人同样返回 null(调用方统一 404)。
+   */
+  async findOwnedById(
+    db: DbClient,
+    id: string,
+    userId: string,
+  ): Promise<ModelRequestModel | null> {
+    return db.modelRequest.findFirst({ where: { id, conversation: { userId } } });
+  }
+
   async findByIdempotencyKey(db: DbClient, key: string): Promise<ModelRequestModel | null> {
     return db.modelRequest.findUnique({ where: { idempotencyKey: key } });
   }

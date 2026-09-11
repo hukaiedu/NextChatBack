@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 import { FakeDriver, FakeGeminiAdapter, createFakeManager } from "../fakes.js";
@@ -26,7 +27,13 @@ describe("Request Cancel Service(§8.9 取消接口)", () => {
   async function seedRequest(status: string): Promise<{ requestId: string; assistantMessageId: string }> {
     sequence++;
     const conversation = await ctx.prisma.conversation.create({
-      data: { title: `cancel-${sequence}`, status: "ACTIVE", provider: "GEMINI_WEB" },
+      // B3-1:取消按 owner 判归属;本文件跑 COMPAT 模式,HTTP 身份就是 COMPAT_USER_ID
+      data: {
+        title: `cancel-${sequence}`,
+        status: "ACTIVE",
+        provider: "GEMINI_WEB",
+        userId: COMPAT_USER_ID,
+      },
     });
     const userMessage = await ctx.prisma.message.create({
       data: { conversationId: conversation.id, role: "USER", content: "test", status: "COMPLETED", position: 1 },

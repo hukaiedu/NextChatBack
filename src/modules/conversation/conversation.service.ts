@@ -23,17 +23,18 @@ export class ConversationService {
     private readonly requestRepo: RequestRepository,
   ) {}
 
-  async create(input: { title?: string }): Promise<ConversationModel> {
+  async create(userId: string, input: { title?: string }): Promise<ConversationModel> {
     return this.conversationRepo.create(this.prisma, {
       title: input.title ?? DEFAULT_TITLE,
       status: "ACTIVE",
       provider: DEFAULT_PROVIDER,
+      userId,
     });
   }
 
-  /** 详情:DELETED 视为不存在(普通 API 不返回已删除会话) */
-  async getById(id: string): Promise<ConversationModel> {
-    const conversation = await this.conversationRepo.findById(this.prisma, id);
+  /** 详情:DELETED 视为不存在(普通 API 不返回已删除会话);非本人同样 404,不泄露存在性 */
+  async getById(userId: string, id: string): Promise<ConversationModel> {
+    const conversation = await this.conversationRepo.findOwnedById(this.prisma, id, userId);
     if (!conversation || conversation.status === "DELETED") {
       throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
     }
@@ -44,6 +45,9 @@ export class ConversationService {
    * 写操作前置读取:与 getById 的「DELETED 当 404 隐藏」相反,
    * 发消息 / 发 Prompt 这类写操作必须明确告知会话已删除(409),
    * 与 MessageService 的口径保持一致。
+   *
+   * 只服务 Scheduler 执行链(GeminiPromptService 按已认领 Request 的 conversationId 调用),
+   * 那条路径没有「当前用户」可言;Public 发送路径的 owner 判定在 MessageService 事务内完成。
    */
   async getWritableById(id: string): Promise<ConversationModel> {
     const conversation = await this.conversationRepo.findById(this.prisma, id);
@@ -56,9 +60,10 @@ export class ConversationService {
     return conversation;
   }
 
-  async list(params: ListConversationsParams): Promise<ConversationListResult> {
+  async list(userId: string, params: ListConversationsParams): Promise<ConversationListResult> {
     const cursor = params.cursor ? decodeCursor(params.cursor) : null;
     const items = await this.conversationRepo.list(this.prisma, {
+      userId,
       status: params.status,
       limit: params.limit,
       cursor,
@@ -70,12 +75,12 @@ export class ConversationService {
     };
   }
 
-  async update(id: string, patch: {
+  async update(userId: string, id: string, patch: {
     title?: string;
     status?: "ACTIVE" | "ARCHIVED";
     preferredModelKey?: string | null;
   }): Promise<ConversationModel> {
-    const conversation = await this.conversationRepo.findById(this.prisma, id);
+    const conversation = await this.conversationRepo.findOwnedById(this.prisma, id, userId);
     if (!conversation) {
       throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
     }
@@ -96,7 +101,7 @@ export class ConversationService {
       }
     }
     try {
-      const updated = await this.conversationRepo.update(this.prisma, id, {
+      const updated = await this.conversationRepo.updateOwned(this.prisma, id, userId, {
         title: patch.title,
         status: patch.status,
         preferredModelKey: patch.preferredModelKey,
@@ -172,9 +177,12 @@ export class ConversationService {
     }
   }
 
-  /** 软删除:只改状态,不物理删除 Message / Request */
-  async softDelete(id: string): Promise<void> {
-    const conversation = await this.conversationRepo.findById(this.prisma, id);
+  /**
+   * 软删除:只改状态,不物理删除 Message / Request。
+   * owner 判定在 active-request 判定之前 —— 跨用户删除只得到 404,不泄露对方会话的状态。
+   */
+  async softDelete(userId: string, id: string): Promise<void> {
+    const conversation = await this.conversationRepo.findOwnedById(this.prisma, id, userId);
     if (!conversation) {
       throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
     }
@@ -190,7 +198,7 @@ export class ConversationService {
       );
     }
     try {
-      await this.conversationRepo.update(this.prisma, id, {
+      await this.conversationRepo.updateOwned(this.prisma, id, userId, {
         status: "DELETED",
         deletedAt: new Date(),
       });

@@ -20,7 +20,7 @@ export function createSseRouter(sse: SseService): Router {
   router.get("/:id/events", async (req, res) => {
     const params = parseOrThrow(requestParamSchema, req.params, "requestParams");
     // 必须在写 SSE 头之前完成校验:否则 404 会被包成事件流,客户端拿不到正确状态码
-    await sse.assertVisible(params.id);
+    await sse.assertVisible(req.auth!.userId, params.id);
 
     res.status(200);
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");

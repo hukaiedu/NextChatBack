@@ -40,6 +40,12 @@ export class MessageService {
    * 发送消息:一个数据库事务完成 检查 → 创建 USER / ASSISTANT / REQUEST。
    * 事务提交后通知 Scheduler 立即认领(prd §6.2 M→N);Provider 执行不在本方法内。
    *
+   * V1.3-B3 §12:userId = req.auth.userId 是唯一可信归属依据,顺序固定为
+   * 「owned Conversation 确认 → 幂等预检 → 附件占位 → 事务」。ownership 门控必须排在
+   * 幂等预检之前:否则跨用户调用会先用别人的 Idempotency-Key 命中既有 Request,
+   * 把「会话存在与否」泄露成响应差异;门控之后,非本人既没有 Message/Request 落库,
+   * 也不会占用 AttachmentStore 槽位(还没走到 reserve 就 404 了)。
+   *
    * M1:modelKey 为客户端本次**显式提交**的模型键(可省略):
    * - 参与幂等指纹(省略 = V1 语义,与旧指纹逐字节一致);偏好永不参与指纹
    * - requestedModelKey 快照 = 显式提交 ?? 会话偏好 ?? null(创建后不再变更)
@@ -50,6 +56,7 @@ export class MessageService {
    * 也不碰既有 slot(ATT-IDEM-01)。纯文本(attachments 缺省)一条附件路径都不走。
    */
   async sendMessage(
+    userId: string,
     conversationId: string,
     rawContent: string,
     idempotencyKey: string,
@@ -64,6 +71,12 @@ export class MessageService {
       modelKey,
       attachments === undefined ? undefined : computeAttachmentsDigest(attachments),
     );
+
+    // §14 步骤 1:目标会话必须先属于当前用户(不存在与属于别人同为 404)
+    const gated = await this.conversationRepo.findOwnedById(this.prisma, conversationId, userId);
+    if (!gated) {
+      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
+    }
 
     // 幂等预检(同 Key 常见重复请求直接返回,避免无谓事务)
     const existing = await this.requestRepo.findByIdempotencyKey(this.prisma, idempotencyKey);
@@ -80,8 +93,8 @@ export class MessageService {
     }
     try {
       const result = await this.prisma.$transaction(async (tx) => {
-        // 1. Conversation 存在 + ACTIVE
-        const conversation = await this.conversationRepo.findById(tx, conversationId);
+        // 1. Conversation 属于当前用户 + ACTIVE(§13:owner 条件进事务,与写路径同源)
+        const conversation = await this.conversationRepo.findOwnedById(tx, conversationId, userId);
         if (!conversation) {
           throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
         }
@@ -138,9 +151,10 @@ export class MessageService {
         });
 
         // 4. 显式提交模型键 → 同事务同步会话偏好;省略则只刷新 updatedAt,偏好绝不变动
-        await this.conversationRepo.update(
+        await this.conversationRepo.updateOwned(
           tx,
           conversationId,
+          userId,
           modelKey === undefined ? {} : { preferredModelKey: modelKey },
         );
 
@@ -187,7 +201,11 @@ export class MessageService {
       // 并发归档/删除获胜:数据库 trigger 拦截(Phase 2.1)。
       // 重读会话确定具体错误(避免只依赖过期的先读检查)。
       if (detectTriggerAbort(err) === "conversation_not_active") {
-        const conversation = await this.conversationRepo.findById(this.prisma, conversationId);
+        const conversation = await this.conversationRepo.findOwnedById(
+          this.prisma,
+          conversationId,
+          userId,
+        );
         if (!conversation) {
           throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", err);
         }
@@ -210,7 +228,14 @@ export class MessageService {
     }
   }
 
-  /** 幂等规则:Key 已存在 → 同 fingerprint 返回既有记录,不同 → 409 */
+  /**
+   * 幂等规则:Key 已存在 → 同 fingerprint 返回既有记录,不同 → 409。
+   *
+   * §14 步骤 3 的「命中的 Request 仍属于当前用户」由两条既有条件合起来保证:
+   * 调用方已按 (conversationId, userId) 门控过目标会话,而这里要求
+   * request.conversationId === conversationId,否则直接 409 —— 同一 id 即同一 owner
+   * (V1.3 不提供 owner 转移),所以跨用户撞 Key 只得到一个不带你数据的 409。
+   */
   private async resolveIdempotent(
     request: ModelRequestModel,
     conversationId: string,
@@ -244,12 +269,20 @@ export class MessageService {
    * 消息分页列表(PAG-2):按 position desc 取 limit+1 条探测 hasMore,页内反转为旧→新。
    * cursor 语义 position < cursor.p;totalCount 为会话 Message 总数(与页查询并行)。
    * Request 摘要只查页内 assistant 消息;会话不存在/DELETED → 404,ARCHIVED 可读。
+   *
+   * V1.3-B3 §11:先确认会话属于当前用户才查 Message。跨用户必须是 404,
+   * 不能是 200 + 空数组 —— 空页与「会话里确实没消息」逐字节相同,等于给对方会话开了探测口。
    */
   async listMessages(
+    userId: string,
     conversationId: string,
     query: ListMessagesQuery,
   ): Promise<MessageListPage> {
-    const conversation = await this.conversationRepo.findById(this.prisma, conversationId);
+    const conversation = await this.conversationRepo.findOwnedById(
+      this.prisma,
+      conversationId,
+      userId,
+    );
     if (!conversation || conversation.status === "DELETED") {
       throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found", 404);
     }

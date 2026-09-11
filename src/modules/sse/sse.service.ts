@@ -217,9 +217,12 @@ export class SseService {
 
   constructor(private readonly deps: SseServiceDeps) {}
 
-  /** 写 SSE 头之前先确认 Request 存在:未知 id 抛 REQUEST_NOT_FOUND,由统一错误出口回 404 */
-  assertVisible(requestId: string): Promise<ModelRequestModel> {
-    return this.deps.requests.getById(requestId);
+  /**
+   * V1.3-B3 §18:写 SSE 头之前必须完成的 preflight —— 归属不成立就是 404 JSON,
+   * 不能被包成事件流(controller 保证了「先校验、后 setHeader」的顺序)。
+   */
+  assertVisible(userId: string, requestId: string): Promise<ModelRequestModel> {
+    return this.deps.requests.getOwnedById(userId, requestId);
   }
 
   open(

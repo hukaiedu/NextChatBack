@@ -51,8 +51,22 @@ export class RequestService {
     private readonly cancellation?: CancellationRegistry,
   ) {}
 
+  /**
+   * 内部读取:只允许「归属已经确立」的调用方使用 —— 例如 SSE 长连接,
+   * 建连前已按 §18 做过 owner preflight,V1.3 不提供 owner 转移,所以期间不必复查。
+   * Public API 一律走 getOwnedById。
+   */
   async getById(id: string): Promise<ModelRequestModel> {
     const request = await this.requestRepo.findById(this.prisma, id);
+    if (!request) {
+      throw new AppError(ErrorCodes.REQUEST_NOT_FOUND, "Request not found");
+    }
+    return request;
+  }
+
+  /** V1.3-B3 §16:不存在与属于别人同为 REQUEST_NOT_FOUND,不泄露他人 Request 的存在性 */
+  async getOwnedById(userId: string, id: string): Promise<ModelRequestModel> {
+    const request = await this.requestRepo.findOwnedById(this.prisma, id, userId);
     if (!request) {
       throw new AppError(ErrorCodes.REQUEST_NOT_FOUND, "Request not found");
     }
@@ -128,15 +142,18 @@ export class RequestService {
   /**
    * 受理取消(prd §8.9)。
    *
+   * V1.3-B3 §17:先按 (id, conversation.userId) 判归属,再做任何状态写与 registry.abort ——
+   * 非本人拿到的 404 与「Request 不存在」完全同形,对方 Request 的状态不受影响。
+   *
    * 最多两轮:第一轮的条件写可能撞上 Scheduler 认领或执行收尾(count=0),
    * 重读一次按新状态如实分派,不做无界重试(原则 30)。
    *
    * 终态一律由数据库条件写决定,registry.abort 只是尽力把 signal 送到 ——
    * 即使 abort 返回 false(PENDING 尚未认领),markCancelled 仍会把行推到 CANCELLED。
    */
-  async cancel(id: string): Promise<CancelOutcome> {
+  async cancel(userId: string, id: string): Promise<CancelOutcome> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const current = await this.requestRepo.findById(this.prisma, id);
+      const current = await this.requestRepo.findOwnedById(this.prisma, id, userId);
       if (!current) {
         throw new AppError(ErrorCodes.REQUEST_NOT_FOUND, "Request not found");
       }
@@ -159,7 +176,7 @@ export class RequestService {
         });
         if (n > 0) {
           this.events?.publishStatus(id);
-          return { kind: "cancelled", request: await this.getById(id) };
+          return { kind: "cancelled", request: await this.getOwnedById(userId, id) };
         }
         continue;
       }
@@ -174,14 +191,14 @@ export class RequestService {
         if (n > 0) {
           this.cancellation?.abort(id);
           this.events?.publishStatus(id);
-          return { kind: "cancelling", request: await this.getById(id) };
+          return { kind: "cancelling", request: await this.getOwnedById(userId, id) };
         }
         continue;
       }
 
       return this.settledOutcome(current);
     }
-    return this.settledOutcome(await this.getById(id));
+    return this.settledOutcome(await this.getOwnedById(userId, id));
   }
 
   /**

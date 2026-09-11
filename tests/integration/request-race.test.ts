@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AppError } from "../../src/common/errors/app-error.js";
 import { createLogger } from "../../src/common/logger/logger.js";
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { ConversationRepository } from "../../src/modules/conversation/conversation.repository.js";
 import { MessageRepository } from "../../src/modules/message/message.repository.js";
 import { MessageService } from "../../src/modules/message/message.service.js";
@@ -26,6 +27,9 @@ import type { TestContext } from "../helpers.js";
  */
 
 const ACTIVE = ["PENDING", "PROCESSING", "CANCELLING"] as const;
+
+/** B3-1:sendMessage 首参是当前用户;本文件直调 Service,会话必须属于这个 owner 才写得下去 */
+const OWNER_USER_ID = COMPAT_USER_ID;
 
 let ctx: TestContext;
 let prisma: TestContext["prisma"];
@@ -56,7 +60,7 @@ afterEach(async () => {
 });
 
 async function newConversation(title: string): Promise<string> {
-  return (await prisma.conversation.create({ data: { title } })).id;
+  return (await prisma.conversation.create({ data: { title, userId: OWNER_USER_ID } })).id;
 }
 
 async function activeCount(conversationId: string): Promise<number> {
@@ -123,12 +127,12 @@ describe("唯一约束竞态兜底(§六/§十二):P2002 全部由真实约束�
   it("RACE-IDEM-01 同会话同 Key + 同图片:输家撞 idempotencyKey → 重查 → deduplicated", async () => {
     const conversationId = await newConversation("race-idem-01");
     const img = attachment("image/png", 4096);
-    const winner = await service.sendMessage(conversationId, "同一句话", "k-01", undefined, [img]);
+    const winner = await service.sendMessage(OWNER_USER_ID, conversationId, "同一句话", "k-01", undefined, [img]);
     expect(store.stats().slotCount).toBe(1);
     await finishRequest(winner.request.id);
 
     const loser = await withStalePrechecks({ idempotencyKey: true }, () =>
-      service.sendMessage(conversationId, "同一句话", "k-01", undefined, [img]),
+      service.sendMessage(OWNER_USER_ID, conversationId, "同一句话", "k-01", undefined, [img]),
     );
 
     expect(loser.deduplicated).toBe(true);
@@ -145,11 +149,11 @@ describe("唯一约束竞态兜底(§六/§十二):P2002 全部由真实约束�
 
   it("RACE-IDEM-01B 同 Key 但赢家仍活动:活动索引优先命中,得 409 而非 dedup(实测判据)", async () => {
     const conversationId = await newConversation("race-idem-01b");
-    const winner = await service.sendMessage(conversationId, "同一句话", "k-01b");
+    const winner = await service.sendMessage(OWNER_USER_ID, conversationId, "同一句话", "k-01b");
 
     const err = await expectAppError(
       withStalePrechecks({ idempotencyKey: true, active: true }, () =>
-        service.sendMessage(conversationId, "同一句话", "k-01b"),
+        service.sendMessage(OWNER_USER_ID, conversationId, "同一句话", "k-01b"),
       ),
     );
     expect(err.code).toBe("CONVERSATION_REQUEST_IN_PROGRESS");
@@ -163,13 +167,13 @@ describe("唯一约束竞态兜底(§六/§十二):P2002 全部由真实约束�
     const conversationId = await newConversation("race-idem-02");
     const first = attachment("image/png", 4096);
     const second = attachment("image/jpeg", 2048);
-    const winner = await service.sendMessage(conversationId, "同一句话", "k-02", undefined, [first]);
+    const winner = await service.sendMessage(OWNER_USER_ID, conversationId, "同一句话", "k-02", undefined, [first]);
     await finishRequest(winner.request.id);
     const winnerSlot = store.stats().slots[0]!;
 
     const err = await expectAppError(
       withStalePrechecks({ idempotencyKey: true }, () =>
-        service.sendMessage(conversationId, "同一句话", "k-02", undefined, [second]),
+        service.sendMessage(OWNER_USER_ID, conversationId, "同一句话", "k-02", undefined, [second]),
       ),
     );
     expect(err.code).toBe("IDEMPOTENCY_KEY_REUSED");
@@ -183,7 +187,7 @@ describe("唯一约束竞态兜底(§六/§十二):P2002 全部由真实约束�
     const otherConversation = await newConversation("race-idem-02-other");
     const crossErr = await expectAppError(
       withStalePrechecks({ idempotencyKey: true }, () =>
-        service.sendMessage(otherConversation, "同一句话", "k-02", undefined, [first]),
+        service.sendMessage(OWNER_USER_ID, otherConversation, "同一句话", "k-02", undefined, [first]),
       ),
     );
     expect(crossErr.code).toBe("IDEMPOTENCY_KEY_REUSED");
@@ -194,12 +198,12 @@ describe("唯一约束竞态兜底(§六/§十二):P2002 全部由真实约束�
   it("RACE-CONV-01 同会话不同 Key:输家撞活动唯一索引 → 409 CONVERSATION_REQUEST_IN_PROGRESS", async () => {
     const conversationId = await newConversation("race-conv-01");
     const img = attachment("image/png", 4096);
-    const winner = await service.sendMessage(conversationId, "先到的", "k-conv-1", undefined, [img]);
+    const winner = await service.sendMessage(OWNER_USER_ID, conversationId, "先到的", "k-conv-1", undefined, [img]);
     const winnerSlot = store.stats().slots[0]!;
 
     const err = await expectAppError(
       withStalePrechecks({ active: true }, () =>
-        service.sendMessage(conversationId, "后到的", "k-conv-2", undefined, [
+        service.sendMessage(OWNER_USER_ID, conversationId, "后到的", "k-conv-2", undefined, [
           attachment("image/jpeg", 1024),
         ]),
       ),
@@ -217,10 +221,10 @@ describe("唯一约束竞态兜底(§六/§十二):P2002 全部由真实约束�
 
   it("RACE-PREC-01 Message(conversationId,position) 复合冲突不得被洗成业务 409", async () => {
     const conversationId = await newConversation("race-prec-01");
-    await service.sendMessage(conversationId, "先到的", "k-prec-1");
+    await service.sendMessage(OWNER_USER_ID, conversationId, "先到的", "k-prec-1");
 
     const result = await withStalePrechecks({ active: true, position: true }, () =>
-      service.sendMessage(conversationId, "后到的", "k-prec-2", undefined, [
+      service.sendMessage(OWNER_USER_ID, conversationId, "后到的", "k-prec-2", undefined, [
         attachment("image/png", 512),
       ]),
     )
@@ -244,10 +248,10 @@ describe("唯一约束竞态兜底(§六/§十二):P2002 全部由真实约束�
   it("RACE-REG-01 诚实预检下不新建 Request:同 Key 重发仍走既有幂等路径(回归护栏)", async () => {
     const conversationId = await newConversation("race-reg-01");
     const img = attachment("image/png", 4096);
-    const winner = await service.sendMessage(conversationId, "同一句话", "k-reg", undefined, [img]);
+    const winner = await service.sendMessage(OWNER_USER_ID, conversationId, "同一句话", "k-reg", undefined, [img]);
     await finishRequest(winner.request.id);
 
-    const replay = await service.sendMessage(conversationId, "同一句话", "k-reg", undefined, [img]);
+    const replay = await service.sendMessage(OWNER_USER_ID, conversationId, "同一句话", "k-reg", undefined, [img]);
     expect(replay.deduplicated).toBe(true);
     expect(replay.request.id).toBe(winner.request.id);
     expect(store.stats().slots).toHaveLength(1);

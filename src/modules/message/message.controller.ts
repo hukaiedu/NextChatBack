@@ -18,7 +18,7 @@ export function createMessageRouter(service: MessageService): Router {
   router.get("/", async (req, res) => {
     const params = parseOrThrow(messageRouteParamSchema, req.params, "messageParams");
     const query = parseOrThrow(listMessagesQuerySchema, req.query, "listMessagesQuery");
-    const result = await service.listMessages(params.conversationId, query);
+    const result = await service.listMessages(req.auth!.userId, params.conversationId, query);
     res.json({
       data: result.items,
       meta: { nextCursor: result.nextCursor, totalCount: result.totalCount },
@@ -36,6 +36,7 @@ export function createMessageRouter(service: MessageService): Router {
     const body = parseOrThrow(sendMessageSchema, req.body ?? {}, "sendMessage");
 
     const result = await service.sendMessage(
+      req.auth!.userId,
       params.conversationId,
       body.content,
       idempotencyKey,

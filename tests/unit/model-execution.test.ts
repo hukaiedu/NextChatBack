@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { AppError } from "../../src/common/errors/app-error.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import type { PrismaClient } from "../../src/generated/prisma/client.js";
 import type { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
 import type {
@@ -115,7 +116,13 @@ describe("M3 模型选择接入执行链路(GeminiPromptService + Scheduler,Fake
   ): Promise<Seeded> {
     sequence += 1;
     const conversation = await ctx.prisma.conversation.create({
-      data: { title: `conv-${sequence}`, status: "ACTIVE", provider: "GEMINI_WEB" },
+      // B3-1:取消走 owner 判定,本文件 HTTP 身份 = COMPAT_USER_ID
+      data: {
+        title: `conv-${sequence}`,
+        status: "ACTIVE",
+        provider: "GEMINI_WEB",
+        userId: COMPAT_USER_ID,
+      },
     });
     const userMessage = await ctx.prisma.message.create({
       data: {
