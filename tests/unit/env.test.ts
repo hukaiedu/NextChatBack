@@ -24,6 +24,13 @@ describe("parseEnv", () => {
     expect(env.REQUEST_EXECUTION_TIMEOUT_MS).toBe(600_000);
   });
 
+  // P1-01:browser:login 与 main.ts 同款加载 .env;此默认值是 CLI/后端未配置时的共同兜底
+  it("BROWSER_PROFILE_DIR 未设置时套用默认值", () => {
+    expect(parseEnv({ ...base }).BROWSER_PROFILE_DIR).toBe(
+      "./data/browser-profile",
+    );
+  });
+
   it("缺少 DATABASE_URL 时抛 VALIDATION_ERROR", () => {
     const raw = { ...base };
     delete raw.DATABASE_URL;

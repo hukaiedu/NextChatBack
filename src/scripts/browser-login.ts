@@ -18,6 +18,9 @@
  * 边界:不 import main.ts、不初始化 Prisma/Scheduler/Express/Auth(浏览器专用);
  * 日志不输出 cookie/token/profile 内容/代理 URL。
  */
+// P1-01:与 main.ts 同款 dotenv 加载 —— CLI 与后端必须解析同一份 .env(尤其 BROWSER_PROFILE_DIR)
+import "dotenv/config";
+
 import type { Logger } from "../common/logger/logger.js";
 import { createLogger } from "../common/logger/logger.js";
 import { parseEnv } from "../config/env.js";
