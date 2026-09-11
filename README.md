@@ -48,8 +48,8 @@ personChat Backend 是 personChat 的服务端。
 **当前定位：**
 
 - 单用户
-- 单实例
-- 本地使用
+- 单 Backend 实例
+- 自托管
 - 小规模内网使用
 
 **不适用于：**
@@ -124,6 +124,10 @@ SQLite / Prisma
 - SQLite 一致性保护（Request ↔ Assistant 状态配对检查）
 - 错误码统一映射（见 [§18](#18-错误码与-http-映射)）
 - 日志脱敏（不记 Prompt / 回答原文 / 未脱敏会话 URL）
+- 图片附件消息（V1.2：PNG / JPEG / WebP / GIF）
+- 纯图片消息（`content` 为空 + 附件 ≥ 1，见 [§17](#17-api-概览)）
+- 图片附件注入 Gemini Web composer
+- 请求附件份数 `attachmentCount` 持久化（图片字节不落库）
 
 **以下不是本项目能力，请勿据此使用：**
 
@@ -244,23 +248,16 @@ Linux / macOS：
 cp .env.example .env
 ```
 
-`.env.example` 内容（**不含任何真实 Cookie / Token / Google 凭证**）：
+环境变量清单以仓库根目录 [.env.example](.env.example) 与 [src/config/env.ts](src/config/env.ts) 为**唯一权威来源**（本节不再复制完整清单，避免与代码漂移）。快速启动至少确认以下 4 项：
 
-```dotenv
-NODE_ENV=development
-HOST=127.0.0.1
-PORT=3010
-DATABASE_URL="file:./data/database/app.db"
-LOG_LEVEL=info
-BROWSER_PROFILE_DIR=./data/browser-profile
-BROWSER_HEADLESS=false
-GEMINI_BASE_URL=https://gemini.google.com/app
-GEMINI_RESPONSE_TIMEOUT_MS=300000
-REQUEST_EXECUTION_TIMEOUT_MS=600000
-STREAMING_UPDATE_INTERVAL_MS=300
-```
+| 变量 | 说明 |
+| --- | --- |
+| `DATABASE_URL` | **必填，无默认值**；缺失 / 为空会在启动时抛 `VALIDATION_ERROR` 并 fail-fast |
+| `PORT` | HTTP 监听端口，默认 `3010` |
+| `BROWSER_PROFILE_DIR` | Chromium 持久化 profile（**Gemini 登录态所在**），代码默认 `./data/browser-profile` |
+| `BROWSER_PROXY_URL` | 可选：Playwright Chromium 出网代理（Backend 与 `browser:login` 共用），见 [§9](#9-环境变量) |
 
-> `DATABASE_URL` 是唯一**没有默认值**的必填项，缺失会在启动时抛 `VALIDATION_ERROR` 并 fail-fast。
+> `.env.example` **不含任何真实 Cookie / Token / Google 凭证**；真实 `.env` 不要提交（见 [§23](#23-安全说明)）。
 
 ### 7.5 Prisma（生成客户端 + 初始化数据库）
 
@@ -278,7 +275,7 @@ yarn prisma:generate
 yarn prisma migrate deploy
 ```
 
-> 迁移文件位于 `prisma/migrations/`（当前 2 个：`init_core_tables`、`phase_2_1_concurrency_guards`）。`migrate deploy` 只应用已有迁移，不会交互式生成新迁移，适合首次初始化与部署。
+> 迁移文件位于 `prisma/migrations/`。部署时使用 `yarn prisma migrate deploy` 应用仓库中所有已提交 migration；该命令只应用已有迁移，不会交互式生成新迁移，适合首次初始化与部署。不要依赖 README 中的 migration 数量，以 `prisma/migrations/` 为准。
 
 ### 7.6 启动
 
@@ -295,7 +292,9 @@ yarn build
 node dist/main.js
 ```
 
-> `yarn start` 等价于 `node dist/main.js`（需先 `yarn build`）。所有脚本以 [package.json](package.json) 的 `scripts` 为准：`dev` / `build` / `typecheck` / `start` / `test` / `prisma:generate`。
+> `yarn start` 等价于 `node dist/main.js`（需先 `yarn build`）。所有脚本以 [package.json](package.json) 的 `scripts` 为准：`dev` / `build` / `typecheck` / `start` / `test` / `prisma:generate` / **`browser:login`**。
+>
+> `yarn browser:login` 使用与 Backend 相同的环境配置启动**可见** Chromium，用于完成或刷新 Gemini 登录态；它执行 `dist/scripts/browser-login.js`，因此**必须先 `yarn build`**（流程见 [§8](#8-首次-gemini-登录)）。
 
 启动成功后日志会打印：
 
@@ -332,46 +331,42 @@ curl http://127.0.0.1:3010/api/health
 
 personChat **不使用 Gemini API Key**，需要通过 Chromium **人工登录** Google / Gemini 一次；登录态保存在独立持久化 profile 中，之后复用。
 
-登录流程：
+**首次登录（推荐流程）：**
 
 ```text
-启动 Backend
-      ↓
-POST /api/provider/open      # 启动 BrowserManager，打开 / 聚焦 Gemini 页面
-      ↓
-在弹出的 Chromium 里人工登录 Google
-      ↓
-进入 Gemini
-      ↓
-POST /api/provider/restart   # 用同一 profile 重启 Context 并重新打开 Gemini
-      ↓
-GET  /api/provider/status    # 轮询直到 status = READY
-      ↓
-READY
+1. 配置 .env（至少 DATABASE_URL / BROWSER_PROFILE_DIR，见 §7.4）
+2. yarn build                        # browser:login 执行 dist/，必须先构建
+3. 停止正在使用同一 BROWSER_PROFILE_DIR 的 Backend
+4. yarn browser:login                # 打开可见 Chromium（强制 headed，不受 BROWSER_HEADLESS 影响）
+5. 在弹出的 Chromium 中完成 Google / Gemini 登录
+6. CLI 检测到登录成功后自动关闭 Chromium 并 exit 0
+7. 启动 Backend（yarn start / node dist/main.js）
+8. 检查运行状态：GET /api/health 与 GET /api/browser/status（RUNNING + providerLoggedIn=true）
 ```
 
-curl 示例（状态码以实际 Controller 为准）：
+- **browser:login 不需要按 Enter 结束**：登录成功后 CLI 自动关闭浏览器并退出（exit 0）；已登录的 profile 会直接输出 `already logged in; closing browser` 并退出。
+- CLI 等待登录期间持续轮询（750ms），可随时 `Ctrl+C` 中止（退出码 130）；若打开浏览器遇到环境 / 网络类错误，会自动重试至多 2 次（间隔 5s），仍失败则 exit 1（只输出错误码摘要，不含任何凭据）。
+- `POST /api/provider/open` / `POST /api/provider/restart` 等 Provider 接口仍然保留，用于运行期交互（见 [§17](#17-api-概览)）；**首次登录与登录态恢复请使用上述 `browser:login` 流程**。
 
-```bash
-# 打开 Gemini（成功 200；未登录时 data.status = LOGIN_REQUIRED）
-curl -X POST http://127.0.0.1:3010/api/provider/open
-# → 200 { "data": { "provider": "GEMINI_WEB", "status": "LOGIN_REQUIRED" } }
+**single-owner 纪律（profile 独占）：**
 
-# 人工在浏览器完成登录后，重启 Context 复用同一 profile
-curl -X POST http://127.0.0.1:3010/api/provider/restart
-# → 200 { "data": { "provider": "GEMINI_WEB", "status": "READY" } }
+- 同一个 `BROWSER_PROFILE_DIR` **同一时刻只能有一个持有者**（Backend 或 `browser:login`）：运行 `browser:login` 前先停止使用该 profile 的 Backend；`browser:login` 成功退出后再启动 Backend。
+- Linux 上 Chromium 通常以 ProcessSingleton 阻止第二持有者；**Windows 上不应依赖这一保护**，仍必须遵守 single-owner 纪律。
+- **不要**删除 `Singleton*` 锁文件来“解锁”，也不要强制抢占 profile 或复制生产 profile / Cookie。
+- 遇到 `PROVIDER_PROFILE_IN_USE`（HTTP 500）时，先检查并关闭仍占用该 profile 的旧实例（残留 Backend 进程或它拉起的 Chromium），再重新启动。
 
-# 查询状态（不启动浏览器）
-curl http://127.0.0.1:3010/api/provider/status
-# → 200 { "data": { "provider": "GEMINI_WEB", "status": "READY" } }
-```
+**profile 与登录态：**
 
-**关于 profile：**
+- **不要使用日常 Chrome 的 Default Profile。** 用 `BROWSER_PROFILE_DIR` 指定的**独立持久化 profile**（代码默认 `./data/browser-profile`）。
+- `BROWSER_PROFILE_DIR` 保存 **Gemini 登录态**（等价于持久凭证）；**生产环境必须指向持久化目录**，例如部署 SOP 使用的 `/var/lib/personchat/browser-profile`（该绝对路径只是部署示例，不是代码默认值）。
+- 登录态恢复边界：
+  - profile 仍存在 + Google session 有效 → Backend 重启可直接复用，无需重新登录；
+  - profile 丢失、或 Google/Gemini session 失效 → **重跑 `browser:login`**。
+- 系统**不会**自动完成 Google 登录（不提供无人值守的自动重新认证）。
 
-- **不要使用日常 Chrome 的 Default Profile。** 用 `BROWSER_PROFILE_DIR` 指定的**独立持久化 profile**（默认 `./data/browser-profile`）。
-- 同一个 profile **只能被一个 personChat Backend 实例占用**。
-- 遇到 `PROVIDER_PROFILE_IN_USE`（HTTP 500）时，**不要直接删除 Chromium 的 lock 文件**；应先检查并关闭仍占用该 profile 的旧实例（残留的 Backend 进程或它拉起的 Chromium），再重新启动。
-- `BROWSER_HEADLESS=false`（默认）时浏览器窗口可见，便于人工登录；无人值守场景不适用（见 [§21](#21-已知限制)）。
+**无图形界面服务器：**
+
+- `browser:login` 使用 **headed（可见窗口）Chromium**；SSH-only Linux 服务器首次登录需要可用的图形显示环境（如 Xvfb + 临时 VNC）。完整步骤见 [docs/P8_DEPLOYMENT_SOP.md](docs/P8_DEPLOYMENT_SOP.md) §9。
 
 ---
 
@@ -388,6 +383,7 @@ curl http://127.0.0.1:3010/api/provider/status
 | `LOG_LEVEL` | `fatal`/`error`/`warn`/`info`/`debug`/`trace`/`silent` | `info` | Pino 日志级别 |
 | `BROWSER_PROFILE_DIR` | 字符串 | `./data/browser-profile` | 持久化 Chromium profile 目录 |
 | `BROWSER_HEADLESS` | `true` / `false`（字符串） | `false` | 是否无头运行浏览器 |
+| `BROWSER_PROXY_URL` | `http://` / `https://` / `socks5://` URL（可选，**禁止携带账号密码**） | 未设置 | 仅 Playwright Chromium 使用的显式代理；**Backend 与 `browser:login` 共用同一配置**。未设置时**不向 Playwright 传 proxy**（浏览器沿用自身默认 / 系统配置，如 Windows 开发环境为继承系统代理）；服务器部署建议显式配置（示例 `http://127.0.0.1:7892`） |
 | `GEMINI_BASE_URL` | URL | `https://gemini.google.com/app` | Gemini Web 入口 |
 | `GEMINI_RESPONSE_TIMEOUT_MS` | 正整数 | `300000` | 单次 Prompt 从发送到读回最终回答的等待上限 |
 | `REQUEST_EXECUTION_TIMEOUT_MS` | 正整数 | `600000` | Scheduler 单条 Request 执行 watchdog 上限 |
@@ -402,6 +398,8 @@ REQUEST_EXECUTION_TIMEOUT_MS  必须严格大于  GEMINI_RESPONSE_TIMEOUT_MS
 相等同样非法。违反时启动即抛 `VALIDATION_ERROR`（fail-fast），不会进入运行态。原因：watchdog 只应兜「执行器挂死连自身超时都不返回」的极端情况，正常超时必须由 Adapter 的 `GEMINI_RESPONSE_TIMEOUT_MS` 先触发；若 watchdog ≤ 响应上限，会把正常执行误判为 `TIMEOUT`。
 
 > 说明：`BROWSER_HEADLESS` 用「字符串 `true`/`false`」解析（`z.coerce.boolean` 会把 `"false"` 误判为 `true`，故不使用）。
+>
+> Backend main 与 `browser:login` **都会加载项目 `.env`**（P1-01 起两入口一致）；配置优先级：显式 shell / process.env > `.env` > 代码默认值。
 
 ---
 
@@ -542,11 +540,12 @@ HTTP 状态码小结：
 
 | 重启前状态 | 恢复动作 | 错误码 |
 | --- | --- | --- |
-| `PENDING` | 不动，Scheduler 首轮扫描自然重新排队 | — |
+| `PENDING` + `attachmentCount = 0` | 不动，Scheduler 首轮扫描自然重新排队 | — |
+| `PENDING` + `attachmentCount > 0` | → `FAILED`（附件字节只存在于上一进程内存，重启后不可恢复，禁止降级成纯文本发送） | `SERVER_RESTARTED_DURING_PROCESSING` |
 | `PROCESSING` | → `FAILED` | `SERVER_RESTARTED_DURING_PROCESSING` |
 | `CANCELLING` | → `FAILED` | `SERVER_RESTARTED_DURING_CANCELLING` |
 
-- **`PROCESSING` / `CANCELLING` 不自动重发 Gemini Prompt**：无法确认上一进程是否已把 Prompt 提交给 Gemini，强制 `FAILED` 且禁止重发。
+- **`PROCESSING` / `CANCELLING` / 带附件的 `PENDING` 不自动重发 Gemini Prompt**：无法确认上一进程是否已把 Prompt 提交给 Gemini（带附件 PENDING 则是附件字节已随进程丢失），强制 `FAILED` 且禁止重发，由用户显式重新发送。
 - 对应 Assistant Message 一律 → `FAILED`（不落 `CANCELLED`，否则会出现 Request `FAILED` + Assistant `CANCELLED` 的非法配对）。
 - 恢复末尾跑一次 Request ↔ Assistant 配对检查：**只发现、只记 error，不修复**（自动修复会销毁事故现场）。
 
@@ -560,12 +559,12 @@ HTTP 状态码小结：
 | --- | --- |
 | `Conversation` | 业务会话：`title` / `status`（`ACTIVE`/`ARCHIVED`/`DELETED`）/ `provider` / `providerConversationUrl`（唯一，可空）/ 时间戳 |
 | `Message` | 消息：`role`（USER/ASSISTANT）/ `content` / `status` / `position`（`(conversationId, position)` 唯一） |
-| `ModelRequest` | 一次「User Message → Provider → Assistant Message」的执行记录：`idempotencyKey`（唯一）/ `requestFingerprint` / `status` / `attemptCount` / `errorCode` / `errorMessage` / 时间戳 |
+| `ModelRequest` | 一次「User Message → Provider → Assistant Message」的执行记录：`userMessageId` / `assistantMessageId` / `idempotencyKey`（唯一）/ `requestFingerprint` / `status` / `requestedModelKey` / `resolvedModelKey` / `resolvedModelLabel`（V1.1 模型字段）/ `attachmentCount`（V1.2：本次请求的附件份数，图片字节不落库）/ `attemptCount` / `errorCode` / `errorMessage` / 时间戳 |
 
 要点：
 
 - **SQLite / Prisma 是权威数据源。**
-- DB 文件位置由 `DATABASE_URL` 决定（默认 `file:./data/database/app.db`）。
+- DB 文件位置由 `DATABASE_URL` 决定。仓库 [.env.example](.env.example) 使用 `file:./data/database/app.db` 作为示例；代码本身不提供 `DATABASE_URL` 默认值（未配置即启动失败）。
 - `BROWSER_PROFILE_DIR`（默认 `./data/browser-profile`）是 Chromium 持久化 profile，**不属于聊天数据**，但等价于持久登录态（见 [§23](#23-安全说明)）。
 - **不要把生产 DB 提交到 Git**（`data/` 下的正式数据应视为本地 / 敏感数据）。
 
@@ -582,13 +581,15 @@ HTTP 状态码小结：
 | `POST` | `/api/provider/open` | `200` | 启动 BrowserManager，打开 / 聚焦 Gemini |
 | `POST` | `/api/provider/restart` | `200` | 关闭 Context → 同 profile 重启 → 打开 Gemini；`BUSY` 时拒绝 |
 | `GET` | `/api/provider/models` | `200` | 模型目录（V1.1，实时读取 Gemini Web）；`LOGIN_REQUIRED` → 401，其余非 READY → 500 |
+| `GET` | `/api/browser/status` | `200` | 浏览器状态快照（只读，**不启动浏览器**；含 `state` / `providerLoggedIn` / `activeRequests` / `lastError` 等字段） |
+| `POST` | `/api/browser/restart` | `200` | 关闭并重启浏览器（保留 profile 登录态），返回重启后的新快照；重启中 / 有在飞 Request / `BUSY` → `409 BROWSER_RESTART_CONFLICT`，30s 未完成 → `504 BROWSER_RESTART_TIMEOUT` |
 | `POST` | `/api/conversations` | `201` | 创建会话（`title` 可选） |
 | `GET` | `/api/conversations` | `200` | 列表；`?status=ACTIVE\|ARCHIVED`（默认 `ACTIVE`）、`limit`（1–100，默认 30）、`cursor` |
 | `GET` | `/api/conversations/:id` | `200` | 会话详情 |
 | `PATCH` | `/api/conversations/:id` | `200` | 改 `title` / `status`（`ACTIVE`↔`ARCHIVED`）；V1.1 起支持 `preferredModelKey`（会话模型偏好，显式 `null` = 恢复默认模型） |
 | `DELETE` | `/api/conversations/:id` | `204` | 软删除（标记 `DELETED`，不可恢复） |
 | `GET` | `/api/conversations/:id/messages` | `200` | 消息列表（`position` ASC，Assistant 附带 Request 摘要） |
-| `POST` | `/api/conversations/:id/messages` | `202` / `200` | 发送消息；需 `Idempotency-Key` 头；body 可选 `modelKey`（V1.1，显式指定本次模型）。首次创建 Request → `202`；幂等命中 → `200` |
+| `POST` | `/api/conversations/:id/messages` | `202` / `200` | 发送消息；需 `Idempotency-Key` 头；body：`content`（可为空字符串，仅限纯图片消息）/ 可选 `modelKey`（V1.1）/ 可选 `attachments`（V1.2，见下文「图片附件」）。首次创建 Request → `202`；幂等命中 → `200` |
 | `GET` | `/api/requests/:id` | `200` | 查询 Request 当前状态 |
 | `POST` | `/api/requests/:id/cancel` | `202` / `200` | 取消；`PROCESSING→CANCELLING` → `202`，`PENDING→CANCELLED` / noop → `200` |
 | `GET` | `/api/requests/:id/events` | `200` | SSE 事件流（`text/event-stream`） |
@@ -610,6 +611,23 @@ curl -X POST http://127.0.0.1:3010/api/conversations/<CONV_ID>/messages \
 # → 202 { "data": { "request": {...}, "userMessage": {...}, "assistantMessage": {...}, "deduplicated": false } }
 ```
 
+**V1.2 图片附件（`attachments`）：**
+
+```json
+{
+  "content": "",
+  "attachments": [
+    { "name": "photo.jpg", "mimeType": "image/jpeg", "data": "data:image/jpeg;base64,..." }
+  ]
+}
+```
+
+- 支持 PNG / JPEG / WebP / GIF（其余类型 → `415 UNSUPPORTED_ATTACHMENT_TYPE`）；最多 4 张；单张解码后 ≤ 5MiB、合计解码后 ≤ 10MiB（超限 → `413 ATTACHMENT_TOO_LARGE`；整个请求体超限 → `413 PAYLOAD_TOO_LARGE`）。
+- `data` 必须是 `data:image/...;base64,` 形式的 data URL；声明的 `mimeType`、data URL 前缀、文件真实魔数三者必须一致，否则 415。
+- **纯图片消息**：`content=""` + `attachments` 至少 1 张是合法请求；无附件时 `attachments` 可省略（旧客户端行为不变）；`content` 与附件同时为空 → `400 VALIDATION_ERROR`。
+- **图片字节不落库**：仅持久化本次请求的附件份数（`ModelRequest.attachmentCount`）。响应中的 `userMessage.attachmentCount` = 本次请求附件份数（纯文本 = 0）。
+- 消息列表 `GET /api/conversations/:id/messages` 每条 item 均带 `attachmentCount`：USER = 对应 Request 的份数（无则 0），ASSISTANT 恒 0（原图字节从未持久化）。
+
 ---
 
 ## 18. 错误码与 HTTP 映射
@@ -622,9 +640,14 @@ curl -X POST http://127.0.0.1:3010/api/conversations/<CONV_ID>/messages \
 | `401` | `PROVIDER_LOGIN_REQUIRED`、`AUTH_REQUIRED`、`AUTH_INVALID_CREDENTIALS` |
 | `403` | `AUTH_CSRF_REJECTED` |
 | `404` | `CONVERSATION_NOT_FOUND`、`REQUEST_NOT_FOUND` |
-| `409` | `CONVERSATION_DELETED`、`CONVERSATION_ARCHIVED`、`CONVERSATION_REQUEST_IN_PROGRESS`、`IDEMPOTENCY_KEY_REUSED`、`REQUEST_NOT_CANCELLABLE`、`PROVIDER_CONVERSATION_UNAVAILABLE` |
+| `409` | `CONVERSATION_DELETED`、`CONVERSATION_ARCHIVED`、`CONVERSATION_REQUEST_IN_PROGRESS`、`IDEMPOTENCY_KEY_REUSED`、`REQUEST_NOT_CANCELLABLE`、`PROVIDER_CONVERSATION_UNAVAILABLE`、`BROWSER_RESTART_CONFLICT` |
+| `413` | `PAYLOAD_TOO_LARGE`（请求体超限）、`ATTACHMENT_TOO_LARGE`（图片张数 / 单张 / 合计超限） |
+| `415` | `UNSUPPORTED_ATTACHMENT_TYPE` |
 | `429` | `PROVIDER_RATE_LIMITED`（仅保留映射，无可靠真实判据，见 [§21](#21-已知限制)）、`AUTH_RATE_LIMITED`（携带 `Retry-After`） |
-| `500` | `SERVER_RESTARTED_DURING_PROCESSING`、`SERVER_RESTARTED_DURING_CANCELLING`、`STREAMING_UPDATE_FAILED`、`SSE_CONNECTION_ERROR`、`PROVIDER_NOT_READY`、`PROVIDER_PROFILE_IN_USE`、`PROVIDER_BROWSER_START_FAILED`、`PROVIDER_PAGE_CLOSED`、`PROVIDER_BROWSER_CRASHED`、`PROVIDER_NAVIGATION_FAILED`、`PROVIDER_DOM_CHANGED`、`PROVIDER_RESPONSE_TIMEOUT`、`PROVIDER_CANCELLATION_UNCONFIRMED`、`DATABASE_ERROR`、`INTERNAL_ERROR` |
+| `500` | `SERVER_RESTARTED_DURING_PROCESSING`、`SERVER_RESTARTED_DURING_CANCELLING`、`STREAMING_UPDATE_FAILED`、`SSE_CONNECTION_ERROR`、`PROVIDER_NOT_READY`、`PROVIDER_PROFILE_IN_USE`、`PROVIDER_BROWSER_START_FAILED`、`PROVIDER_PAGE_CLOSED`、`PROVIDER_BROWSER_CRASHED`、`PROVIDER_NAVIGATION_FAILED`、`PROVIDER_DOM_CHANGED`、`PROVIDER_RESPONSE_TIMEOUT`、`PROVIDER_CANCELLATION_UNCONFIRMED`、`DATABASE_ERROR`、`INTERNAL_ERROR`、`BROWSER_LAUNCH_FAILED`、`BROWSER_RESTART_FAILED` |
+| `502` | `PROVIDER_ATTACHMENT_FAILED` |
+| `503` | `ATTACHMENT_CAPACITY_EXCEEDED` |
+| `504` | `BROWSER_RESTART_TIMEOUT`、`PROVIDER_ATTACHMENT_TIMEOUT` |
 
 错误响应体：
 
@@ -718,7 +741,7 @@ SQLite + 单 Browser Profile + 全局单飞，决定只能单实例运行。同�
 
 | 现象 / 错误码 | 含义 | 处理 |
 | --- | --- | --- |
-| `PROVIDER_LOGIN_REQUIRED`（401 / status `LOGIN_REQUIRED`） | Gemini 未登录或登录态失效 | `POST /api/provider/open` 打开浏览器人工登录 → `POST /api/provider/restart` → 轮询 `status` 到 `READY` |
+| `PROVIDER_LOGIN_REQUIRED`（401 / status `LOGIN_REQUIRED`） | Gemini 未登录或登录态失效 | ① 停止占用同一 profile 的 Backend → ② `yarn browser:login` → ③ 人工完成登录 → ④ CLI 成功退出后重启 Backend → ⑤ `GET /api/browser/status` 确认 `providerLoggedIn=true`。**系统不会自动完成 Google 登录**（见 [§8](#8-首次-gemini-登录)） |
 | `PROVIDER_PROFILE_IN_USE`（500） | profile 被另一进程占用 | **不要删 lock 文件**；先找到并关闭仍占用 `BROWSER_PROFILE_DIR` 的旧 Backend / Chromium 实例，再重启 |
 | `PROVIDER_DOM_CHANGED`（500） | Gemini 改版导致 selector 失效 | 更新 `gemini.selectors.ts` 后重新构建；临时可 `restart` 重试 |
 | `PROVIDER_PAGE_CLOSED`（500） | Gemini 页面被单独关闭（Context 仍在） | 再次 `POST /api/provider/open` 会重建 Page，不二次启动 Chromium |
@@ -774,7 +797,7 @@ Backend:  https://github.com/hukaiedu/NextChatBack
 
 V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择，全部基于 Gemini Web 动态目录，无任何静态模型配置：
 
-- **请求链路定位**：NextChat Frontend → 本 Backend（REST / SSE）→ Playwright Chromium → Gemini Web；不使用 Gemini API，单用户、单实例、本地运行。
+- **请求链路定位**：NextChat Frontend → 本 Backend（REST / SSE）→ Playwright Chromium → Gemini Web；不使用 Gemini API；当前为单用户、单 Backend 实例的自托管方案。
 - **模型目录**：`GET /api/provider/models`，由 Provider 页面实时读取（`listModels()`）。仅 `READY` 可用；`LOGIN_REQUIRED` → `401 PROVIDER_LOGIN_REQUIRED`，其余非 READY 状态 → `500 PROVIDER_NOT_READY`。
 - **三层模型字段**：
   - `Conversation.preferredModelKey` —— 会话模型偏好，经 `PATCH /api/conversations/:id` 保存（显式 `null` = 恢复默认模型）；
@@ -788,7 +811,7 @@ V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择�
 
 ---
 
-> 本 README 以 V1 冻结 commit `4dfb074a48f236b2b3fa20dc7fe88d4e562ff073` 的源码为基础编写；V1.1 模型选择章节对应 commit `c588c8d`（M4 收口）。若文档与源码冲突，以对应 commit 的源码为准。
+> 本 README 以 V1 冻结 commit `4dfb074a48f236b2b3fa20dc7fe88d4e562ff073` 的源码为基础编写；V1.1 模型选择章节对应 commit `c588c8d`（M4 收口）；V1.2 图片上传功能冻结基线：Backend `0676f18` / Frontend `7974e524`（详见 [docs/RELEASE_NOTES_V1.2.md](docs/RELEASE_NOTES_V1.2.md)）。若文档与源码冲突，以对应 commit 的源码为准。
 
 ---
 
