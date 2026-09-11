@@ -11,4 +11,6 @@
 export type * from './models/Conversation.js'
 export type * from './models/Message.js'
 export type * from './models/ModelRequest.js'
+export type * from './models/User.js'
+export type * from './models/Session.js'
 export type * from './commonInputTypes.js'

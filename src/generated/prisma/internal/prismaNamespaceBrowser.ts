@@ -53,7 +53,9 @@ export const AnyNull = runtime.AnyNull
 export const ModelName = {
   Conversation: 'Conversation',
   Message: 'Message',
-  ModelRequest: 'ModelRequest'
+  ModelRequest: 'ModelRequest',
+  User: 'User',
+  Session: 'Session'
 } as const
 
 export type ModelName = (typeof ModelName)[keyof typeof ModelName]
@@ -76,6 +78,7 @@ export const ConversationScalarFieldEnum = {
   provider: 'provider',
   providerConversationUrl: 'providerConversationUrl',
   preferredModelKey: 'preferredModelKey',
+  userId: 'userId',
   createdAt: 'createdAt',
   updatedAt: 'updatedAt',
   deletedAt: 'deletedAt'
@@ -121,6 +124,29 @@ export const ModelRequestScalarFieldEnum = {
 } as const
 
 export type ModelRequestScalarFieldEnum = (typeof ModelRequestScalarFieldEnum)[keyof typeof ModelRequestScalarFieldEnum]
+
+
+export const UserScalarFieldEnum = {
+  id: 'id',
+  type: 'type',
+  status: 'status',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+} as const
+
+export type UserScalarFieldEnum = (typeof UserScalarFieldEnum)[keyof typeof UserScalarFieldEnum]
+
+
+export const SessionScalarFieldEnum = {
+  id: 'id',
+  userId: 'userId',
+  tokenHash: 'tokenHash',
+  expiresAt: 'expiresAt',
+  lastSeenAt: 'lastSeenAt',
+  createdAt: 'createdAt'
+} as const
+
+export type SessionScalarFieldEnum = (typeof SessionScalarFieldEnum)[keyof typeof SessionScalarFieldEnum]
 
 
 export const SortOrder = {

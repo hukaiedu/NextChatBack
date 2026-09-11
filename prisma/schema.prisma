@@ -16,15 +16,19 @@ model Conversation {
   providerConversationUrl String?   @unique
   /// M1:用户在会话维度显式选择的模型键(provider 机器键,如 data-mode-id);null = 未指定
   preferredModelKey       String?
+  /// V1.3-B1:归属用户。迁移期可空(历史行已全部回填 ADMIN);NOT NULL 收紧留到 B4(m2 重建表)
+  userId                  String?
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
   deletedAt               DateTime?
 
+  user     User?        @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   messages Message[]
   requests ModelRequest[]
 
   @@index([status])
   @@index([updatedAt])
+  @@index([userId, status, updatedAt])
 }
 
 model Message {
@@ -77,4 +81,34 @@ model ModelRequest {
 
   @@index([conversationId])
   @@index([status])
+}
+
+/// V1.3:统一身份主体。B1 只建结构;签发/读取/续期逻辑属 B2
+model User {
+  id        String   @id @default(uuid())
+  /// ANONYMOUS / REGISTERED / ADMIN(DDL 里为 CHECK 约束)
+  type      String   @default("ANONYMOUS")
+  /// ACTIVE / DISABLED(DDL 里为 CHECK 约束)
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions      Session[]
+  conversations Conversation[]
+}
+
+/// V1.3:服务端会话。token 本体只在浏览器,库内只存 sha256 摘要(不可逆)
+model Session {
+  id         String   @id @default(uuid())
+  userId     String
+  /// sha256(opaque token) hex(64)
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  lastSeenAt DateTime
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }

@@ -32,3 +32,13 @@ export type Message = Prisma.MessageModel
  * 一次 User Message → Provider → Assistant Message 的执行记录
  */
 export type ModelRequest = Prisma.ModelRequestModel
+/**
+ * Model User
+ * V1.3:统一身份主体。B1 只建结构;签发/读取/续期逻辑属 B2
+ */
+export type User = Prisma.UserModel
+/**
+ * Model Session
+ * V1.3:服务端会话。token 本体只在浏览器,库内只存 sha256 摘要(不可逆)
+ */
+export type Session = Prisma.SessionModel
