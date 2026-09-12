@@ -383,7 +383,7 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
   });
 
   it.each(["BUSY", "STOPPED", "STARTING", "ERROR"] as const)(
-    "%s → 500 PROVIDER_NOT_READY,adapter 0 call",
+    "%s → 500 SERVICE_BUSY(§52:Public 面 PROVIDER_* = 0),adapter 0 call",
     async (status) => {
       const adapter = new FakeGeminiAdapter();
       const blockedCtx = await setupTestContext({
@@ -394,7 +394,7 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
         const res = await fetch(`${blockedCtx.baseUrl}/api/provider/models`);
         expect(res.status).toBe(500);
         expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-          "PROVIDER_NOT_READY",
+          "SERVICE_BUSY",
         );
         expect(adapter.listModelsCalls).toBe(0);
       } finally {
@@ -403,14 +403,14 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     },
   );
 
-  it("默认 Fake Manager(STOPPED)→ 500 PROVIDER_NOT_READY(矩阵默认态回归)", async () => {
+  it("默认 Fake Manager(STOPPED)→ 500 SERVICE_BUSY(矩阵默认态回归)", async () => {
     const adapter = new FakeGeminiAdapter();
     const stoppedCtx = await setupTestContext({ geminiAdapter: adapter });
     try {
       const res = await fetch(`${stoppedCtx.baseUrl}/api/provider/models`);
       expect(res.status).toBe(500);
       expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-        "PROVIDER_NOT_READY",
+        "SERVICE_BUSY",
       );
       expect(adapter.listModelsCalls).toBe(0);
     } finally {
@@ -713,7 +713,7 @@ describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
       // If models was rejected, it proves scheduler held lock during ensureReady.
       const modelsBody = (await modelsRes.json()) as { error?: { code: string }; data?: unknown };
       const modelsRejected =
-        modelsRes.status === 500 && modelsBody.error?.code === "PROVIDER_NOT_READY";
+        modelsRes.status === 500 && modelsBody.error?.code === "SERVICE_BUSY";
       const modelsSucceeded = modelsRes.status === 200;
       expect(modelsRejected || modelsSucceeded).toBe(true);
 
@@ -768,7 +768,7 @@ describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
     }
   });
 
-  it("LOCK-02:Scheduler 持锁(gateProvider 前)→ GET /models 立即 PROVIDER_NOT_READY(FIX-08)", async () => {
+  it("LOCK-02:Scheduler 持锁(gateProvider 前)→ GET /models 立即 SERVICE_BUSY(FIX-08 + §52)", async () => {
     const adapter = new FakeGeminiAdapter({ hang: true });
     const browserManager = managerWithStatus("READY", { openGeminiDelayMs: 200 });
     const ctx = await setupTestContext({
@@ -787,10 +787,11 @@ describe("FIX-06/FIX-08:Provider Page 操作互斥锁", () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // GET /models must be rejected immediately (scheduler holds lock)
+      // Service 层原码仍是 PROVIDER_NOT_READY;Public 信封按 §52 归类为 SERVICE_BUSY
       const res = await fetch(`${ctx.baseUrl}/api/provider/models`);
       expect(res.status).toBe(500);
       const body = (await res.json()) as { error: { code: string } };
-      expect(body.error.code).toBe("PROVIDER_NOT_READY");
+      expect(body.error.code).toBe("SERVICE_BUSY");
       expect(adapter.listModelsCalls).toBe(0);
     } finally {
       await ctx.close();

@@ -86,7 +86,7 @@ describe("AUTH-01 未认证访问业务 API → 401 AUTH_REQUIRED", () => {
         ["/api/conversations/some-id/messages", { method: "POST", body: "{}" }],
         ["/api/requests/some-id/cancel", { method: "POST" }],
         ["/api/provider/models", { method: "GET" }],
-        ["/api/browser/status", { method: "GET" }],
+        ["/api/admin/browser/status", { method: "GET" }],
       ];
       for (const [path, init] of cases) {
         const res = await fetch(`${ctx.baseUrl}${path}`, {

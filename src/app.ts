@@ -8,10 +8,7 @@ import { ATTACHMENT_BODY_LIMIT, HEALTH_PATH, MESSAGES_BODY_PATH } from "./config
 import type { PrismaClient } from "./generated/prisma/client.js";
 import { createHealthRouter } from "./modules/health/health.controller.js";
 import type { HealthProbe } from "./modules/health/health.controller.js";
-import {
-  createBrowserStatusHandlers,
-  createBrowserStatusRouter,
-} from "./modules/browser/browser-status.controller.js";
+import { createBrowserStatusHandlers } from "./modules/browser/browser-status.controller.js";
 import { BrowserStatusService } from "./modules/browser/browser-status.service.js";
 import {
   createProviderHandlers,
@@ -247,8 +244,8 @@ export function createApp(deps: AppDeps): AppHandle {
   const providerModelsService = new ProviderModelsService(deps.geminiAdapter, deps.browserManager, pageLock);
   const browserStatusService = new BrowserStatusService(deps.browserManager, deps.prisma);
 
-  // V1.3-B3-3 §25:运维 handler 只有一份实现;旧路径是 ADMIN-only alias,不是第二套逻辑。
-  // 同一个 adminGuard 实例复用于三处挂载,避免出现两份权限判据。
+  // V1.3-B3-3 §25:运维 handler 只有一份实现;V1.3-C 起只有 canonical /api/admin/* 一个挂载点。
+  // requireAdmin() 只实例化一次,交给 Admin router 统一使用,避免出现两份权限判据。
   const providerHandlers = createProviderHandlers(deps.browserManager, providerModelsService);
   const browserHandlers = createBrowserStatusHandlers(deps.browserManager, browserStatusService);
   const adminGuard = requireAdmin();
@@ -261,9 +258,8 @@ export function createApp(deps: AppDeps): AppHandle {
   app.use("/api/requests", createRequestRouter(requestService));
   // GET /api/requests/:id/events(第 6 阶段 SSE);与 REST 路由共用前缀
   app.use("/api/requests", createSseRouter(sse));
-  // GET /api/provider/models = Public(§24);status/open/restart = ADMIN alias(§26)
-  app.use("/api/provider", createProviderRouter(providerHandlers, adminGuard));
-  app.use("/api/browser", createBrowserStatusRouter(browserHandlers, adminGuard));
+  // GET /api/provider/models = Public(§24);运维能力只有 canonical /api/admin/provider/*
+  app.use("/api/provider", createProviderRouter(providerHandlers));
   // canonical Admin API(§23):全局 requireAuth 已在上方挂载,这里再叠加 requireAdmin
   app.use(
     "/api/admin",

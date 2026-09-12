@@ -1,4 +1,3 @@
-import { Router } from "express";
 import type { RequestHandler } from "express";
 
 import { AppError } from "../../common/errors/app-error.js";
@@ -7,8 +6,9 @@ import type { BrowserManager } from "../../providers/gemini/browser-manager.js";
 import type { BrowserStatusService } from "./browser-status.service.js";
 
 /**
- * 浏览器状态 API(docs/browser-status-api.md)。V1.3-B3-3 起属运维能力:
- * canonical `/api/admin/browser/*`,旧路径 `/api/browser/*` 保留为 ADMIN-only alias(§25)。
+ * 浏览器状态 API(docs/browser-status-api.md)。V1.3-B3-3 起属运维能力,
+ * canonical `/api/admin/browser/*`;旧路径 `/api/browser/*` 的 alias 已随
+ * 前端 canonical 迁移完成而退役(V1.3-C §25)。
  * 快照含 profileDir / providerLoggedIn / lastError 等内部信息,普通用户一律 403(§26/§27)。
  *
  * 重启守卫顺序:已在重启中 → 有在飞 Request → BUSY,都返回 409 CONFLICT。
@@ -25,7 +25,7 @@ export interface BrowserStatusHandlers {
   restart: RequestHandler;
 }
 
-/** handler 唯一实现处:canonical 与 alias 共用,§25 禁止复制两份业务逻辑 */
+/** handler 唯一实现处:由 canonical Admin 路由(/api/admin/browser/*)挂载 */
 export function createBrowserStatusHandlers(
   browserManager: BrowserManager,
   statusService: BrowserStatusService,
@@ -66,19 +66,6 @@ export function createBrowserStatusHandlers(
       res.json({ data: await statusService.getSnapshot() });
     },
   };
-}
-
-/** 旧路径 alias:两个端点都在 requireAdmin 之后 */
-export function createBrowserStatusRouter(
-  handlers: BrowserStatusHandlers,
-  requireAdmin: RequestHandler,
-): Router {
-  const router = Router();
-
-  router.get("/status", requireAdmin, handlers.status);
-  router.post("/restart", requireAdmin, handlers.restart);
-
-  return router;
 }
 
 function restartConflict(message: string): AppError {

@@ -194,7 +194,7 @@ describe("Request Cancel 集成(§八.1 取消生成)", () => {
     // CANCELLING 期间应该还是 BUSY
     const midStatus = await (
       await fetch(
-        `${ctx.baseUrl}/api/provider/status`,
+        `${ctx.baseUrl}/api/admin/provider/status`,
         withAdminCookie(adminCookie),
       )
     ).json() as { data: { status: string } };
@@ -205,7 +205,7 @@ describe("Request Cancel 集成(§八.1 取消生成)", () => {
 
     // 结束后释放
     const afterStatus = await (
-      await fetch(`${ctx.baseUrl}/api/provider/status`, withAdminCookie(adminCookie))
+      await fetch(`${ctx.baseUrl}/api/admin/provider/status`, withAdminCookie(adminCookie))
     ).json() as { data: { status: string } };
     expect(afterStatus.data.status).toBe("READY");
   });

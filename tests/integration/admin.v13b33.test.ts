@@ -22,7 +22,7 @@ const CANONICAL_ENDPOINTS = [
   { method: "POST", path: "/api/admin/sessions/revoke-all" },
 ] as const;
 
-/** §25/§26 旧路径 = ADMIN-only alias(models 不在内,见 §24) */
+/** §25(V1.3-C)已退役的旧路径:router 不再挂载,任何身份都只会得到 404 */
 const LEGACY_ENDPOINTS = [
   { method: "GET", path: "/api/browser/status" },
   { method: "POST", path: "/api/browser/restart" },
@@ -33,6 +33,11 @@ const LEGACY_ENDPOINTS = [
 
 async function errorCodeOf(res: Response): Promise<string> {
   return ((await res.json()) as { error: { code: string } }).error.code;
+}
+
+/** 退役路径由 Express 默认 404 处理:没有 JSON 错误信封,判据只有状态码 */
+function assertRetired(res: Response): void {
+  expect(res.status).toBe(404);
 }
 
 describe("V1.3-B3-3 Admin / Public 边界(§21..§34)", () => {
@@ -87,7 +92,7 @@ describe("V1.3-B3-3 Admin / Public 边界(§21..§34)", () => {
   );
 
   it.each(LEGACY_ENDPOINTS)(
-    "ADM-M03 $method$path:旧 alias 对匿名用户同样 403(§26)",
+    "ADM-M03 $method$path:旧 alias 已退役 → 404,不再是权限判断(§25)",
     async ({ method, path }) => {
       await mountAuthed();
       const cookie = await loginAnonymous(ctx.baseUrl);
@@ -95,18 +100,26 @@ describe("V1.3-B3-3 Admin / Public 边界(§21..§34)", () => {
         method,
         ...withAdminCookie(cookie),
       });
-      expect(res.status).toBe(403);
-      expect(await errorCodeOf(res)).toBe(ErrorCodes.AUTH_FORBIDDEN);
+      assertRetired(res);
     },
   );
 
-  it.each([...CANONICAL_ENDPOINTS, ...LEGACY_ENDPOINTS])(
+  it.each(CANONICAL_ENDPOINTS)(
     "ADM-M04 $method$path:COMPAT(AUTH_ENABLED=false)绝不因本地模式变管理员(§22)",
     async ({ method, path }) => {
       await mountCompat();
       const res = await fetch(`${ctx.baseUrl}${path}`, { method });
       expect(res.status).toBe(403);
       expect(await errorCodeOf(res)).toBe(ErrorCodes.AUTH_FORBIDDEN);
+    },
+  );
+
+  it.each(LEGACY_ENDPOINTS)(
+    "ADM-M04B $method$path:COMPAT 下旧 alias 同样是 404,不因本地模式复活(§25)",
+    async ({ method, path }) => {
+      await mountCompat();
+      const res = await fetch(`${ctx.baseUrl}${path}`, { method });
+      assertRetired(res);
     },
   );
 
@@ -183,36 +196,30 @@ describe("V1.3-B3-3 Admin / Public 边界(§21..§34)", () => {
     ).toBe("RUNNING");
   });
 
-  it("ADM-A02 canonical 与旧 alias 返回同一份结果:同一 handler,不存在第二套逻辑(§25)", async () => {
+  it("ADM-A02 兼容窗口已关闭:ADMIN 调旧路径一律 404,canonical 照常返回运维快照(§25/§58)", async () => {
     await mountAuthed();
     const cookie = await loginAdmin(ctx.baseUrl);
 
-    /** observedAt / uptimeMs 是每次快照自己的采样时刻,天然不同;其余字段必须完全一致 */
-    function stable(data: Record<string, unknown>): Record<string, unknown> {
-      const { observedAt: _o, uptimeMs: _u, ...rest } = data;
-      return rest;
+    for (const { method, path } of LEGACY_ENDPOINTS) {
+      assertRetired(
+        await fetch(
+          `${ctx.baseUrl}${path}`,
+          withAdminCookie(cookie, { method }),
+        ),
+      );
     }
 
-    const canonical = ((await (
-      await fetch(
-        `${ctx.baseUrl}/api/admin/provider/open`,
-        withAdminCookie(cookie, { method: "POST" }),
-      )
-    ).json()) as { data: Record<string, unknown> }).data;
-    const alias = ((await (
-      await fetch(`${ctx.baseUrl}/api/provider/status`, withAdminCookie(cookie))
-    ).json()) as { data: Record<string, unknown> }).data;
-    expect(alias).toEqual(canonical);
-
-    const canonicalBrowser = ((await (
-      await fetch(`${ctx.baseUrl}/api/admin/browser/status`, withAdminCookie(cookie))
-    ).json()) as { data: Record<string, unknown> }).data;
-    const aliasBrowser = ((await (
-      await fetch(`${ctx.baseUrl}/api/browser/status`, withAdminCookie(cookie))
-    ).json()) as { data: Record<string, unknown> }).data;
-    expect(stable(aliasBrowser)).toEqual(stable(canonicalBrowser));
-    // 证明确实是同一份实现产出的运维字段,而不是各自拼了一遍
-    expect(Object.keys(aliasBrowser).sort()).toEqual(Object.keys(canonicalBrowser).sort());
+    // 唯一挂载点仍然工作:canonical 给出运维字段,旧路径的缺失不是路由整体失效
+    const canonicalBrowser = await fetch(
+      `${ctx.baseUrl}/api/admin/browser/status`,
+      withAdminCookie(cookie),
+    );
+    expect(canonicalBrowser.status).toBe(200);
+    const snapshot = ((await canonicalBrowser.json()) as {
+      data: Record<string, unknown>;
+    }).data;
+    expect(snapshot).toHaveProperty("profileDir");
+    expect(snapshot).toHaveProperty("providerLoggedIn");
   });
 
   it("ADM-A03 ADMIN 的 HTTP 错误信封保留原始运维码(§32「原正常行为」)", async () => {
@@ -344,26 +351,5 @@ describe("V1.3-B3-3 Admin / Public 边界(§21..§34)", () => {
     const stillWorks = await fetch(`${ctx.baseUrl}/api/conversations`, withAdminCookie(admin));
     expect(stillWorks.status).toBe(200);
     expect(await ctx.prisma.session.count({ where: { userId: ADMIN_USER_ID } })).toBe(1);
-  });
-
-  it("ADM-C01 兼容窗口:ADMIN 登录后旧前端两个路径仍给原正常结果(§58)", async () => {
-    await mountAuthed();
-    const cookie = await loginAdmin(ctx.baseUrl);
-
-    const browser = await fetch(`${ctx.baseUrl}/api/browser/status`, withAdminCookie(cookie));
-    expect(browser.status).toBe(200);
-    const browserData = ((await browser.json()) as { data: Record<string, unknown> }).data;
-    expect(browserData.state).toBe("STOPPED");
-    expect(browserData).toHaveProperty("profileDir");
-    expect(browserData).toHaveProperty("providerLoggedIn");
-
-    const opened = await fetch(
-      `${ctx.baseUrl}/api/provider/open`,
-      withAdminCookie(cookie, { method: "POST" }),
-    );
-    expect(((await opened.json()) as { data: { status: string } }).data.status).toBe("READY");
-
-    const provider = await fetch(`${ctx.baseUrl}/api/provider/status`, withAdminCookie(cookie));
-    expect(((await provider.json()) as { data: { status: string } }).data.status).toBe("READY");
   });
 });

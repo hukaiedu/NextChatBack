@@ -189,30 +189,26 @@ describe("V1.3-B3 FIX-02A Public / Admin Error Surface", () => {
     expect(text).not.toContain("CHAT_FAILED");
   });
 
-  it("ERR-SURFACE-05 compatibility alias 与 canonical 同语义:同一 guard 即同一 surface", async () => {
+  it("ERR-SURFACE-05 旧 alias 已退役:旧路径 404,canonical Admin surface 保持原运维码", async () => {
     await mountAsAdmin();
     driver.throwOnLaunch = new Error(`launch failed ${SECRET}`);
 
-    const alias = await fetch(
+    // §25(V1.3-C):旧路径不再挂载任何 router —— 连 handler 都进不到
+    const retired = await fetch(
       `${ctx.baseUrl}/api/browser/restart`,
       withAdminCookie(admin, { method: "POST" }),
     );
-    const aliasText = await alias.text();
-    expect(alias.status, aliasText).toBe(500);
-    expect((JSON.parse(aliasText) as { error: { code: string } }).error.code).toBe(
-      ErrorCodes.BROWSER_LAUNCH_FAILED,
-    );
+    expect(retired.status).toBe(404);
 
-    // 同一实例、同一 guard:两条路径的错误码与 HTTP 状态必须完全一致
     const canonical = await fetch(
       `${ctx.baseUrl}/api/admin/browser/restart`,
       withAdminCookie(admin, { method: "POST" }),
     );
-    const canonicalBody = (await canonical.json()) as { error: { code: string } };
-    expect(canonical.status).toBe(alias.status);
-    expect(canonicalBody.error.code).toBe(
-      (JSON.parse(aliasText) as { error: { code: string } }).error.code,
-    );
+    const canonicalText = await canonical.text();
+    expect(canonical.status, canonicalText).toBe(500);
+    expect(
+      (JSON.parse(canonicalText) as { error: { code: string } }).error.code,
+    ).toBe(ErrorCodes.BROWSER_LAUNCH_FAILED);
   });
 
   it("ERR-SURFACE-06 Public 路由抛内部异常:ADMIN 的 HTTP 错误信封也只是通用码(判据改变的真实路径)", async () => {

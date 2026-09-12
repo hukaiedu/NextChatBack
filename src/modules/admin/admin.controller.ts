@@ -17,7 +17,7 @@ import type { ProviderHandlers } from "../provider/provider.controller.js";
  * POST /api/admin/sessions/revoke-all
  *
  * 整条前缀 = requireAuth(app.ts 全局已挂)→ requireAdmin(router.use)。
- * 运维 handler 与旧路径共用同一份实现:alias 只是前缀 + 同一 guard,没有第二套逻辑。
+ * 这里是运维 handler 的唯一挂载点(V1.3-C 起旧路径 alias 已退役,§25)。
  * 注意 `/api/provider/models` **不在**这里 —— 模型目录是普通聊天用户的能力(§24)。
  */
 export interface AdminRouterDeps {

@@ -13,12 +13,12 @@ import type { ProviderModelsService } from "./provider-models.service.js";
  * Public(authenticated,不要求 ADMIN)
  *   GET  /api/provider/models                    模型目录 —— 聊天里的模型选择必需能力(§24)
  *
- * Admin(canonical /api/admin/provider/*,旧路径保留为 ADMIN-only alias)
- *   GET  /api/provider/status                    Provider 运行状态
- *   POST /api/provider/open                      启动 Browser Manager → 打开/聚焦 Gemini Page
- *   POST /api/provider/restart                   关闭 Context → 同一 Profile 重启
+ * Admin(canonical /api/admin/provider/*,旧路径 alias 已于 V1.3-C 退役)
+ *   GET  /api/admin/provider/status              Provider 运行状态
+ *   POST /api/admin/provider/open                启动 Browser Manager → 打开/聚焦 Gemini Page
+ *   POST /api/admin/provider/restart             关闭 Context → 同一 Profile 重启
  *
- * handler 只有一份实现(§25):createProviderHandlers 产出,canonical 与 alias 各挂一次,
+ * handler 只有一份实现(§25):createProviderHandlers 产出,Public 与 Admin 各挂一次,
  * 不存在第二套业务逻辑。
  */
 export interface ProviderHandlers {
@@ -77,19 +77,13 @@ export function createProviderHandlers(
 }
 
 /**
- * 旧路径(§25/§26):路径不删,但除 models 外全部加 requireAdmin。
- * 匿名与 COMPAT 因此得到 403 —— 普通用户不再能读取 Provider 运维状态或驱动浏览器。
+ * 旧路径 alias 已退役(V1.3-C §25):本前缀只剩 Public 的模型目录。
+ * status/open/restart 走 canonical `/api/admin/provider/*`,由 admin.controller 复用同一批 handler。
  */
-export function createProviderRouter(
-  handlers: ProviderHandlers,
-  requireAdmin: RequestHandler,
-): Router {
+export function createProviderRouter(handlers: ProviderHandlers): Router {
   const router = Router();
 
   router.get("/models", handlers.models);
-  router.get("/status", requireAdmin, handlers.status);
-  router.post("/open", requireAdmin, handlers.open);
-  router.post("/restart", requireAdmin, handlers.restart);
 
   return router;
 }

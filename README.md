@@ -341,12 +341,12 @@ personChat **不使用 Gemini API Key**，需要通过 Chromium **人工登录**
 5. 在弹出的 Chromium 中完成 Google / Gemini 登录
 6. CLI 检测到登录成功后自动关闭 Chromium 并 exit 0
 7. 启动 Backend（yarn start / node dist/main.js）
-8. 检查运行状态：GET /api/health 与 GET /api/browser/status（RUNNING + providerLoggedIn=true）
+8. 检查运行状态：GET /api/health 与 GET /api/admin/browser/status（需 ADMIN 登录；RUNNING + providerLoggedIn=true）
 ```
 
 - **browser:login 不需要按 Enter 结束**：登录成功后 CLI 自动关闭浏览器并退出（exit 0）；已登录的 profile 会直接输出 `already logged in; closing browser` 并退出。
 - CLI 等待登录期间持续轮询（750ms），可随时 `Ctrl+C` 中止（退出码 130）；若打开浏览器遇到环境 / 网络类错误，会自动重试至多 2 次（间隔 5s），仍失败则 exit 1（只输出错误码摘要，不含任何凭据）。
-- `POST /api/provider/open` / `POST /api/provider/restart` 等 Provider 接口仍然保留，用于运行期交互（见 [§17](#17-api-概览)）；**首次登录与登录态恢复请使用上述 `browser:login` 流程**。
+- `POST /api/admin/provider/open` / `POST /api/admin/provider/restart` 等运维接口仍然保留（需 ADMIN 身份），用于运行期交互（见 [§17](#17-api-概览)）；**首次登录与登录态恢复请使用上述 `browser:login` 流程**。
 
 **single-owner 纪律（profile 独占）：**
 
@@ -416,7 +416,7 @@ REQUEST_EXECUTION_TIMEOUT_MS  必须严格大于  GEMINI_RESPONSE_TIMEOUT_MS
 | `BUSY` | 正在执行一个 Request（Scheduler 认领后置位，期间禁止导航 / restart） |
 | `ERROR` | Browser / Context / Page 初始化失败或异常（如 profile 被占用、导航失败、renderer 崩溃） |
 
-`GET /api/provider/status` 返回的即此枚举值。`POST /api/provider/restart` 在 `BUSY` 时会拒绝（抛 `PROVIDER_NOT_READY`），避免炸掉正在生成的请求。
+`GET /api/admin/provider/status` 返回的即此枚举值。`POST /api/admin/provider/restart` 在 `BUSY` 时会拒绝（抛 `PROVIDER_NOT_READY`），避免炸掉正在生成的请求。`PROVIDER_NOT_READY` 是内部码：只出现在 Admin 信封，Public 面按 [§18](#18-错误码与-http-映射) 归类为 `SERVICE_BUSY`。
 
 ---
 
@@ -574,15 +574,14 @@ HTTP 状态码小结：
 
 以实际 Router / Controller 为准（[src/app.ts](src/app.ts) 挂载）。所有错误响应统一为 `{ "error": { "code", "message", "requestId" } }`，`requestId` 与响应头 `x-request-id` 一致。
 
+V1.3-C 起路由只有两个挂载面：Public `/api/*` 与 Admin `/api/admin/*`。旧运维 alias（`/api/browser/*`、`/api/provider/{status,open,restart}`）已退役，命中任何身份都只得到 Express 默认 `404`（无 JSON 信封）。
+
+**Public（普通用户面，`requireAuth` 保护）：**
+
 | 方法 | 路径 | 成功码 | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | `200` / `503` | 健康检查；DB 不可达返回 `503` |
-| `GET` | `/api/provider/status` | `200` | 查询 Provider 状态（不启动浏览器） |
-| `POST` | `/api/provider/open` | `200` | 启动 BrowserManager，打开 / 聚焦 Gemini |
-| `POST` | `/api/provider/restart` | `200` | 关闭 Context → 同 profile 重启 → 打开 Gemini；`BUSY` 时拒绝 |
-| `GET` | `/api/provider/models` | `200` | 模型目录（V1.1，实时读取 Gemini Web）；`LOGIN_REQUIRED` → 401，其余非 READY → 500 |
-| `GET` | `/api/browser/status` | `200` | 浏览器状态快照（只读，**不启动浏览器**；含 `state` / `providerLoggedIn` / `activeRequests` / `lastError` 等字段） |
-| `POST` | `/api/browser/restart` | `200` | 关闭并重启浏览器（保留 profile 登录态），返回重启后的新快照；重启中 / 有在飞 Request / `BUSY` → `409 BROWSER_RESTART_CONFLICT`，30s 未完成 → `504 BROWSER_RESTART_TIMEOUT` |
+| `GET` | `/api/provider/models` | `200` | 模型目录（V1.1，实时读取 Gemini Web）；Provider 未就绪 → `503 SERVICE_BUSY`，未登录 → `401 PROVIDER_LOGIN_REQUIRED` |
 | `POST` | `/api/conversations` | `201` | 创建会话（`title` 可选） |
 | `GET` | `/api/conversations` | `200` | 列表；`?status=ACTIVE\|ARCHIVED`（默认 `ACTIVE`）、`limit`（1–100，默认 30）、`cursor` |
 | `GET` | `/api/conversations/:id` | `200` | 会话详情 |
@@ -594,10 +593,27 @@ HTTP 状态码小结：
 | `POST` | `/api/requests/:id/cancel` | `202` / `200` | 取消；`PROCESSING→CANCELLING` → `202`，`PENDING→CANCELLED` / noop → `200` |
 | `GET` | `/api/requests/:id/events` | `200` | SSE 事件流（`text/event-stream`） |
 
+**Admin（运维面，`requireAdmin` 保护；`AUTH_ENABLED=false` 时只有 loopback 兼容身份可用）：**
+
+| 方法 | 路径 | 成功码 | 说明 |
+| --- | --- | --- | --- |
+| `GET` | `/api/admin/provider/status` | `200` | 查询 Provider 状态（不启动浏览器） |
+| `POST` | `/api/admin/provider/open` | `200` | 启动 BrowserManager，打开 / 聚焦 Gemini |
+| `POST` | `/api/admin/provider/restart` | `200` | 关闭 Context → 同 profile 重启 → 打开 Gemini；`BUSY` 时拒绝 |
+| `GET` | `/api/admin/browser/status` | `200` | 浏览器状态快照（只读，**不启动浏览器**；含 `state` / `providerLoggedIn` / `activeRequests` / `lastError` 等字段） |
+| `POST` | `/api/admin/browser/restart` | `200` | 关闭并重启浏览器（保留 profile 登录态），返回重启后的新快照；重启中 / 有在飞 Request / `BUSY` → `409 BROWSER_RESTART_CONFLICT`，30s 未完成 → `504 BROWSER_RESTART_TIMEOUT` |
+| `POST` | `/api/admin/sessions/revoke-all` | `200` | 吊销调用者所属 ADMIN User 的全部 Session（含当前这一条与其他设备），响应 `{ "data": { "revoked": <条数> } }`；删库成功后当前 Cookie 才一并清除 |
+
+**两种错误信封（唯一映射点 [src/common/errors/public-error.ts](src/common/errors/public-error.ts)）：**
+
+- Public 面只出现对外码：`CHAT_FAILED` / `SERVICE_BUSY` / `REQUEST_TIMEOUT` 三个通用码，加一张显式 allowlist 的透传码（校验、归属、幂等、认证类）。内部实现码在 Public 面的响应体、SSE 帧与落库 DTO 中一律不出现。
+- Admin 面（`/api/admin/*`）保留原内部码与原始 message，供运维定位问题；日志无论哪个面都记录原码。
+- 下方 [§18](#18-错误码与-http-映射) 的 HTTP 映射表描述的是**内部码**（= Admin 信封）；Public 面的归类见该节末尾。
+
 **关键成功状态码（从源码核对）：**
 
 - `DELETE /api/conversations/:id` → **`204`**（软删除，无响应体）
-- `POST /api/provider/restart` → **`200`**（`BUSY` 时 → `PROVIDER_NOT_READY`，HTTP 500）
+- `POST /api/admin/provider/restart` → **`200`**（`BUSY` 时 → Admin 信封 `PROVIDER_NOT_READY`，HTTP 500）
 - `POST /api/requests/:id/cancel` → **`202`**（受理，`PROCESSING→CANCELLING`）/ **`200`**（`PENDING→CANCELLED` 或幂等 noop）
 - `POST /api/conversations/:id/messages` → **`202`**（新建）/ **`200`**（幂等命中）
 
@@ -634,6 +650,8 @@ curl -X POST http://127.0.0.1:3010/api/conversations/<CONV_ID>/messages \
 
 错误码定义于 [src/common/errors/error-codes.ts](src/common/errors/error-codes.ts)，HTTP 映射唯一来源于 [src/common/errors/error-code-map.ts](src/common/errors/error-code-map.ts)（抛出点不得自行决定 HTTP 状态）。
 
+下表列的是**内部码**与其 HTTP 映射，即 `/api/admin/*` 运维信封所见；Public 面会先经 [§18.1](#181-public-信封v13-c-契约) 收敛，两者不是同一份文本。
+
 | HTTP | 错误码 |
 | --- | --- |
 | `400` | `VALIDATION_ERROR` |
@@ -656,8 +674,34 @@ curl -X POST http://127.0.0.1:3010/api/conversations/<CONV_ID>/messages \
 ```
 
 - 非法 JSON body → `400 VALIDATION_ERROR`
-- Prisma / SQLite 运行时异常 → `500 DATABASE_ERROR`（内部细节只进日志，不回传响应）
-- 其他未分类异常 → `500 INTERNAL_ERROR`
+- Prisma / SQLite 运行时异常 → `500 DATABASE_ERROR`（Public 面只剩 `500 CHAT_FAILED`，原始细节只进日志；Admin 面保留原码）
+- 其他未分类异常 → `500 INTERNAL_ERROR`（同上）
+
+### 18.1 Public 信封（V1.3-C 契约）
+
+唯一映射点：[src/common/errors/public-error.ts](src/common/errors/public-error.ts) 的 `toPublicError()`。**只改 `code` 与 `message`，不改 HTTP 状态**——状态码仍由原始内部码经 `error-code-map.ts` 推导，客户端看到的 4xx / 5xx 语义不变。
+
+**通用码（三枚，文本稳定且不拼接原始 message）：**
+
+| 码 | HTTP 由原码推导 | message |
+| --- | --- | --- |
+| `CHAT_FAILED` | 原码对应状态 | `Chat request failed.` |
+| `SERVICE_BUSY` | 原码对应状态 | `Service is busy. Please try again.` |
+| `REQUEST_TIMEOUT` | 原码对应状态 | `Request timed out. Please try again.` |
+
+**原样透传的 allowlist（描述用户能自行决策的身份 / 业务状态）：** `VALIDATION_ERROR`、`PAYLOAD_TOO_LARGE`、`AUTH_REQUIRED`、`AUTH_INVALID_CREDENTIALS`、`AUTH_RATE_LIMITED`、`AUTH_CSRF_REJECTED`、`AUTH_FORBIDDEN`、`CONVERSATION_NOT_FOUND`、`CONVERSATION_DELETED`、`CONVERSATION_ARCHIVED`、`CONVERSATION_REQUEST_IN_PROGRESS`、`REQUEST_NOT_FOUND`、`REQUEST_NOT_CANCELLABLE`、`IDEMPOTENCY_KEY_REUSED`、`ATTACHMENT_TOO_LARGE`、`UNSUPPORTED_ATTACHMENT_TYPE`。
+
+**归类：**
+
+- → `SERVICE_BUSY`：`PROVIDER_RATE_LIMITED`、`ATTACHMENT_CAPACITY_EXCEEDED`、`PROVIDER_NOT_READY`
+- → `REQUEST_TIMEOUT`：`PROVIDER_RESPONSE_TIMEOUT`、`PROVIDER_CANCELLATION_UNCONFIRMED`、`PROVIDER_ATTACHMENT_TIMEOUT`、`BROWSER_RESTART_TIMEOUT`
+- → `CHAT_FAILED`：其余全部内部码（Provider / Browser / Streaming / 重启恢复 / 数据库 / 未分类）
+
+**三条不变量：**
+
+1. **Public 面 `PROVIDER_*` / `BROWSER_*` = 0**：HTTP 错误信封、Public DTO 的 `errorCode`、SSE 帧三处一律只出现对外码（锚点测试 `ER-PART-03`、`ER-PUB-01`）。
+2. **失败闭合**：未归类的未来新增内部码默认落 `CHAT_FAILED`，不会自动透传。
+3. **按 surface 而非身份决定暴露**：只有 `/api/admin/*` 的信封保留原内部码与原始 message（由 error-handler 依据 `errorExposureOf(res)` 打开）；ADMIN 身份调 Public 路由仍走收敛后的信封。数据库与日志始终记录原码原文。
 
 ---
 
@@ -735,17 +779,23 @@ SQLite + 单 Browser Profile + 全局单飞，决定只能单实例运行。同�
 
 当前默认监听 `127.0.0.1`，**不应直接作为公网多租户服务暴露**。
 
+> **NOT READY FOR PUBLIC INTERNET RELEASE（V1.3-C）**
+>
+> V1.3-C 只完成了前端 Admin Console、Public 错误契约收口与旧运维 alias 退役，**没有**改变发布闸门。以下能力仍未实现，上线公网多用户前必须逐项补齐：P6 Rate Limit / Quota、Scheduler 公平性（单用户无法长期独占全局单飞）、Browser Pool 与多 Gemini Account、邮箱 / OAuth 注册与账号体系。
+>
+> `AUTH_ENABLED=false` 只允许 loopback 监听（`HOST` 非 loopback 时启动即 fail-fast），它是单机兼容模式，不是隐式管理员模式。
+
 ---
 
 ## 22. 常见问题
 
 | 现象 / 错误码 | 含义 | 处理 |
 | --- | --- | --- |
-| `PROVIDER_LOGIN_REQUIRED`（401 / status `LOGIN_REQUIRED`） | Gemini 未登录或登录态失效 | ① 停止占用同一 profile 的 Backend → ② `yarn browser:login` → ③ 人工完成登录 → ④ CLI 成功退出后重启 Backend → ⑤ `GET /api/browser/status` 确认 `providerLoggedIn=true`。**系统不会自动完成 Google 登录**（见 [§8](#8-首次-gemini-登录)） |
+| `PROVIDER_LOGIN_REQUIRED`（401 / status `LOGIN_REQUIRED`） | Gemini 未登录或登录态失效 | ① 停止占用同一 profile 的 Backend → ② `yarn browser:login` → ③ 人工完成登录 → ④ CLI 成功退出后重启 Backend → ⑤ `GET /api/admin/browser/status` 确认 `providerLoggedIn=true`。**系统不会自动完成 Google 登录**（见 [§8](#8-首次-gemini-登录)） |
 | `PROVIDER_PROFILE_IN_USE`（500） | profile 被另一进程占用 | **不要删 lock 文件**；先找到并关闭仍占用 `BROWSER_PROFILE_DIR` 的旧 Backend / Chromium 实例，再重启 |
 | `PROVIDER_DOM_CHANGED`（500） | Gemini 改版导致 selector 失效 | 更新 `gemini.selectors.ts` 后重新构建；临时可 `restart` 重试 |
-| `PROVIDER_PAGE_CLOSED`（500） | Gemini 页面被单独关闭（Context 仍在） | 再次 `POST /api/provider/open` 会重建 Page，不二次启动 Chromium |
-| `PROVIDER_BROWSER_CRASHED`（500） | Chromium / Context / renderer 崩溃 | 由 Scheduler 触发 `restart` 重建；必要时人工 `POST /api/provider/restart` |
+| `PROVIDER_PAGE_CLOSED`（500） | Gemini 页面被单独关闭（Context 仍在） | 再次 `POST /api/admin/provider/open` 会重建 Page，不二次启动 Chromium |
+| `PROVIDER_BROWSER_CRASHED`（500） | Chromium / Context / renderer 崩溃 | 由 Scheduler 触发 `restart` 重建；必要时人工 `POST /api/admin/provider/restart` |
 | `PROVIDER_CONVERSATION_UNAVAILABLE`（409） | 已绑定的 Gemini 会话被踢回 `/app` 或跳到别的会话 id | 该会话无法继续复用；新建 Conversation 重新发起 |
 | `DATABASE_ERROR`（500） | Prisma / SQLite 运行时异常 | 查看服务端日志定位；确认 `DATABASE_URL` 指向可写文件、迁移已 `migrate deploy` |
 | 启动即 `VALIDATION_ERROR` | 环境变量非法 | 检查 `DATABASE_URL` 是否缺失、`REQUEST_EXECUTION_TIMEOUT_MS` 是否严格大于 `GEMINI_RESPONSE_TIMEOUT_MS` |
@@ -798,7 +848,7 @@ Backend:  https://github.com/hukaiedu/NextChatBack
 V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择，全部基于 Gemini Web 动态目录，无任何静态模型配置：
 
 - **请求链路定位**：NextChat Frontend → 本 Backend（REST / SSE）→ Playwright Chromium → Gemini Web；不使用 Gemini API；当前为单用户、单 Backend 实例的自托管方案。
-- **模型目录**：`GET /api/provider/models`，由 Provider 页面实时读取（`listModels()`）。仅 `READY` 可用；`LOGIN_REQUIRED` → `401 PROVIDER_LOGIN_REQUIRED`，其余非 READY 状态 → `500 PROVIDER_NOT_READY`。
+- **模型目录**：`GET /api/provider/models`（Public），由 Provider 页面实时读取（`listModels()`）。仅 `READY` 可用；`LOGIN_REQUIRED` → `401`，其余非 READY 状态与 Page 锁被占用 → `503 SERVICE_BUSY`（内部码 `PROVIDER_NOT_READY` 只进日志与 Admin 信封，见 [§18.1](#181-public-信封v13-c-契约)）。
 - **三层模型字段**：
   - `Conversation.preferredModelKey` —— 会话模型偏好，经 `PATCH /api/conversations/:id` 保存（显式 `null` = 恢复默认模型）；
   - `Request.requestedModelKey` —— Request 创建时冻结的快照（`body.modelKey ?? 会话偏好 ?? null`），后续偏好修改不影响在途请求；
@@ -806,7 +856,7 @@ V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择�
 - **执行链路**：Scheduler 认领 → `ensureModel`（目录校验 → 菜单切换 → 重验选中）→ resolved 落库 → `runPrompt`。切换失败（`PROVIDER_MODEL_UNAVAILABLE` / `PROVIDER_MODEL_SWITCH_FAILED`）Request 一律 `FAILED`，**Prompt 不发送**。
 - **默认模型兼容路径**：`preferredModelKey=null` 且 body 不带 `modelKey` → `requestedModelKey=null` → **完全不调用 `ensureModel`**（0 次模型菜单 DOM），resolved 字段保持 `null`，行为与 V1 冻结基线一致。
 - **模型键语义**：模型 key 是 Gemini Web 菜单的不透明 `data-mode-id`，**禁止硬编码**，不保证跨账号 / 跨会话稳定；历史偏好键不在当前目录时不会被自动清除，执行时判 `PROVIDER_MODEL_UNAVAILABLE`。
-- **Provider Page 互斥（ProviderPageLock）**：Scheduler 执行（openGemini / ensureModel / runPrompt）与 `GET /api/provider/models`（listModels）共用同一把 Page 锁，同一时刻至多一个操作进入 Gemini 页面，锁被占用时 `listModels` 立即返回 `PROVIDER_NOT_READY`；叠加 Scheduler 全局并发 = 1，模型操作与对话执行永不并发。
+- **Provider Page 互斥（ProviderPageLock）**：Scheduler 执行（openGemini / ensureModel / runPrompt）与 `GET /api/provider/models`（listModels）共用同一把 Page 锁，同一时刻至多一个操作进入 Gemini 页面，锁被占用时 `listModels` 立即失败（内部码 `PROVIDER_NOT_READY`，Public 面 `503 SERVICE_BUSY`）；叠加 Scheduler 全局并发 = 1，模型操作与对话执行永不并发。
 - **幂等**：会话偏好不参与请求指纹（`modelKey` 显式携带时参与）；同 Key 同内容重试不受偏好变化影响。
 
 ---

@@ -22,7 +22,6 @@ const PASSTHROUGH: readonly string[] = [
   ErrorCodes.IDEMPOTENCY_KEY_REUSED,
   ErrorCodes.ATTACHMENT_TOO_LARGE,
   ErrorCodes.UNSUPPORTED_ATTACHMENT_TYPE,
-  ErrorCodes.PROVIDER_NOT_READY,
   ErrorCodes.AUTH_REQUIRED,
   ErrorCodes.AUTH_INVALID_CREDENTIALS,
   ErrorCodes.AUTH_RATE_LIMITED,
@@ -33,6 +32,7 @@ const PASSTHROUGH: readonly string[] = [
 const BUSY: readonly string[] = [
   ErrorCodes.PROVIDER_RATE_LIMITED,
   ErrorCodes.ATTACHMENT_CAPACITY_EXCEEDED,
+  ErrorCodes.PROVIDER_NOT_READY,
 ];
 
 const TIMEOUT: readonly string[] = [
@@ -111,6 +111,23 @@ describe("Public Error 映射分区完整性(§14:allowlist 必须来自仓库�
         expect(mapped.code, code).toBe(PublicErrorCodes.CHAT_FAILED);
       }
     }
+  });
+
+  it("ER-PART-03 §52:Public 映射结果里 PROVIDER_* = 0,退役的兼容例外不得复活", () => {
+    for (const code of ALL_CODES) {
+      const mapped = toPublicError(code, `raw ${code} detail`);
+      expect(mapped.code, code).not.toContain("PROVIDER_");
+      expect(mapped.message, code).not.toContain("PROVIDER_");
+    }
+    // 曾经是唯一的 PROVIDER_* 透传项(FIX-02D 兼容例外),现已归入 BUSY
+    expect(toPublicError(ErrorCodes.PROVIDER_NOT_READY, "provider not ready")).toEqual({
+      code: PublicErrorCodes.SERVICE_BUSY,
+      message: GENERIC_MESSAGE.SERVICE_BUSY,
+    });
+    // Admin surface 反面对照:原码原文照旧保留(§32)
+    expect(
+      toPublicError(ErrorCodes.PROVIDER_NOT_READY, "provider not ready", { internal: true }),
+    ).toEqual({ code: "PROVIDER_NOT_READY", message: "provider not ready" });
   });
 });
 

@@ -80,6 +80,7 @@ describe("V1.3-B3-2 Public Error 零泄露(§18/§19/§54)", () => {
     [ErrorCodes.PROVIDER_CANCELLATION_UNCONFIRMED, "REQUEST_TIMEOUT"],
     [ErrorCodes.PROVIDER_RATE_LIMITED, "SERVICE_BUSY"],
     [ErrorCodes.ATTACHMENT_CAPACITY_EXCEEDED, "SERVICE_BUSY"],
+    [ErrorCodes.PROVIDER_NOT_READY, "SERVICE_BUSY"],
   ])(
     "ER-PUB-01 %s → Public DTO %s",
     async (internalCode, expectedPublic) => {

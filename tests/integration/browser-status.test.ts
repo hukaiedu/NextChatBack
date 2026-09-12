@@ -46,7 +46,7 @@ describe("Browser Status API", () => {
   }
 
   async function getStatus(): Promise<BrowserStatusData> {
-    const res = await api("/api/browser/status");
+    const res = await api("/api/admin/browser/status");
     expect(res.status).toBe(200);
     return ((await res.json()) as StatusBody).data;
   }
@@ -63,7 +63,7 @@ describe("Browser Status API", () => {
     await ctx.close();
   });
 
-  it("GET /api/browser/status:STOPPED 快照(不启动浏览器)", async () => {
+  it("GET /api/admin/browser/status:STOPPED 快照(不启动浏览器)", async () => {
     const data = await getStatus();
     expect(data).toMatchObject({
       state: "STOPPED",
@@ -81,7 +81,7 @@ describe("Browser Status API", () => {
     expect(driver.launchCount).toBe(0);
   });
 
-  it("GET /api/browser/status:READY → RUNNING + providerLoggedIn true + 启动时间", async () => {
+  it("GET /api/admin/browser/status:READY → RUNNING + providerLoggedIn true + 启动时间", async () => {
     await manager.openGemini();
 
     const data = await getStatus();
@@ -91,7 +91,7 @@ describe("Browser Status API", () => {
     expect(data.uptimeMs).toBeGreaterThanOrEqual(0);
   });
 
-  it("GET /api/browser/status:LOGIN_REQUIRED → RUNNING + providerLoggedIn false", async () => {
+  it("GET /api/admin/browser/status:LOGIN_REQUIRED → RUNNING + providerLoggedIn false", async () => {
     driver.redirectToLogin = true;
     await manager.openGemini();
 
@@ -100,7 +100,7 @@ describe("Browser Status API", () => {
     expect(data.providerLoggedIn).toBe(false);
   });
 
-  it("GET /api/browser/status:PROCESSING 的 Request 计入 activeRequests", async () => {
+  it("GET /api/admin/browser/status:PROCESSING 的 Request 计入 activeRequests", async () => {
     const conversation = await ctx.prisma.conversation.create({
       data: { title: "t", userId: COMPAT_USER_ID },
     });
@@ -125,8 +125,8 @@ describe("Browser Status API", () => {
     expect(data.activeRequests).toBe(1);
   });
 
-  it("POST /api/browser/restart:STOPPED 直接重启(自愈路径)→ RUNNING", async () => {
-    const res = await api("/api/browser/restart", { method: "POST" });
+  it("POST /api/admin/browser/restart:STOPPED 直接重启(自愈路径)→ RUNNING", async () => {
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(200);
 
     const data = ((await res.json()) as StatusBody).data;
@@ -135,11 +135,11 @@ describe("Browser Status API", () => {
     expect(driver.launchCount).toBe(1);
   });
 
-  it("POST /api/browser/restart:已运行时重启 → 关旧启新,startedAt 变新", async () => {
+  it("POST /api/admin/browser/restart:已运行时重启 → 关旧启新,startedAt 变新", async () => {
     await manager.openGemini();
     const before = await getStatus();
 
-    const res = await api("/api/browser/restart", { method: "POST" });
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(200);
 
     const after = ((await res.json()) as StatusBody).data;
@@ -148,7 +148,7 @@ describe("Browser Status API", () => {
     expect(driver.launchCount).toBe(2);
   });
 
-  it("POST /api/browser/restart:有在飞 Request → 409 BROWSER_RESTART_CONFLICT", async () => {
+  it("POST /api/admin/browser/restart:有在飞 Request → 409 BROWSER_RESTART_CONFLICT", async () => {
     const conversation = await ctx.prisma.conversation.create({
       data: { title: "t", userId: COMPAT_USER_ID },
     });
@@ -169,7 +169,7 @@ describe("Browser Status API", () => {
       },
     });
 
-    const res = await api("/api/browser/restart", { method: "POST" });
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(409);
     const body = (await res.json()) as ErrorBody;
     expect(body.error.code).toBe(ErrorCodes.BROWSER_RESTART_CONFLICT);
@@ -177,22 +177,22 @@ describe("Browser Status API", () => {
     expect(driver.launchCount).toBe(0);
   });
 
-  it("POST /api/browser/restart:BUSY → 409 BROWSER_RESTART_CONFLICT", async () => {
+  it("POST /api/admin/browser/restart:BUSY → 409 BROWSER_RESTART_CONFLICT", async () => {
     await manager.openGemini();
     manager.setBusy();
 
-    const res = await api("/api/browser/restart", { method: "POST" });
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(409);
     expect(((await res.json()) as ErrorBody).error.code).toBe(ErrorCodes.BROWSER_RESTART_CONFLICT);
   });
 
-  it("POST /api/browser/restart:重启进行中 → 409 BROWSER_RESTART_CONFLICT", async () => {
+  it("POST /api/admin/browser/restart:重启进行中 → 409 BROWSER_RESTART_CONFLICT", async () => {
     // launch 挂起期间 restart 一直处于 in-flight:第二次重启必须被拒
     driver.launchDelayMs = 50;
     const pending = manager.restart();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    const res = await api("/api/browser/restart", { method: "POST" });
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(409);
     expect(((await res.json()) as ErrorBody).error.code).toBe(ErrorCodes.BROWSER_RESTART_CONFLICT);
 
@@ -200,10 +200,10 @@ describe("Browser Status API", () => {
     expect(driver.launchCount).toBe(1);
   });
 
-  it("POST /api/browser/restart:启动失败 → 500 BROWSER_LAUNCH_FAILED,快照 FAILED + lastError", async () => {
+  it("POST /api/admin/browser/restart:启动失败 → 500 BROWSER_LAUNCH_FAILED,快照 FAILED + lastError", async () => {
     driver.throwOnLaunch = new Error("crash in launch");
 
-    const res = await api("/api/browser/restart", { method: "POST" });
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(500);
     expect(((await res.json()) as ErrorBody).error.code).toBe(ErrorCodes.BROWSER_LAUNCH_FAILED);
 
@@ -212,10 +212,10 @@ describe("Browser Status API", () => {
     expect(data.lastError).toEqual({ code: ErrorCodes.PROVIDER_BROWSER_START_FAILED, message: "crash in launch" });
   });
 
-  it("POST /api/browser/restart:Profile 被占用 → BROWSER_LAUNCH_FAILED,lastError 记 PROFILE_IN_USE", async () => {
+  it("POST /api/admin/browser/restart:Profile 被占用 → BROWSER_LAUNCH_FAILED,lastError 记 PROFILE_IN_USE", async () => {
     driver.throwOnLaunch = new Error("User data directory is already in use");
 
-    const res = await api("/api/browser/restart", { method: "POST" });
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(500);
     expect(((await res.json()) as ErrorBody).error.code).toBe(ErrorCodes.BROWSER_LAUNCH_FAILED);
 
@@ -223,10 +223,10 @@ describe("Browser Status API", () => {
     expect(data.lastError?.code).toBe(ErrorCodes.PROVIDER_PROFILE_IN_USE);
   });
 
-  it("POST /api/browser/restart:非启动阶段失败(导航)→ 500 BROWSER_RESTART_FAILED", async () => {
+  it("POST /api/admin/browser/restart:非启动阶段失败(导航)→ 500 BROWSER_RESTART_FAILED", async () => {
     driver.pageScript = { throwOnGoto: true };
 
-    const res = await api("/api/browser/restart", { method: "POST" });
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(500);
     expect(((await res.json()) as ErrorBody).error.code).toBe(ErrorCodes.BROWSER_RESTART_FAILED);
 
@@ -234,13 +234,13 @@ describe("Browser Status API", () => {
     expect(data.state).toBe("FAILED");
   });
 
-  it("POST /api/browser/restart:失败后重启成功 → lastError 清空,回 RUNNING", async () => {
+  it("POST /api/admin/browser/restart:失败后重启成功 → lastError 清空,回 RUNNING", async () => {
     driver.throwOnLaunch = new Error("boom");
-    const failed = await api("/api/browser/restart", { method: "POST" });
+    const failed = await api("/api/admin/browser/restart", { method: "POST" });
     expect(failed.status).toBe(500);
 
     driver.throwOnLaunch = null;
-    const res = await api("/api/browser/restart", { method: "POST" });
+    const res = await api("/api/admin/browser/restart", { method: "POST" });
     expect(res.status).toBe(200);
 
     const data = await getStatus();

@@ -199,21 +199,27 @@ describe("V1.3-B3 §53/§68 安全矩阵:Anonymous A / Anonymous B / ADMIN", () 
       const a = await newAnonymous(ctx);
       const adminCookie = await loginAdmin(ctx.baseUrl);
 
-      for (const path of ["/api/admin/browser/status", "/api/browser/status"]) {
-        const denied = await api(ctx, a, "GET", path);
-        expect(denied.status).toBe(403);
-        const deniedBody = await jsonOf(denied);
-        expect((deniedBody.error as { code: string }).code).toBe(ErrorCodes.AUTH_FORBIDDEN);
-        // §53:拒绝响应本身也不得带运维内部信息
-        expect(collectKeys(deniedBody)).not.toContain("profileDir");
-        expect(JSON.stringify(deniedBody)).not.toContain("profile");
+      const path = "/api/admin/browser/status";
+      const denied = await api(ctx, a, "GET", path);
+      expect(denied.status).toBe(403);
+      const deniedBody = await jsonOf(denied);
+      expect((deniedBody.error as { code: string }).code).toBe(ErrorCodes.AUTH_FORBIDDEN);
+      // §53:拒绝响应本身也不得带运维内部信息
+      expect(collectKeys(deniedBody)).not.toContain("profileDir");
+      expect(JSON.stringify(deniedBody)).not.toContain("profile");
 
-        const granted = await fetch(
-          `${ctx.baseUrl}${path}`,
-          withAdminCookie(adminCookie, { method: "GET" }),
-        );
-        expect(granted.status).toBe(200);
-      }
+      const granted = await fetch(
+        `${ctx.baseUrl}${path}`,
+        withAdminCookie(adminCookie, { method: "GET" }),
+      );
+      expect(granted.status).toBe(200);
+
+      // §25(V1.3-C):旧 alias 已从路由表移除 —— ADMIN 也只会得到 404,不是 403
+      const retired = await fetch(
+        `${ctx.baseUrl}/api/browser/status`,
+        withAdminCookie(adminCookie, { method: "GET" }),
+      );
+      expect(retired.status).toBe(404);
     });
   });
 
@@ -222,7 +228,7 @@ describe("V1.3-B3 §53/§68 安全矩阵:Anonymous A / Anonymous B / ADMIN", () 
       const a = await newAnonymous(ctx);
       // Fake Browser 初始为 STOPPED:先由 ADMIN 打开,再验匿名读取(§24 与权限无关的只有目录本身)
       const opened = await fetch(
-        `${ctx.baseUrl}/api/provider/open`,
+        `${ctx.baseUrl}/api/admin/provider/open`,
         withAdminCookie(await loginAdmin(ctx.baseUrl), { method: "POST" }),
       );
       expect(opened.status).toBe(200);
@@ -244,7 +250,7 @@ describe("V1.3-B3 §53/§68 安全矩阵:Anonymous A / Anonymous B / ADMIN", () 
       expect(
         (
           await fetch(
-            `${ctx.baseUrl}/api/provider/open`,
+            `${ctx.baseUrl}/api/admin/provider/open`,
             withAdminCookie(await loginAdmin(ctx.baseUrl), { method: "POST" }),
           )
         ).status,

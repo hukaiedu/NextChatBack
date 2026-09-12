@@ -33,14 +33,9 @@ const GENERIC_MESSAGE: Record<keyof typeof PublicErrorCodes, string> = {
  * 而不是「它像不像服务端故障」:身份与请求合法性、会话与 Request 的业务状态、
  * 幂等冲突、附件的请求侧限制都属此类。
  *
- * PROVIDER_NOT_READY 是唯一一个 PROVIDER_* 透传项,理由是实测而非推测:
- * ① 它不描述实现(Gemini / Playwright / DOM / profile 一概不出现);
- * ② 现前端把它当作模型目录的分支条件(front/app/store/chat.ts 按码判断并提示重试),
- *    折成 CHAT_FAILED 会在「新后端 + 旧前端」兼容窗口里把可恢复提示变成失败气泡。
- *
- * ⚠ TEMPORARY COMPATIBILITY EXCEPTION —— 它不是 Public Error 冻结项(FIX-02D)。
- * 待前端不再依赖该码后,必须改映射为合适的通用 Public 码,使 Public API 中 PROVIDER_* = 0;
- * 在那之前不得正式开放匿名公网服务。
+ * V1.3-C:Public 面 **PROVIDER_\* = 0**。曾经唯一的例外 PROVIDER_NOT_READY 是
+ * 兼容窗口产物(FIX-02D),前端 canonical 迁移完成后已改归类 SERVICE_BUSY;
+ * Provider/Browser 的实现细节一律折进三个通用码,原码只在 Admin surface 保留。
  */
 const PASSTHROUGH: ReadonlySet<string> = new Set<string>([
   ErrorCodes.VALIDATION_ERROR,
@@ -59,17 +54,17 @@ const PASSTHROUGH: ReadonlySet<string> = new Set<string>([
   ErrorCodes.IDEMPOTENCY_KEY_REUSED,
   ErrorCodes.ATTACHMENT_TOO_LARGE,
   ErrorCodes.UNSUPPORTED_ATTACHMENT_TYPE,
-  ErrorCodes.PROVIDER_NOT_READY,
   // 三个通用码本身就是对外码:透传即恒等,保证映射可安全叠加(二次映射不会降级)
   PublicErrorCodes.CHAT_FAILED,
   PublicErrorCodes.SERVICE_BUSY,
   PublicErrorCodes.REQUEST_TIMEOUT,
 ]);
 
-/** 容量 / 排队类:入口拒绝,用户稍后重试即可(§15;P6 配额尚未实现,不在此创建 quota 语义) */
+/** 容量 / 排队 / Provider 未就绪类:入口拒绝,用户稍后重试即可(§15;P6 配额尚未实现,不在此创建 quota 语义) */
 const SERVICE_BUSY: ReadonlySet<string> = new Set<string>([
   ErrorCodes.PROVIDER_RATE_LIMITED,
   ErrorCodes.ATTACHMENT_CAPACITY_EXCEEDED,
+  ErrorCodes.PROVIDER_NOT_READY,
 ]);
 
 /** 超时类:同类统一(§16) */
