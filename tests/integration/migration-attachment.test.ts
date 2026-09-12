@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { isUniqueViolation, uniqueViolationInfo } from "../../src/common/utils/prisma-error.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
@@ -50,7 +51,9 @@ async function columns(table: string): Promise<Column[]> {
 async function seedLegacyRequest(
   key: string,
 ): Promise<{ requestId: string; conversationId: string }> {
-  const conversation = await ctx.prisma.conversation.create({ data: { title: key } });
+  const conversation = await ctx.prisma.conversation.create({
+    data: { title: key, userId: COMPAT_USER_ID },
+  });
   const user = await ctx.prisma.message.create({
     data: { conversationId: conversation.id, role: "USER", content: "u", status: "COMPLETED", position: 0 },
   });

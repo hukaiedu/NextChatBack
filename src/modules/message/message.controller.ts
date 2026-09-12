@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { parseOrThrow } from "../../common/utils/parse.js";
+import { toPublicMessageListItem, toPublicSendMessageResult } from "./message.public.js";
 import {
   idempotencyKeyHeaderSchema,
   listMessagesQuerySchema,
@@ -20,7 +21,7 @@ export function createMessageRouter(service: MessageService): Router {
     const query = parseOrThrow(listMessagesQuerySchema, req.query, "listMessagesQuery");
     const result = await service.listMessages(req.auth!.userId, params.conversationId, query);
     res.json({
-      data: result.items,
+      data: result.items.map(toPublicMessageListItem),
       meta: { nextCursor: result.nextCursor, totalCount: result.totalCount },
     });
   });
@@ -44,7 +45,7 @@ export function createMessageRouter(service: MessageService): Router {
       body.attachments,
     );
     // 幂等命中返回 200,首次成功创建 Request 返回 202 Accepted
-    res.status(result.deduplicated ? 200 : 202).json({ data: result });
+    res.status(result.deduplicated ? 200 : 202).json({ data: toPublicSendMessageResult(result) });
   });
 
   return router;

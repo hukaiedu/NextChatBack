@@ -164,7 +164,7 @@ describe("SSE 集成:GET /api/requests/:id/events(真 SQLite + Fake Adapter 流�
       await mount({
         runError: new AppError(
           ErrorCodes.PROVIDER_DOM_CHANGED,
-          "Gemini page does not match expected structure",
+          `Gemini page .cib-task-item missing SECRET_PROVIDER_INTERNAL_DETAIL_123`,
           500,
         ),
       });
@@ -173,7 +173,15 @@ describe("SSE 集成:GET /api/requests/:id/events(真 SQLite + Fake Adapter 流�
       execute();
 
       const error = await client.waitFor((e) => e.event === "error", "error frame");
-      expect(error.data).toMatchObject({ code: ErrorCodes.PROVIDER_DOM_CHANGED });
+      // §12/§17:SSE 属 Public 面,内部码不外泄
+      expect(error.data).toMatchObject({
+        code: "CHAT_FAILED",
+        message: "Chat request failed.",
+      });
+      // §19:主动植入的内部标记一个字都不能出现在帧里
+      expect(JSON.stringify(error.data)).not.toContain("SECRET_PROVIDER_INTERNAL_DETAIL_123");
+      expect(JSON.stringify(error.data)).not.toContain("PROVIDER_DOM_CHANGED");
+      expect(JSON.stringify(error.data)).not.toContain("Gemini");
       const status = await client.waitFor(
         (e) => e.event === "status" && e.data.requestStatus === "FAILED",
         "FAILED status",
@@ -183,6 +191,14 @@ describe("SSE 集成:GET /api/requests/:id/events(真 SQLite + Fake Adapter 流�
         client.seen.filter((e) => e.event === "status").map((e) => e.data.requestStatus),
       ).toEqual(["PENDING", "PROCESSING", "FAILED"]);
       expect(await assistant()).toMatchObject({ status: "FAILED", content: "" });
+      // §18:映射只发生在对外面,DB 仍保留原始码与原始 message 供运维判断
+      expect(await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: requestId } })).toMatchObject(
+        {
+          status: "FAILED",
+          errorCode: ErrorCodes.PROVIDER_DOM_CHANGED,
+          errorMessage: `Gemini page .cib-task-item missing SECRET_PROVIDER_INTERNAL_DETAIL_123`,
+        },
+      );
       expect(await client.next()).toBeNull();
       expect(ctx.sseConnections()).toBe(0);
     },

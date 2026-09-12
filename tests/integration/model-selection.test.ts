@@ -4,6 +4,7 @@ import { AppError } from "../../src/common/errors/app-error.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
 import { createLogger } from "../../src/common/logger/logger.js";
 import type { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
+import type { PublicSendMessageResult } from "../../src/modules/message/message.public.js";
 import {
   createConversation,
   sendMessage,
@@ -18,15 +19,26 @@ import {
 } from "../fakes.js";
 import type { FakeAdapterBehavior } from "../fakes.js";
 
-interface MessageSendBody {
-  data: {
-    request: {
-      id: string;
-      requestedModelKey: string | null;
-      resolvedModelKey: string | null;
-      resolvedModelLabel: string | null;
-    };
-    deduplicated: boolean;
+/**
+ * 发送结果契约 = 生产 Public DTO(B3-2 起 request 为 PublicRequest)。
+ * 模型三字段(requested/resolved)已从 Public 收口为 Internal,断言请走 modelSnapshotOf。
+ */
+type MessageSendBody = { data: PublicSendMessageResult };
+
+/** §8/§9:模型快照属内部实现,只能从数据库读回来断言 */
+async function modelSnapshotOf(
+  ctx: TestContext,
+  requestId: string,
+): Promise<{
+  requestedModelKey: string | null;
+  resolvedModelKey: string | null;
+  resolvedModelLabel: string | null;
+}> {
+  const row = await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: requestId } });
+  return {
+    requestedModelKey: row.requestedModelKey,
+    resolvedModelKey: row.resolvedModelKey,
+    resolvedModelLabel: row.resolvedModelLabel,
   };
 }
 
@@ -96,7 +108,7 @@ describe("M1 模型选择:发送消息 modelKey 语义(§二十一 四象限)", 
     const res = await sendMessage(ctx.baseUrl, conv.id, "你好", "quad-1-key");
     expect(res.status).toBe(202);
     const body = (await res.json()) as MessageSendBody;
-    expect(body.data.request.requestedModelKey).toBe("model-c");
+    expect((await modelSnapshotOf(ctx, body.data.request.id)).requestedModelKey).toBe("model-c");
 
     const conversation = await ctx.prisma.conversation.findUniqueOrThrow({ where: { id: conv.id } });
     expect(conversation.preferredModelKey).toBe("model-c");
@@ -107,7 +119,7 @@ describe("M1 模型选择:发送消息 modelKey 语义(§二十一 四象限)", 
     const res = await sendMessage(ctx.baseUrl, conv.id, "你好", "quad-1b-key");
     expect(res.status).toBe(202);
     const body = (await res.json()) as MessageSendBody;
-    expect(body.data.request.requestedModelKey).toBeNull();
+    expect((await modelSnapshotOf(ctx, body.data.request.id)).requestedModelKey).toBeNull();
     const conversation = await ctx.prisma.conversation.findUniqueOrThrow({ where: { id: conv.id } });
     expect(conversation.preferredModelKey).toBeNull();
   });
@@ -117,7 +129,7 @@ describe("M1 模型选择:发送消息 modelKey 语义(§二十一 四象限)", 
     const res = await sendMessage(ctx.baseUrl, conv.id, "你好", "quad-2-key", "model-b");
     expect(res.status).toBe(202);
     const body = (await res.json()) as MessageSendBody;
-    expect(body.data.request.requestedModelKey).toBe("model-b");
+    expect((await modelSnapshotOf(ctx, body.data.request.id)).requestedModelKey).toBe("model-b");
 
     const conversation = await ctx.prisma.conversation.findUniqueOrThrow({ where: { id: conv.id } });
     expect(conversation.preferredModelKey).toBe("model-b");
@@ -140,31 +152,40 @@ describe("M1 模型选择:发送消息 modelKey 语义(§二十一 四象限)", 
     const res = await sendMessage(ctx.baseUrl, conv.id, "继续", "quad-4-key", "model-b");
     expect(res.status).toBe(202);
     const body = (await res.json()) as MessageSendBody;
-    expect(body.data.request.requestedModelKey).toBe("model-b");
+    expect((await modelSnapshotOf(ctx, body.data.request.id)).requestedModelKey).toBe("model-b");
     const conversation = await ctx.prisma.conversation.findUniqueOrThrow({ where: { id: conv.id } });
     expect(conversation.preferredModelKey).toBe("model-b");
   });
 
-  it("请求 DTO:GET /api/requests/:id 与消息列表 RequestBrief 均带模型三字段(resolved 恒 null,M2 才写入)", async () => {
+  it("请求 DTO:模型快照只落库,GET /api/requests/:id 与消息列表 RequestBrief 均不带三字段(§8/§9)", async () => {
     const conv = await createConversation(ctx.baseUrl);
     const sent = await sendMessage(ctx.baseUrl, conv.id, "你好", "dto-key", "model-a");
     const { request } = ((await sent.json()) as MessageSendBody).data;
 
+    // 内部真值仍在数据库:收口只删对外可见面,不删证据(§18)
+    expect(await modelSnapshotOf(ctx, request.id)).toEqual({
+      requestedModelKey: "model-a",
+      resolvedModelKey: null,
+      resolvedModelLabel: null,
+    });
+
+    const forbidden = ["requestedModelKey", "resolvedModelKey", "resolvedModelLabel"];
+
     const detail = await fetch(`${ctx.baseUrl}/api/requests/${request.id}`);
     expect(detail.status).toBe(200);
-    const detailBody = (await detail.json()) as {
-      data: { requestedModelKey: string | null; resolvedModelKey: string | null; resolvedModelLabel: string | null };
-    };
-    expect(detailBody.data.requestedModelKey).toBe("model-a");
-    expect(detailBody.data.resolvedModelKey).toBeNull();
-    expect(detailBody.data.resolvedModelLabel).toBeNull();
+    const detailData = ((await detail.json()) as { data: Record<string, unknown> }).data;
+    for (const key of forbidden) {
+      expect(Object.keys(detailData)).not.toContain(key);
+    }
 
     const list = await fetch(`${ctx.baseUrl}/api/conversations/${conv.id}/messages`);
-    const listBody = (await list.json()) as {
-      data: Array<{ role: string; request: { requestedModelKey: string | null } | null }>;
-    };
-    const assistant = listBody.data.find((m) => m.role === "ASSISTANT");
-    expect(assistant?.request?.requestedModelKey).toBe("model-a");
+    const listBody = (await list.json()) as { data: Array<Record<string, unknown>> };
+    const assistant = listBody.data.find((m) => m.role === "ASSISTANT")!;
+    const brief = assistant.request as Record<string, unknown>;
+    expect(brief).not.toBeNull();
+    for (const key of forbidden) {
+      expect(Object.keys(brief)).not.toContain(key);
+    }
   });
 });
 
@@ -247,7 +268,7 @@ describe("M1 模型选择:Conversation PATCH preferredModelKey(§二十二)", ()
     const second = await sendMessage(ctx.baseUrl, conv.id, "第二条", "fix2-key-2");
     expect(second.status).toBe(202);
     const secondBody = (await second.json()) as MessageSendBody;
-    expect(secondBody.data.request.requestedModelKey).toBe("model-b");
+    expect((await modelSnapshotOf(ctx, secondBody.data.request.id)).requestedModelKey).toBe("model-b");
   });
 });
 
@@ -341,7 +362,7 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     }
   });
 
-  it("LOGIN_REQUIRED → 401 PROVIDER_LOGIN_REQUIRED,adapter 0 call", async () => {
+  it("LOGIN_REQUIRED → 401 CHAT_FAILED(内部码不外泄),adapter 0 call", async () => {
     const adapter = new FakeGeminiAdapter();
     const loginCtx = await setupTestContext({
       geminiAdapter: adapter,
@@ -349,10 +370,12 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     });
     try {
       const res = await fetch(`${loginCtx.baseUrl}/api/provider/models`);
+      // §17:PROVIDER_LOGIN_REQUIRED 说的是「服务器上的 Gemini 会话没登录」,
+      // 对普通用户只是「现在问不了」;HTTP 状态仍按原码推导为 401
       expect(res.status).toBe(401);
-      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-        "PROVIDER_LOGIN_REQUIRED",
-      );
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe("CHAT_FAILED");
+      expect(body.error.message).toBe("Chat request failed.");
       expect(adapter.listModelsCalls).toBe(0);
     } finally {
       await loginCtx.close();
@@ -395,7 +418,7 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     }
   });
 
-  it("FIX-04: Adapter 抛普通 Error(未实现占位)→ 统一出口 500 INTERNAL_ERROR", async () => {
+  it("FIX-04: Adapter 抛普通 Error(未实现占位)→ 统一出口 500 CHAT_FAILED", async () => {
     const adapter = new FakeGeminiAdapter({
       listModelsError: new Error("model catalog reading is not implemented until M2"),
     });
@@ -406,9 +429,11 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     try {
       const res = await fetch(`${failingCtx.baseUrl}/api/provider/models`);
       expect(res.status).toBe(500);
-      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
-        "INTERNAL_ERROR",
-      );
+      const text = await res.text();
+      expect(text).toContain("CHAT_FAILED");
+      // 原始异常文本(含内部里程碑与目录实现状态)不得出现在响应里
+      expect(text).not.toContain("not implemented");
+      expect(text).not.toContain("INTERNAL_ERROR");
       expect(adapter.listModelsCalls).toBe(1);
     } finally {
       await failingCtx.close();
@@ -458,7 +483,7 @@ describe("M3 模型选择接入执行链路(Case A/B/C,真实 executor/scheduler
       const sent = await sendMessage(ctx.baseUrl, conv.id, "你好", "m3-case-a");
       expect(sent.status).toBe(202);
       const { request } = ((await sent.json()) as MessageSendBody).data;
-      expect(request.requestedModelKey).toBeNull();
+      expect((await modelSnapshotOf(ctx, request.id)).requestedModelKey).toBeNull();
 
       await ctx.scheduler!.runOnce();
 
@@ -480,8 +505,11 @@ describe("M3 模型选择接入执行链路(Case A/B/C,真实 executor/scheduler
       const sent = await sendMessage(ctx.baseUrl, conv.id, "切到 A", "m3-case-b", "model-a");
       expect(sent.status).toBe(202);
       const { request } = ((await sent.json()) as MessageSendBody).data;
-      expect(request.requestedModelKey).toBe("model-a");
-      expect(request.resolvedModelKey).toBeNull();
+      expect(await modelSnapshotOf(ctx, request.id)).toEqual({
+        requestedModelKey: "model-a",
+        resolvedModelKey: null,
+        resolvedModelLabel: null,
+      });
 
       await ctx.scheduler!.runOnce();
 
@@ -493,11 +521,12 @@ describe("M3 模型选择接入执行链路(Case A/B/C,真实 executor/scheduler
 
       const detail = await fetch(`${ctx.baseUrl}/api/requests/${request.id}`);
       expect(detail.status).toBe(200);
-      const detailBody = (await detail.json()) as {
-        data: { resolvedModelKey: string | null; resolvedModelLabel: string | null };
-      };
-      expect(detailBody.data.resolvedModelKey).toBe("model-a");
-      expect(detailBody.data.resolvedModelLabel).toBe("Model A");
+      const detailData = ((await detail.json()) as { data: Record<string, unknown> }).data;
+      expect(detailData.status).toBe("SUCCESS");
+      // §9:模型解析结果是内部实现,Public GET 不给
+      for (const key of ["requestedModelKey", "resolvedModelKey", "resolvedModelLabel"]) {
+        expect(Object.keys(detailData)).not.toContain(key);
+      }
 
       const assistant = await ctx.prisma.message.findUniqueOrThrow({
         where: { id: row.assistantMessageId },
@@ -580,7 +609,7 @@ describe("M4 会话偏好接入执行链路(Case A/B/C)", () => {
       const sent = await sendMessage(ctx.baseUrl, conv.id, "你好", "m4-case-b");
       expect(sent.status).toBe(202);
       const { request } = ((await sent.json()) as MessageSendBody).data;
-      expect(request.requestedModelKey).toBe("model-b");
+      expect((await modelSnapshotOf(ctx, request.id)).requestedModelKey).toBe("model-b");
 
       await ctx.scheduler!.runOnce();
 
@@ -612,7 +641,7 @@ describe("M4 会话偏好接入执行链路(Case A/B/C)", () => {
       const sent = await sendMessage(ctx.baseUrl, conv.id, "你好", "m4-case-c");
       expect(sent.status).toBe(202);
       const { request } = ((await sent.json()) as MessageSendBody).data;
-      expect(request.requestedModelKey).toBeNull();
+      expect((await modelSnapshotOf(ctx, request.id)).requestedModelKey).toBeNull();
 
       await ctx.scheduler!.runOnce();
 
@@ -636,7 +665,7 @@ describe("M4 会话偏好接入执行链路(Case A/B/C)", () => {
       const sent = await sendMessage(ctx.baseUrl, conv.id, "首条", "m4-fix01-d");
       expect(sent.status).toBe(202);
       const { request } = ((await sent.json()) as MessageSendBody).data;
-      expect(request.requestedModelKey).toBe("model-a");
+      expect((await modelSnapshotOf(ctx, request.id)).requestedModelKey).toBe("model-a");
 
       await ctx.scheduler!.runOnce();
 

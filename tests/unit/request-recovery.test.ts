@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
@@ -44,6 +45,7 @@ describe("RequestRecovery(重启后遗留 PROCESSING 的处置)", () => {
         title: `conv-${sequence}`,
         status: "ACTIVE",
         provider: "GEMINI_WEB",
+        userId: COMPAT_USER_ID,
         ...(options.url ? { providerConversationUrl: options.url } : {}),
       },
     });

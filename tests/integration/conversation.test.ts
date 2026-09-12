@@ -22,11 +22,25 @@ describe("Conversation API", () => {
     await ctx.close();
   });
 
-  it("创建 Conversation:默认 title/status/provider,201", async () => {
-    const conv = await createConversation(ctx.baseUrl);
-    expect(conv.title).toBe("新对话");
-    expect(conv.status).toBe("ACTIVE");
-    expect(conv.provider).toBe("GEMINI_WEB");
+  it("创建 Conversation:默认 title/status,201 且响应只有白名单字段", async () => {
+    const res = await fetch(`${ctx.baseUrl}/api/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { data: Record<string, unknown> };
+    expect(body.data.title).toBe("新对话");
+    expect(body.data.status).toBe("ACTIVE");
+    // §6/§11(B3-2):provider / providerConversationUrl / userId / deletedAt 一律不外发
+    expect(Object.keys(body.data).sort()).toEqual(
+      ["id", "title", "status", "preferredModelKey", "createdAt", "updatedAt"].sort(),
+    );
+
+    const row = await ctx.prisma.conversation.findUniqueOrThrow({
+      where: { id: body.data.id as string },
+    });
+    expect(row.provider).toBe("GEMINI_WEB");
   });
 
   it("创建 Conversation:自定义 title", async () => {

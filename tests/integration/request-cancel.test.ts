@@ -2,10 +2,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
-import { COMPAT_USER_ID } from "../../src/config/constants.js";
+import { ADMIN_USER_ID, COMPAT_USER_ID } from "../../src/config/constants.js";
 import { FAKE_CONVERSATION_URL, FakeDriver, FakeGeminiAdapter, createFakeManager } from "../fakes.js";
 import type { FakeAdapterBehavior } from "../fakes.js";
-import { setupTestContext, cancelRequest } from "../helpers.js";
+import {
+  ADMIN_AUTH,
+  cancelRequest,
+  loginAdmin,
+  setupTestContext,
+  withAdminCookie,
+} from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
 describe("Request Cancel 集成(§八.1 取消生成)", () => {
@@ -13,16 +19,27 @@ describe("Request Cancel 集成(§八.1 取消生成)", () => {
   let driver: FakeDriver;
   let adapter: FakeGeminiAdapter;
   let sequence = 0;
+  /** 本用例的 HTTP 业务身份:默认 COMPAT;admin 模式下是固定 ADMIN */
+  let httpUserId = COMPAT_USER_ID;
+  /** 仅 admin 模式有值 —— provider/browser 运维端点自 B3-3 起 ADMIN-only(§26) */
+  let adminCookie = "";
 
-  async function mount(behavior: FakeAdapterBehavior = {}, executionTimeoutMs?: number): Promise<void> {
+  async function mount(
+    behavior: FakeAdapterBehavior = {},
+    executionTimeoutMs?: number,
+    opts: { admin?: boolean } = {},
+  ): Promise<void> {
     driver = new FakeDriver();
     adapter = new FakeGeminiAdapter(behavior);
     ctx = await setupTestContext({
       browserManager: createFakeManager(driver),
       geminiAdapter: adapter,
       scheduler: { autoStart: false, executionTimeoutMs },
+      auth: opts.admin === true ? ADMIN_AUTH : null,
     });
     await ctx.reset();
+    httpUserId = opts.admin === true ? ADMIN_USER_ID : COMPAT_USER_ID;
+    adminCookie = opts.admin === true ? await loginAdmin(ctx.baseUrl) : "";
   }
 
   afterEach(async () => {
@@ -36,12 +53,12 @@ describe("Request Cancel 集成(§八.1 取消生成)", () => {
   }> {
     sequence++;
     const conversation = await ctx.prisma.conversation.create({
-      // B3-1:取消走 owner 判定,本文件 HTTP 身份 = COMPAT_USER_ID
+      // B3-1:取消走 owner 判定,归属必须等于本用例的 HTTP 身份
       data: {
         title: `cancel-int-${sequence}`,
         status: "ACTIVE",
         provider: "GEMINI_WEB",
-        userId: COMPAT_USER_ID,
+        userId: httpUserId,
       },
     });
     const userMessage = await ctx.prisma.message.create({
@@ -155,29 +172,41 @@ describe("Request Cancel 集成(§八.1 取消生成)", () => {
 
   it("CANCELLING 期间仍 BUSY,确认停止后才释放槽位", async () => {
     const statusesDuringCancel: string[] = [];
-    await mount({
-      streamTexts: ["text"],
-      cancelBehaviour: "cancelled",
-      partialAnswer: "text",
-      onStreamText: async () => {
-        statusesDuringCancel.push(driver.latestContext ? "BUSY" : "NOT-BUSY");
-        await new Promise((r) => setTimeout(r, 50));
+    // provider 运维状态 ADMIN-only(§26) → 本用例整条链路以 ADMIN 身份跑
+    await mount(
+      {
+        streamTexts: ["text"],
+        cancelBehaviour: "cancelled",
+        partialAnswer: "text",
+        onStreamText: async () => {
+          statusesDuringCancel.push(driver.latestContext ? "BUSY" : "NOT-BUSY");
+          await new Promise((r) => setTimeout(r, 50));
+        },
       },
-    });
+      undefined,
+      { admin: true },
+    );
     const seeded = await seedPending("问题");
 
     const runPromise = ctx.scheduler!.runOnce();
     await new Promise((r) => setTimeout(r, 30));
 
     // CANCELLING 期间应该还是 BUSY
-    const midStatus = (await fetch(`${ctx.baseUrl}/api/provider/status`)).json() as Promise<{ data: { status: string } }>;
-    expect(((await midStatus)).data.status).toBe("BUSY");
+    const midStatus = await (
+      await fetch(
+        `${ctx.baseUrl}/api/provider/status`,
+        withAdminCookie(adminCookie),
+      )
+    ).json() as { data: { status: string } };
+    expect(midStatus.data.status).toBe("BUSY");
 
-    await cancelRequest(ctx.baseUrl, seeded.requestId);
+    await cancelRequest(ctx.baseUrl, seeded.requestId, withAdminCookie(adminCookie));
     await runPromise;
 
     // 结束后释放
-    const afterStatus = await (await fetch(`${ctx.baseUrl}/api/provider/status`)).json() as { data: { status: string } };
+    const afterStatus = await (
+      await fetch(`${ctx.baseUrl}/api/provider/status`, withAdminCookie(adminCookie))
+    ).json() as { data: { status: string } };
     expect(afterStatus.data.status).toBe("READY");
   });
 

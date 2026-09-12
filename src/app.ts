@@ -8,9 +8,16 @@ import { ATTACHMENT_BODY_LIMIT, HEALTH_PATH, MESSAGES_BODY_PATH } from "./config
 import type { PrismaClient } from "./generated/prisma/client.js";
 import { createHealthRouter } from "./modules/health/health.controller.js";
 import type { HealthProbe } from "./modules/health/health.controller.js";
-import { createBrowserStatusRouter } from "./modules/browser/browser-status.controller.js";
+import {
+  createBrowserStatusHandlers,
+  createBrowserStatusRouter,
+} from "./modules/browser/browser-status.controller.js";
 import { BrowserStatusService } from "./modules/browser/browser-status.service.js";
-import { createProviderRouter } from "./modules/provider/provider.controller.js";
+import {
+  createProviderHandlers,
+  createProviderRouter,
+} from "./modules/provider/provider.controller.js";
+import { createAdminRouter } from "./modules/admin/admin.controller.js";
 import { ProviderModelsService } from "./modules/provider/provider-models.service.js";
 import { GeminiPromptService } from "./modules/provider/gemini-prompt.service.js";
 import type { BrowserManager } from "./providers/gemini/browser-manager.js";
@@ -37,6 +44,7 @@ import { createAuthRouter } from "./modules/auth/auth.controller.js";
 import {
   injectCompatAuth,
   originCheck,
+  requireAdmin,
   requireAuth,
 } from "./modules/auth/auth.middleware.js";
 import { AuthService } from "./modules/auth/auth.service.js";
@@ -239,6 +247,12 @@ export function createApp(deps: AppDeps): AppHandle {
   const providerModelsService = new ProviderModelsService(deps.geminiAdapter, deps.browserManager, pageLock);
   const browserStatusService = new BrowserStatusService(deps.browserManager, deps.prisma);
 
+  // V1.3-B3-3 §25:运维 handler 只有一份实现;旧路径是 ADMIN-only alias,不是第二套逻辑。
+  // 同一个 adminGuard 实例复用于三处挂载,避免出现两份权限判据。
+  const providerHandlers = createProviderHandlers(deps.browserManager, providerModelsService);
+  const browserHandlers = createBrowserStatusHandlers(deps.browserManager, browserStatusService);
+  const adminGuard = requireAdmin();
+
   app.use("/api/conversations", createConversationRouter(conversationService));
   app.use(
     "/api/conversations/:conversationId/messages",
@@ -247,8 +261,21 @@ export function createApp(deps: AppDeps): AppHandle {
   app.use("/api/requests", createRequestRouter(requestService));
   // GET /api/requests/:id/events(第 6 阶段 SSE);与 REST 路由共用前缀
   app.use("/api/requests", createSseRouter(sse));
-  app.use("/api/provider", createProviderRouter(deps.browserManager, providerModelsService));
-  app.use("/api/browser", createBrowserStatusRouter(deps.browserManager, browserStatusService));
+  // GET /api/provider/models = Public(§24);status/open/restart = ADMIN alias(§26)
+  app.use("/api/provider", createProviderRouter(providerHandlers, adminGuard));
+  app.use("/api/browser", createBrowserStatusRouter(browserHandlers, adminGuard));
+  // canonical Admin API(§23):全局 requireAuth 已在上方挂载,这里再叠加 requireAdmin
+  app.use(
+    "/api/admin",
+    createAdminRouter({
+      browser: browserHandlers,
+      provider: providerHandlers,
+      // COMPAT 模式没有 Session 运行时;但该分支要求先过 requireAdmin,而 COMPAT 恒 ANONYMOUS
+      // ⇒ 永远 403,取不到 sessions。故 handler 内的非空断言与 req.auth! 属同一类已证不变量。
+      sessions: authRuntime?.sessions ?? null,
+      requireAdmin: adminGuard,
+    }),
+  );
 
   // 统一错误出口,必须最后挂载
   app.use(errorHandler(deps.logger));

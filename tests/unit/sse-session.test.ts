@@ -186,8 +186,18 @@ describe("RequestSseSession:帧序与生命周期(§9/§10)", () => {
     await h.settle();
 
     expect(h.eventsSeen()).toEqual(["connected", "status", "error", "status"]);
-    expect(h.frames[2]!.data).toMatchObject({ code: ErrorCodes.PROVIDER_DOM_CHANGED });
-    expect(h.frames[3]!.data).toMatchObject({ status: "FAILED", requestStatus: "FAILED" });
+    // §12/§17:SSE 帧属 Public 面,内部码一律映射成通用码 + 稳定文本
+    expect(h.frames[2]!.data).toMatchObject({
+      code: "CHAT_FAILED",
+      message: "Chat request failed.",
+    });
+    expect(JSON.stringify(h.frames[2]!.data)).not.toContain("Gemini");
+    expect(h.frames[3]!.data).toMatchObject({
+      status: "FAILED",
+      requestStatus: "FAILED",
+      errorCode: "CHAT_FAILED",
+      errorMessage: "Chat request failed.",
+    });
     expect(h.counts()).toEqual({ finished: 1, httpEnded: 1 });
   });
 
@@ -202,7 +212,11 @@ describe("RequestSseSession:帧序与生命周期(§9/§10)", () => {
     await h.start();
 
     expect(h.eventsSeen()).toEqual(["connected", "snapshot", "error", "status"]);
-    expect(h.frames[2]!.data).toMatchObject({ code: ErrorCodes.PROVIDER_RESPONSE_TIMEOUT });
+    // §16:超时类内部码统一收敛为 REQUEST_TIMEOUT,message 不带原始超时细节
+    expect(h.frames[2]!.data).toMatchObject({
+      code: "REQUEST_TIMEOUT",
+      message: "Request timed out. Please try again.",
+    });
   });
 
   it("写响应抛错(客户端断开):只结束这条连接", async () => {

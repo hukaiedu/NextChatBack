@@ -28,33 +28,39 @@ describe("Request API", () => {
 
     const res = await fetch(`${ctx.baseUrl}/api/requests/${requestId}`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      data: {
-        id: string;
-        status: string;
-        idempotencyKey: string;
-        conversationId: string;
-        provider: string;
-        attemptCount: number;
-        errorCode: string | null;
-        errorMessage: string | null;
-        userMessageId: string;
-        assistantMessageId: string;
-      };
-    };
+    const body = (await res.json()) as { data: Record<string, unknown> };
 
     expect(body.data).toMatchObject({
       id: requestId,
       status: "PENDING",
-      idempotencyKey: "req-key-1",
       conversationId: conv.id,
-      provider: "GEMINI_WEB",
-      attemptCount: 0,
       errorCode: null,
       errorMessage: null,
+      attachmentCount: 0,
     });
     expect(body.data.userMessageId).toBeTruthy();
     expect(body.data.assistantMessageId).toBeTruthy();
+    // §9/§11(B3-2):幂等键 / 指纹 / 重试次数 / provider / 模型快照都属内部字段
+    expect(Object.keys(body.data).sort()).toEqual(
+      [
+        "id",
+        "conversationId",
+        "userMessageId",
+        "assistantMessageId",
+        "status",
+        "errorCode",
+        "errorMessage",
+        "attachmentCount",
+        "createdAt",
+        "updatedAt",
+      ].sort(),
+    );
+
+    // 内部真值仍完整落库:收口只删对外可见面,不删证据(§18)
+    const row = await ctx.prisma.modelRequest.findUniqueOrThrow({ where: { id: requestId } });
+    expect(row.idempotencyKey).toBe("req-key-1");
+    expect(row.provider).toBe("GEMINI_WEB");
+    expect(row.attemptCount).toBe(0);
   });
 
   it("GET /api/requests/:id 不存在 → 404 REQUEST_NOT_FOUND", async () => {

@@ -65,8 +65,16 @@ export const ERROR_CODE_HTTP_STATUS = {
   AUTH_INVALID_CREDENTIALS: 401,
   AUTH_RATE_LIMITED: 429,
   AUTH_CSRF_REJECTED: 403,
+  // V1.3-B3-3:非 ADMIN 访问运维 API
+  AUTH_FORBIDDEN: 403,
 
   // 兜底
+  // V1.3-B3-2 Public 通用码:HTTP 状态取自**原始码**(见 public-error.ts),这三项只是
+  // 直接以通用码抛错时的兜底值。Record<ErrorCode, number> 要求全覆盖,故必须登记。
+  CHAT_FAILED: 500,
+  SERVICE_BUSY: 503,
+  REQUEST_TIMEOUT: 504,
+
   DATABASE_ERROR: 500,
   INTERNAL_ERROR: 500,
 } as const satisfies Record<ErrorCode, number>;

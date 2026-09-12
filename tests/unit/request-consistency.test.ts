@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { expectedAssistantStatus, findPairingViolations } from "../../src/modules/request/request.consistency.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
@@ -21,7 +22,7 @@ describe("Request-Assistant 状态一致性(§六)", () => {
     await ctx.reset();
     try {
       const conv = await ctx.prisma.conversation.create({
-        data: { title: "ok", status: "ACTIVE", provider: "GEMINI_WEB" },
+        data: { title: "ok", status: "ACTIVE", provider: "GEMINI_WEB", userId: COMPAT_USER_ID },
       });
       const user = await ctx.prisma.message.create({
         data: { conversationId: conv.id, role: "USER", content: "hi", status: "COMPLETED", position: 1 },
@@ -53,7 +54,7 @@ describe("Request-Assistant 状态一致性(§六)", () => {
     await ctx.reset();
     try {
       const conv = await ctx.prisma.conversation.create({
-        data: { title: "bad", status: "ACTIVE", provider: "GEMINI_WEB" },
+        data: { title: "bad", status: "ACTIVE", provider: "GEMINI_WEB", userId: COMPAT_USER_ID },
       });
       const user = await ctx.prisma.message.create({
         data: { conversationId: conv.id, role: "USER", content: "hi", status: "COMPLETED", position: 1 },

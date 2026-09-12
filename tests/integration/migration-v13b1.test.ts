@@ -1,13 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { isUniqueViolation } from "../../src/common/utils/prisma-error.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
+import { migrationSql, rawCount, withFreshDb } from "../migration-harness.js";
 
 /**
  * V1.3-B1 migration(User / Session / Conversation.userId)不变量。
@@ -35,43 +31,6 @@ const PRE_B1_MIGRATIONS = [
   "20260905024947_m1_model_selection",
   "20260910120547_v12_i1_attachment_count",
 ];
-
-interface RawSqlStatement {
-  run(...params: unknown[]): unknown;
-  get(...params: unknown[]): unknown;
-  all(...params: unknown[]): unknown[];
-}
-
-interface RawDb {
-  exec(sql: string): void;
-  prepare(sql: string): RawSqlStatement;
-  pragma(source: string, options?: { simple: boolean }): unknown;
-  close(): void;
-}
-
-const require = createRequire(import.meta.url);
-const Database = require("better-sqlite3") as new (file: string) => RawDb;
-
-function migrationSql(name: string): string {
-  return readFileSync(join(process.cwd(), "prisma", "migrations", name, "migration.sql"), "utf8");
-}
-
-/** 临时库里重放 migration:不碰 data/database 下的任何业务/测试库 */
-function withFreshDb<T>(fn: (db: RawDb) => T): T {
-  const dir = mkdtempSync(join(tmpdir(), "v13b1-migration-"));
-  const db = new Database(join(dir, "probe.db"));
-  try {
-    db.pragma("foreign_keys = ON"); // 与生产 createPrismaClient 的显式设置一致
-    return fn(db);
-  } finally {
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-function rawCount(db: RawDb, sql: string): number {
-  return (db.prepare(sql).get() as { c: number }).c;
-}
 
 describe("V1.3-B1 migration:User / Session / Conversation.userId", () => {
   let ctx: TestContext;
@@ -225,9 +184,13 @@ describe("V1.3-B1 migration:User / Session / Conversation.userId", () => {
     expect(await ctx.prisma.session.count({ where: { userId: user.id } })).toBe(0);
   });
 
-  it("M1-05 Conversation FK 真实生效:非法 userId 被拒,NULL 在 B1 阶段合法", async () => {
-    const conversation = await ctx.prisma.conversation.create({ data: { title: "fk-probe" } });
-    expect(conversation.userId).toBeNull();
+  it("M1-05 Conversation FK 真实生效:非法 userId 被拒、FK 指向 User.id(B1 阶段的 NULL 合法性由 M1-01/M1-02 在历史链上证明)", async () => {
+    // B4 起 userId 必填(测试库已是最终态),这里只证明 B1 建起来的那条外键约束本身有效。
+    // 「B1 migration 当时确实可空」属于历史阶段语义,取证在临时库:M1-01 读列定义、M1-02 真插 NULL 行。
+    const conversation = await ctx.prisma.conversation.create({
+      data: { title: "fk-probe", userId: COMPAT_ID },
+    });
+    expect(conversation.userId).toBe(COMPAT_ID);
 
     const err = await ctx.prisma
       .$executeRawUnsafe(`UPDATE "Conversation" SET "userId" = 'ghost-user' WHERE "id" = '${conversation.id}'`)

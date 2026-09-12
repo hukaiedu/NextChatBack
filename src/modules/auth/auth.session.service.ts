@@ -214,6 +214,18 @@ export class AuthSessionService {
     return count > 0;
   }
 
+  /**
+   * V1.3-B3-3 §29/§30:吊销指定 User 的全部 Session(含当前这一条),返回删除行数。
+   *
+   * 异常一律上抛,不学 sweepExpired 那样吞掉:那条路径的语义是「删库成功才清 Cookie」,
+   * 半途失败却清 Cookie 会造成「看起来已登出、实际 Session 还有效」的反向状态。
+   */
+  async revokeAllForUser(userId: string): Promise<number> {
+    const count = await this.sessions.deleteAllForUser(this.prisma, userId);
+    this.logger.info({ userId, count }, "all sessions revoked for user");
+    return count;
+  }
+
   /** V1.3 §19:只删已过期 Session(不碰 User);失败只记日志,绝不打崩服务 */
   async sweepExpired(): Promise<number> {
     try {

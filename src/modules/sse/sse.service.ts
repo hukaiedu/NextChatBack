@@ -4,6 +4,7 @@ import type { Logger } from "../../common/logger/logger.js";
 import type { ModelRequestModel } from "../../generated/prisma/models.js";
 import type { PrismaClient } from "../../generated/prisma/client.js";
 import type { MessageRepository } from "../message/message.repository.js";
+import { publicErrorOf } from "../request/request.public.js";
 import type { RequestService } from "../request/request.service.js";
 import { REQUEST_ACTIVE_STATUSES } from "../request/request.types.js";
 import { computeContentUpdate } from "./content-delta.js";
@@ -126,12 +127,15 @@ export class RequestSseSession {
     // 首次读取就是「断线重连恢复」:数据库里已有的进度整段快照给出,不重放历史 delta(§10)
     this.applyContent(content, { terminal, fullSnapshot: first });
 
+    // §18:SSE 属 Public 通道,错误值经统一映射后才上线;数据库里的原始 code/message 不受影响
+    const failure = publicErrorOf(request.errorCode, request.errorMessage);
+
     if (terminal && (status === "FAILED" || status === "TIMEOUT")) {
       this.emit({
         event: "error",
         data: {
-          code: request.errorCode ?? ErrorCodes.INTERNAL_ERROR,
-          message: request.errorMessage ?? "Request failed",
+          code: failure.errorCode ?? ErrorCodes.INTERNAL_ERROR,
+          message: failure.errorMessage ?? "Request failed",
         },
       });
     }
@@ -142,8 +146,8 @@ export class RequestSseSession {
         // 文档示例用的是消息态(PENDING/STREAMING/COMPLETED/FAILED);Request 态一并给出
         status: message?.status ?? null,
         requestStatus: status,
-        errorCode: request.errorCode,
-        errorMessage: request.errorMessage,
+        errorCode: failure.errorCode,
+        errorMessage: failure.errorMessage,
       },
     });
     if (terminal) {

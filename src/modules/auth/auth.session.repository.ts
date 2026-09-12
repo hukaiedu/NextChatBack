@@ -52,6 +52,15 @@ export class AuthSessionRepository {
     return result.count;
   }
 
+  /**
+   * V1.3-B3-3 §29:吊销某个 User 名下的全部 Session(含调用者自己这一条)。
+   * 只删 Session 行,不删 User;按 userId 等值过滤 ⇒ 绝不越界碰到其他身份的 Session。
+   */
+  async deleteAllForUser(db: DbClient, userId: string): Promise<number> {
+    const result = await db.session.deleteMany({ where: { userId } });
+    return result.count;
+  }
+
   /** sweep 用:只删已过期行,不碰 User(V1.3 §19) */
   async deleteExpired(db: DbClient, now: Date): Promise<number> {
     const result = await db.session.deleteMany({ where: { expiresAt: { lte: now } } });

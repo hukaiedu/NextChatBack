@@ -191,18 +191,26 @@ describe("OWN-CONV Conversation 归属隔离(§6/§7/§8/§9/§29)", () => {
         );
         expect(res.status).toBe(200);
         const body = (await res.json()) as {
-          data: { id: string; userId: string }[];
+          data: Array<Record<string, unknown>>;
           meta: { nextCursor: string | null };
         };
         for (const item of body.data) {
-          expect(item.userId).toBe(a.userId);
-          seen.push(item.id);
+          // §6(B3-2):userId 是内部字段,Public 列表项连键都不该有。
+          // 归属判定因此改由数据库侧对最终 id 集合独立核对,HTTP 侧只证明不外泄。
+          expect(Object.keys(item)).not.toContain("userId");
+          seen.push(item.id as string);
         }
         cursor = body.meta.nextCursor;
         if (cursor === null) {
           break;
         }
       }
+      const rows = await ctx.prisma.conversation.findMany({
+        where: { id: { in: seen } },
+        select: { userId: true },
+      });
+      expect(rows).toHaveLength(seen.length);
+      expect(rows.every((row) => row.userId === a.userId)).toBe(true);
       expect(seen.sort()).toEqual(aIds.slice().sort());
     });
   });
@@ -621,10 +629,24 @@ describe("OWN-ADMIN / OWN-COMPAT 身份不是所有权旁路(§4/§5/§35/§36)"
   });
 });
 
-describe("OWN-NULL / OWN-INVAR 迁移期 NULL 归属与既有业务不变量(§20/§38)", () => {
-  it("OWN-NULL-01 无主会话对任何正常身份都不可读写,也不出现在列表", async () => {
+describe("OWN-ORPHAN / OWN-INVAR 不可达归属与既有业务不变量(§20/§38/§51)", () => {
+  /**
+   * §51 测试语义迁移:B4 起 `Conversation.userId` 是 NOT NULL,数据库里已不可能存在 NULL 归属行,
+   * 「无主数据对任何身份都不可见」这条运行期安全事实改由**永远不会被任何 Session 解析出来的 owner** 承载
+   * (建一条没有任何 Session 的 User)。
+   * 原 NULL 事实并未消失:它前移成 migration 负例 —— migration-v13b4.test.ts 的 B4-05 证明
+   * NULL 连库都进不来(raw SQL 撞 NOT NULL,Prisma client 直接拒)。绝不为保留旧写法而弱化 NOT NULL。
+   */
+  async function unreachableOwner(ctx: TestContext): Promise<string> {
+    const user = await ctx.prisma.user.create({ data: { type: "ANONYMOUS" } });
+    return user.id;
+  }
+
+  it("OWN-ORPHAN-01 归属不可达的会话对任何正常身份都不可读写,也不出现在列表", async () => {
     await withApp(async (ctx) => {
-      const orphan = await ctx.prisma.conversation.create({ data: { title: "orphan" } });
+      const orphan = await ctx.prisma.conversation.create({
+        data: { title: "orphan", userId: await unreachableOwner(ctx) },
+      });
       const a = await newAnonymous(ctx);
       const admin = await newAdmin(ctx);
 
@@ -638,7 +660,7 @@ describe("OWN-NULL / OWN-INVAR 迁移期 NULL 归属与既有业务不变量(§2
           (await api(ctx, actor, "GET", `/api/conversations/${orphan.id}/messages`)).status,
         ).toBe(404);
         expect(
-          (await send(ctx, actor, orphan.id, `k-null-${actor.userId}`)).status,
+          (await send(ctx, actor, orphan.id, `k-orphan-${actor.userId}`)).status,
         ).toBe(404);
 
         const list = await api(ctx, actor, "GET", "/api/conversations?status=ACTIVE&limit=50");
@@ -649,10 +671,12 @@ describe("OWN-NULL / OWN-INVAR 迁移期 NULL 归属与既有业务不变量(§2
     });
   });
 
-  it("OWN-NULL-02 COMPAT 同样读不到无主会话", async () => {
+  it("OWN-ORPHAN-02 COMPAT 同样读不到归属不可达的会话", async () => {
     await withApp(
       async (ctx) => {
-        const orphan = await ctx.prisma.conversation.create({ data: { title: "orphan" } });
+        const orphan = await ctx.prisma.conversation.create({
+          data: { title: "orphan", userId: await unreachableOwner(ctx) },
+        });
         expect((await api(ctx, COMPAT_ACTOR, "GET", `/api/conversations/${orphan.id}`)).status).toBe(
           404,
         );

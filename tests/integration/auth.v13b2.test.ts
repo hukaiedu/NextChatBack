@@ -470,7 +470,9 @@ describe("LOGIN-04..06 登录失败不破坏当前身份(Review FIX-01 原子性
 
       expect(res.status).toBe(500);
       const body = (await res.json()) as { error: { code: string } };
-      expect(body.error.code).toBe(ErrorCodes.INTERNAL_ERROR);
+      // §17(B3-2):ADMIN 哨兵行缺失/被禁用是服务端内部异常,对外只剩 CHAT_FAILED(仍 500)——
+      // 匿名调用者不能据此推断「管理员被禁用了」
+      expect(body.error.code).toBe("CHAT_FAILED");
       expect(
         res.headers
           .getSetCookie()

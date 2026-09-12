@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
@@ -58,7 +59,9 @@ describe("M1 migration: 模型选择字段", () => {
   });
 
   it("不传模型字段创建的 Conversation / ModelRequest 列保持 NULL(旧行为兼容)", async () => {
-    const conversation = await ctx.prisma.conversation.create({ data: { title: "migration-it" } });
+    const conversation = await ctx.prisma.conversation.create({
+      data: { title: "migration-it", userId: COMPAT_USER_ID },
+    });
     const user = await ctx.prisma.message.create({
       data: { conversationId: conversation.id, role: "USER", content: "u", status: "COMPLETED", position: 0 },
     });
@@ -86,7 +89,7 @@ describe("M1 migration: 模型选择字段", () => {
 
   it("preferredModelKey 更新不触发状态变更触发器(UPDATE OF status 列级触发)", async () => {
     const conversation = await ctx.prisma.conversation.create({
-      data: { title: "trigger-it", preferredModelKey: "model-a" },
+      data: { title: "trigger-it", preferredModelKey: "model-a", userId: COMPAT_USER_ID },
     });
     // 同会话存在活跃 Request,验证仅改 preferredModelKey 仍可成功(状态触发器不拦)
     const user = await ctx.prisma.message.create({

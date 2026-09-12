@@ -5,10 +5,11 @@ import type { Express } from "express";
 import { createApp } from "../src/app.js";
 import type { SchedulerConfig, StreamingConfig } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
-import { ADMIN_USER_ID, COMPAT_USER_ID } from "../src/config/constants.js";
+import { ADMIN_USER_ID, AUTH_COOKIE_NAME, COMPAT_USER_ID } from "../src/config/constants.js";
 import type { LoginRateLimiter } from "../src/modules/auth/auth.rate-limit.js";
 import type { AuthSessionService } from "../src/modules/auth/auth.session.service.js";
 import type { AuthDeps } from "../src/modules/auth/auth.types.js";
+import type { PublicConversation } from "../src/modules/conversation/conversation.public.js";
 import type { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import type { GeminiAdapter } from "../src/providers/gemini/gemini.types.js";
 import type { GeminiPromptService } from "../src/modules/provider/gemini-prompt.service.js";
@@ -135,10 +136,60 @@ export async function setupTestContext(options?: {
   };
 }
 
+/**
+ * V1.3-B3-3 §21/§22:运维端点(/api/admin/* 与旧 browser/provider 别名)ADMIN-only。
+ * 需要 ADMIN 的集成测试共用这一份 AuthDeps;password 只活在测试进程内,不写 env。
+ */
+export const ADMIN_AUTH: AuthDeps = {
+  enabled: true,
+  password: "test-admin-password-123",
+  ttlAnonymousSeconds: 7200,
+  ttlAdminSeconds: 3600,
+  touchIntervalSeconds: 60,
+  allowedOrigins: null,
+  trustProxy: false,
+  cookieSecureAlways: false,
+};
+
+/** 登录为固定 ADMIN,返回 `personchat_session=…` Cookie 头值(失败直接抛,不在断言里静默) */
+export async function loginAdmin(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: ADMIN_AUTH.password }),
+  });
+  const raw = res.headers.getSetCookie().find((c) => c.startsWith(`${AUTH_COOKIE_NAME}=`));
+  if (res.status !== 200 || raw === undefined) {
+    throw new Error(`loginAdmin failed: ${res.status} ${await res.text()}`);
+  }
+  return raw.split(";")[0]!;
+}
+
+/** 给请求补上 ADMIN Session Cookie,保留调用方已有的 headers */
+export function withAdminCookie(cookie: string, init: RequestInit = {}): RequestInit {
+  return {
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), Cookie: cookie },
+  };
+}
+
+/**
+ * §8 匿名 bootstrap:返回一个**已登录**匿名用户(CREATE 出 ANONYMOUS User + Session)的 Cookie 头值。
+ * 与「不带 Cookie 的未认证请求(401)」是两类身份,B3-3 的权限矩阵必须分别验证。
+ */
+export async function loginAnonymous(baseUrl: string): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/anonymous`, { method: "POST" });
+  const raw = res.headers.getSetCookie().find((c) => c.startsWith(`${AUTH_COOKIE_NAME}=`));
+  if (res.status !== 200 || raw === undefined) {
+    throw new Error(`loginAnonymous failed: ${res.status} ${await res.text()}`);
+  }
+  return raw.split(";")[0]!;
+}
+
 export async function createConversation(
   baseUrl: string,
   title?: string,
-): Promise<{ id: string; title: string; status: string; provider: string }> {
+): Promise<PublicConversation> {
   const res = await fetch(`${baseUrl}/api/conversations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -147,7 +198,7 @@ export async function createConversation(
   if (res.status !== 201) {
     throw new Error(`createConversation failed: ${res.status} ${await res.text()}`);
   }
-  const body = (await res.json()) as { data: { id: string; title: string; status: string; provider: string } };
+  const body = (await res.json()) as { data: PublicConversation };
   return body.data;
 }
 
@@ -177,9 +228,14 @@ export async function sendMessage(
   });
 }
 
-/** POST /api/requests/:id/cancel(prd §8.9) */
-export async function cancelRequest(baseUrl: string, requestId: string): Promise<Response> {
+/** POST /api/requests/:id/cancel(prd §8.9);init 用于带 Session Cookie */
+export async function cancelRequest(
+  baseUrl: string,
+  requestId: string,
+  init?: RequestInit,
+): Promise<Response> {
   return fetch(`${baseUrl}/api/requests/${requestId}/cancel`, {
+    ...init,
     method: "POST",
   });
 }
@@ -216,10 +272,18 @@ export class SseTestClient {
   private ended = false;
   private readonly controller = new AbortController();
 
-  static async connect(baseUrl: string, requestId: string): Promise<SseTestClient> {
+  static async connect(
+    baseUrl: string,
+    requestId: string,
+    init?: RequestInit,
+  ): Promise<SseTestClient> {
     const client = new SseTestClient();
     const res = await fetch(`${baseUrl}/api/requests/${requestId}/events`, {
-      headers: { Accept: "text/event-stream" },
+      ...init,
+      headers: {
+        ...(init?.headers as Record<string, string> | undefined),
+        Accept: "text/event-stream",
+      },
       signal: client.controller.signal,
     });
     if (res.status !== 200) {

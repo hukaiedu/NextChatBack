@@ -16,13 +16,14 @@ model Conversation {
   providerConversationUrl String?   @unique
   /// M1:用户在会话维度显式选择的模型键(provider 机器键,如 data-mode-id);null = 未指定
   preferredModelKey       String?
-  /// V1.3-B1:归属用户。迁移期可空(历史行已全部回填 ADMIN);NOT NULL 收紧留到 B4(m2 重建表)
-  userId                  String?
+  /// V1.3-B4:归属用户,必填且**没有默认值** —— owner 只能由运行期 req.auth.userId 显式写入,
+  /// 忘写必须失败,绝不能静默归给 ADMIN。
+  userId                  String
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
   deletedAt               DateTime?
 
-  user     User?        @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user     User         @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   messages Message[]
   requests ModelRequest[]
 

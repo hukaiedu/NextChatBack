@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import type { PrismaClient } from "../../src/generated/prisma/client.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { ConversationRepository } from "../../src/modules/conversation/conversation.repository.js";
 import { MessageRepository } from "../../src/modules/message/message.repository.js";
 import { RequestRepository } from "../../src/modules/request/request.repository.js";
@@ -40,7 +41,7 @@ describe("RequestService 状态流转(§11.4 状态同步唯一入口)", () => {
   async function seed(): Promise<Seeded> {
     sequence++;
     const conversation = await ctx.prisma.conversation.create({
-      data: { title: `conv-${sequence}`, status: "ACTIVE", provider: "GEMINI_WEB" },
+      data: { title: `conv-${sequence}`, status: "ACTIVE", provider: "GEMINI_WEB", userId: COMPAT_USER_ID },
     });
     const userMessage = await ctx.prisma.message.create({
       data: {

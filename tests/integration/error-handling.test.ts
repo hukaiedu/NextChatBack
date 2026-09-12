@@ -1,7 +1,10 @@
 import type { Server } from "node:http";
+import { Writable } from "node:stream";
 
 import express from "express";
 import type { Express } from "express";
+import pino from "pino";
+import type { Logger } from "pino";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createLogger } from "../../src/common/logger/logger.js";
@@ -10,6 +13,21 @@ import { requestId } from "../../src/common/middleware/request-id.js";
 import { Prisma } from "../../src/generated/prisma/client.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
+
+/** 捕获式 logger(JSON 行):断言原始错误码只进日志、不进响应 */
+function captureLogger(): { logger: Logger; lines: string[] } {
+  const lines: string[] = [];
+  const logger = pino(
+    { level: "info" },
+    new Writable({
+      write(chunk, _enc, cb) {
+        lines.push(chunk.toString());
+        cb();
+      },
+    }),
+  );
+  return { logger, lines };
+}
 
 describe("统一错误处理", () => {
   let ctx: TestContext;
@@ -77,7 +95,10 @@ describe("统一错误处理", () => {
 
 describe("数据库异常统一映射", () => {
   /** 构造最小 express 链:requestId + 抛错路由 + errorHandler */
-  async function withBoomApp(throwingError: () => Error): Promise<{
+  async function withBoomApp(
+    throwingError: () => Error,
+    logger: Logger = createLogger("silent"),
+  ): Promise<{
     baseUrl: string;
     close(): Promise<void>;
   }> {
@@ -86,7 +107,7 @@ describe("数据库异常统一映射", () => {
     app.get("/boom", () => {
       throw throwingError();
     });
-    app.use(errorHandler(createLogger("silent")));
+    app.use(errorHandler(logger));
 
     const server: Server = app.listen(0, "127.0.0.1");
     await new Promise<void>((resolve) => server.once("listening", () => resolve()));
@@ -105,7 +126,7 @@ describe("数据库异常统一映射", () => {
   it.each([
     ["PrismaClientKnownRequestError", () => new Prisma.PrismaClientKnownRequestError("internal db detail: SQLITE_CONSTRAINT secret", { code: "P2003", clientVersion: "test" })],
     ["PrismaClientUnknownRequestError", () => new Prisma.PrismaClientUnknownRequestError("internal db detail: unknown engine error", { clientVersion: "test" })],
-  ])("%s → 500 DATABASE_ERROR,不泄露内部细节", async (_name, factory) => {
+  ])("%s → 500 CHAT_FAILED,不泄露内部细节", async (_name, factory) => {
     const server = await withBoomApp(factory);
 
     try {
@@ -115,8 +136,9 @@ describe("数据库异常统一映射", () => {
       const body = (await res.json()) as {
         error: { code: string; message: string; requestId: string };
       };
-      expect(body.error.code).toBe("DATABASE_ERROR");
-      expect(body.error.message).toBe("Database error");
+      // §17:DATABASE_ERROR 是内部实现错误,Public 一律 CHAT_FAILED
+      expect(body.error.code).toBe("CHAT_FAILED");
+      expect(body.error.message).toBe("Chat request failed.");
       // 内部数据库错误细节不得出现在响应里
       expect(body.error.message).not.toContain("internal db detail");
       expect(body.error.message).not.toContain("SQLITE");
@@ -127,16 +149,47 @@ describe("数据库异常统一映射", () => {
     }
   });
 
-  it("非数据库异常保持 500 INTERNAL_ERROR(回归)", async () => {
+  it("非数据库异常 → 500 CHAT_FAILED(INTERNAL_ERROR 不对外)", async () => {
     const server = await withBoomApp(() => new Error("some bug"));
 
     try {
       const res = await fetch(`${server.baseUrl}/boom`);
       expect(res.status).toBe(500);
-      const body = (await res.json()) as { error: { code: string } };
-      expect(body.error.code).toBe("INTERNAL_ERROR");
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe("CHAT_FAILED");
+      expect(body.error.message).toBe("Chat request failed.");
     } finally {
       await server.close();
     }
+  });
+
+  it("§18:原始 code 与 message 只留在服务端日志,响应侧只剩通用码", async () => {
+    const { logger, lines } = captureLogger();
+    const server = await withBoomApp(
+      () => new Prisma.PrismaClientKnownRequestError("raw db detail for admin only", { code: "P2002", clientVersion: "test" }),
+      logger,
+    );
+
+    let text = "";
+    try {
+      const res = await fetch(`${server.baseUrl}/boom`);
+      text = await res.text();
+      expect(res.status).toBe(500);
+    } finally {
+      await server.close();
+    }
+
+    const logged = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({
+      code: "DATABASE_ERROR",
+      message: "Database error",
+    });
+    // 原始异常对象仍完整写日志
+    expect(JSON.stringify(logged[0]!.err)).toContain("raw db detail for admin only");
+    // 响应里既没有原始码也没有原始细节
+    expect(text).not.toContain("DATABASE_ERROR");
+    expect(text).not.toContain("raw db detail for admin only");
+    expect((JSON.parse(text) as { error: { code: string } }).error.code).toBe("CHAT_FAILED");
   });
 });

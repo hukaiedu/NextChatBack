@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { AppError } from "../../src/common/errors/app-error.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { COMPAT_USER_ID } from "../../src/config/constants.js";
 import { createLogger } from "../../src/common/logger/logger.js";
 import { isContextClosedError } from "../../src/providers/gemini/gemini.errors.js";
 import { BrowserManager } from "../../src/providers/gemini/browser-manager.js";
@@ -66,7 +67,7 @@ describe("RequestScheduler(单进程串行调度,Fake Adapter + 真 SQLite)", ()
   async function seedPending(content: string, createdAt?: Date): Promise<Seeded> {
     sequence++;
     const conversation = await ctx.prisma.conversation.create({
-      data: { title: `conv-${sequence}`, status: "ACTIVE", provider: "GEMINI_WEB" },
+      data: { title: `conv-${sequence}`, status: "ACTIVE", provider: "GEMINI_WEB", userId: COMPAT_USER_ID },
     });
     const userMessage = await ctx.prisma.message.create({
       data: {

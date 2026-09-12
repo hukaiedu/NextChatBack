@@ -2,6 +2,7 @@ import type { NextFunction, Request, RequestHandler, Response } from "express";
 
 import { AppError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
+import { markAdminErrorSurface } from "../../common/errors/error-exposure.js";
 import { AUTH_COOKIE_NAME, COMPAT_USER_ID } from "../../config/constants.js";
 import type { Env } from "../../config/env.js";
 import type { AuthSessionService } from "./auth.session.service.js";
@@ -178,6 +179,34 @@ export function requireAuth(sessions: AuthSessionService, auth: AuthDeps): Reque
         next();
       })
       .catch(next);
+  };
+}
+
+/**
+ * V1.3-B3-3 §21:运维 API 的唯一权限判据 = `req.auth.userType === "ADMIN"`。
+ *
+ * 刻意不看 AUTH_ENABLED,也不看 userId 是否等于 COMPAT:
+ * 下面 injectCompatAuth 注入的 type 恒为 ANONYMOUS,所以 `AUTH_ENABLED=false` 的本地
+ * 兼容模式访问 Admin 端点同样 403(§22)。反过来,自报 ADMIN_USER_ID 也不算数 ——
+ * userType 只来自 Session 解析出的 User.type,客户端无从伪造。
+ *
+ * 403 而非 404:这里保护的是「运维能力」而不是某个用户拥有的资源,
+ * 存在性本来就是公开事实(路由在不在),不需要伪装成 not found。
+ *
+ * FIX-02A:本中间件同时是 **Admin API surface 的唯一标记点** —— 授权通过即把该请求的错误
+ * 暴露级别切成 admin。耦合是刻意且单向的:admin surface ⇒ admin 错误语义,但
+ * 「调用者是 ADMIN」不构成切换(ADMIN 走聊天路由时仍是 Public Error);
+ * 被拒的 403 也留在 public 默认值上。canonical `/api/admin/*` 与旧 alias 复用同一个
+ * guard 实例 ⇒ 复用同一个标记,不存在「加了 alias 忘了标记」的窗口。
+ */
+export function requireAdmin(): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (req.auth?.userType === "ADMIN") {
+      markAdminErrorSurface(res);
+      next();
+      return;
+    }
+    next(new AppError(ErrorCodes.AUTH_FORBIDDEN, "Administrator privileges required"));
   };
 }
 

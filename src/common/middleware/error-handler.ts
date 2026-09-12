@@ -4,6 +4,8 @@ import { REQUEST_ID_HEADER } from "../../config/constants.js";
 import { Prisma } from "../../generated/prisma/client.js";
 import { AppError } from "../errors/app-error.js";
 import { ErrorCodes } from "../errors/error-codes.js";
+import { errorExposureOf } from "../errors/error-exposure.js";
+import { toPublicError } from "../errors/public-error.js";
 import type { Logger } from "../logger/logger.js";
 
 /** express.json() 解析失败抛出的 SyntaxError 特征 */
@@ -79,10 +81,18 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
       "request failed",
     );
 
+    // §18:日志与数据库留原始值,只有这条对外信封经统一映射。
+    // FIX-02A:判据是「这条请求走的是哪个 API surface」,不是「调用者是谁」——
+    // ADMIN 调 Public 路由同样只拿到 Public Error。admin 语义由 Admin surface
+    // middleware(requireAdmin 授权通过时)写入 res.locals,default-deny:没标记就是 public。
+    const exposed = toPublicError(appErr.code, appErr.message, {
+      internal: errorExposureOf(res) === "admin",
+    });
+
     res.status(appErr.statusCode).json({
       error: {
-        code: appErr.code,
-        message: appErr.message,
+        code: exposed.code,
+        message: exposed.message,
         requestId,
       },
     });
