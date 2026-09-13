@@ -1,0 +1,82 @@
+# personChat — Recommended Production Topology: Nginx (TLS) → Next.js → Backend
+#
+# P10 冻结的 canonical topology(P10 最终报告 §Canonical Production Topology):
+#
+#   Internet
+#     ↓ :443 TLS (terminated here)
+#   Nginx  (本文件)
+#     ↓ :3000 (同一主机;仅回环可达)
+#   Next.js (front, `next start`,/backend-api/* rewrite 指向 Backend)
+#     ↓ :3010 (BACKEND_ORIGIN 在 build 时烘进 routes-manifest)
+#   Backend (Express + SQLite + RequestScheduler + Playwright)
+#
+# 边界要求:
+#   - Backend 只监听 loopback(HOST=127.0.0.1)并由 firewall 封死 3010 对外的访问;
+#   - 普通浏览器与 Admin 一律经 /backend-api/* 同源访问,绝不直连后端端口;
+#   - AUTH_TRUST_PROXY=true(→ Express 'loopback'),req.ip 由本文件注入的
+#     X-Forwarded-For 右端(真实客户端)决定 —— 客户端伪造的更左端条目被忽略。
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name chat.example.com;   # 部署时替换为真实域名
+
+    # 自签/生产证书路径;私钥只允许 root 读(部署时生成,提交物里绝不带私钥)
+    ssl_certificate     /etc/nginx/certs/personchat.crt;
+    ssl_certificate_key /etc/nginx/certs/personchat.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # P10 §35/§36:P10 冻结 Backend body limit = 14 MB(ATTACHMENT_BODY_LIMIT)。
+    # proxy 必须 > 后端,真正的 oversize 才由 Backend 返回统一 JSON 413,
+    # 而不是 Nginx 提前返回 HTML 413。16m > 14MB 已留余量。
+    client_max_body_size 16m;
+
+    # 请求头:真实客户端 IP 由 Nginx **权威覆写** —— 必须用 `$remote_addr`,不能用
+    # `$proxy_add_x_forwarded_for`(追加式)。P10 真实链实测:追加的右端条目在 Next.js
+    # rewrite 转发时丢失,后端 loopback 信任会把 req.ip 解析成客户端伪造的 XFF 值,
+    # 攻击者轮换 X-Forwarded-For 即可绕过 anonymous IP 限额。覆写后客户端伪造的任何
+    # XFF 在到达后端前被整体丢弃;到后端的 XFF 恒为 nginx 看到的真实客户端地址,
+    # 与后端 `AUTH_TRUST_PROXY=true`(Express 'loopback',跃点数固定 = 1)闭合。
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+
+    # SSE(Phase F):关闭 buffering,否则逐块流会被 Nginx 攒成一坨;
+    # 时间上界:Backend provider timeout 600s + 裕量 → 660s(见 P10 报告 §Proxy Timeout)。
+    # 不用无限值(§44)。
+    location /backend-api/ {
+        proxy_pass http://127.0.0.1:3000;   # Next.js(同一主机)
+        # 关键:location 内出现任何 proxy_set_header 会把 server 级 header 集整体重置为默认,
+        # 因此必须在此重复完整权威覆写(Host/X-Real-IP/XFF=$remote_addr/Proto),再设 Connection ""。
+        # 否则客户端原始 X-Forwarded-For 原样穿透到 Backend,匿名 IP 限额可被 XFF 轮换绕过(P10 实测)。
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection        "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 660s;
+        proxy_send_timeout 660s;
+        add_header X-Accel-Buffering no;
+
+        # 静态资源与页面走默认缓冲即可
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    # 基础安全头(不设超严格 CSP —— 避免破坏 Next.js;CSP 作为后续单独 hardening)
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header X-Frame-Options SAMEORIGIN always;
+
+    # 访问日志默认不写完整 XFF 原文外的敏感字段;生产按合规自行裁剪
+    access_log /var/log/nginx/personchat.access.log;
+    error_log  /var/log/nginx/personchat.error.log warn;
+}

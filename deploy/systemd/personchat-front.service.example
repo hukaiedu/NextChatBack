@@ -1,0 +1,26 @@
+# personChat Frontend (Next.js) — systemd unit example
+#
+# P10/§122-§124 关键语义:
+#   - Next.js rewrites 在 **build 时** 写入 routes-manifest,NEXT_PUBLIC/运行时改 BACKEND_ORIGIN
+#     不生效 —— 部署必须:build 时 BACKEND_ORIGIN=http://127.0.0.1:3010,运行时只起 `next start`
+#     指向同一后端(BUILD-01:通过 /backend-api/auth/session 验证请求真正落到预期 Backend);
+#   - NODE_ENV=production 由 yarn build 内部设置;此处只需显式给出不影响 build 的运行时项。
+[Unit]
+Description=personChat Frontend (Next.js server)
+After=network.target
+
+[Service]
+Type=simple
+User=personchat
+Group=personchat
+WorkingDirectory=/opt/personchat-front
+# 前置:在部署机执行 `yarn build`(BACKEND_ORIGIN=http://127.0.0.1:3010)后再启动
+ExecStart=/usr/bin/node /opt/personchat-front/node_modules/next/dist/bin/next start -p 3000
+Environment=NODE_ENV=production
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -783,11 +783,11 @@ SQLite + 单 Browser Profile + 全局单飞，决定只能单实例运行。同�
 
 当前默认监听 `127.0.0.1`，**不应直接作为公网多租户服务暴露**。
 
-> **NOT READY FOR PUBLIC INTERNET RELEASE（V1.3-C）**
+> **PUBLIC RELEASE CANDIDATE — 待真实环境干跑复核（V1.3 P10，2026-09-13）**
 >
-> V1.3-C 只完成了前端 Admin Console、Public 错误契约收口与旧运维 alias 退役，**没有**改变发布闸门。
+> P10 已完成：限流器键容量 fail-closed 加固（`RATE_LIMITER_CAPACITY_EXCEEDED` → `503 SERVICE_BUSY`，`LIMIT-CAP-01..05` 全绿）、canonical 部署拓扑冻结（`deploy/nginx/personchat.conf.example` + `deploy/systemd/*.service.example`；Nginx TLS → Next.js → Backend，`AUTH_TRUST_PROXY=true` 映射 Express `loopback` 信任）、`LOAD-01`（10 用户 ×5）压测通过。
 >
-> V1.3 P6/P7 已完成 **技术闸门**：入口防刷限额、排队容量与 Scheduler 公平性（见 [§27](#27-防刷限额与排队容量v13-p6)、[§28](#28-公平调度v13-p7)），即「单用户无法长期独占全局单飞」这一条已成立。这不等于可公网发布。上线前仍必须逐项补齐 / 复核：反向代理 + HTTPS + `AUTH_TRUST_PROXY` 的**真实部署环境**确认（含 IP 分键与限流粒度验收）、Browser Pool 与多 Gemini Account、邮箱 / OAuth 注册与账号体系。
+> 上线前仍必须完成：**真实环境代理链干跑**（真实 Nginx + HTTPS 下的 XFF spoof / Secure Cookie / SSE 分块 / 大图 body 验收）与发布时的一次性非破坏性真实 Gemini smoke（`docs/P8_DEPLOYMENT_SOP.md` 与 `docs/V13_P10_PUBLIC_RELEASE_ACCEPTANCE_REPORT.md` 的 Operator Checklist）。Browser Pool / 多 Gemini Account 已重新分类为 **scalability limitation**（吞吐扩展），不再是 correctness / 安全阻塞项；P6 不是 L7 DDoS 防护，公网建议叠加 CDN / 反代限流。
 >
 > `AUTH_ENABLED=false` 只允许 loopback 监听（`HOST` 非 loopback 时启动即 fail-fast），它是单机兼容模式，不是隐式管理员模式，也不豁免任何限额（兼容模式的身份 `COMPAT_USER_ID` 同样进限流桶）。
 
@@ -923,6 +923,7 @@ V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择�
 
 - **频率（前 3 项）= 纯内存状态**。计数活在进程内，**服务重启窗口即清零**；`CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE` 按 HTTP 提交计数，因此同 Key 的合法幂等重放也算一次提交（它就是一次真实提交）。匿名身份的**幂等调用不消耗建号额度**：带着有效 Cookie 反复 `POST /api/auth/anonymous` 一次都不计数，只有「真的会新建 User」的那一次才计。
 - **容量（后 3 项）= 数据库真相**。三档都是直接 `count` 数据库，只是读的状态不同：两档 `PENDING` 上限在**准入**时复核，`USER_MAX_ACTIVE_REQUESTS` 在**派发**时复核。因此**重启后残留的排队请求仍然占额度**；内存队列长度绝不参与配额判定（它可能因重启或竞态与库不同步）。配额复核与创建事务在准入锁内成对出现，并发提交不会超发。
+- **P10：限流器键容量 fail-closed**（`DEFAULT_MAX_KEYS=10_000`，`RATE_LIMITER_CAPACITY_EXCEEDED` → Public `SERVICE_BUSY` / HTTP `503`）。满容量时**新键**先 sweep 过期桶、仍满即被拒——绝不淘汰仍在窗口内的 active bucket（那等于给攻击者换键重置限额的通道）；**已存在的键**照常按自己的 count/window 判定。频率限流仍为纯内存态（重启清零），重启会弱化限流直至窗口回填——这是已登记的设计限制。
 
 **`USER_MAX_ACTIVE_REQUESTS` 由数据库强制**：派发一个用户的新请求要同时满足「本进程该用户在飞数 < 上限」与「数据库里该用户 `PROCESSING`+`CANCELLING` 条数 < 上限」，后者才是最终真相（重启遗留、外部写入的在飞行只有它看得见）。一个 Gemini 页面 = 一个 worker，调大它不会提高并行度；它只挡住**这一个用户**，别人的排队照常轮转。在飞计数查询失败时本轮 drain 直接退出并记内部错误——绝不把「查不到」当成「没有」而放行。
 

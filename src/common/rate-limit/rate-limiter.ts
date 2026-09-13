@@ -2,10 +2,14 @@
  * 进程内 fixed-window 限流原语(V1.3 P6 §19)。
  *
  * 登录失败、匿名身份新建、消息提交频率三个入口共用这一份实现:各自的差异只有
- * 「窗口长度 / 上限 / 键」,而计数、窗口过期重新起算、按插入序淘汰、周期 sweep
- * 这套语义必须逐字一致 —— 复制两份就会有两份漂移。
+ * 「窗口长度 / 上限 / 键」,而计数、窗口过期重新起算、周期 sweep 这套语义必须逐字一致 ——
+ * 复制两份就会有两份漂移。
  *
  * 状态只在内存(§13:不进数据库),因此限额随进程重启清零(§77)。
+ *
+ * P10 §45~§47/§59:键数量上限是**安全状态**,不是缓存 —— 达到 maxKeys 后新键 fail-closed
+ * (capacityExceeded),绝不淘汰仍在窗口内的 bucket(那等于给攻击者换键重置限额的通道);
+ * 先 sweep 过期键释放容量,仍满才拒。已存在的键不受影响,照常按自己的 count/window 判定。
  */
 export interface RateLimitClock {
   /** unix 毫秒;测试注入可推进的假时钟 */
@@ -14,7 +18,12 @@ export interface RateLimitClock {
 
 export type RateLimitDecision =
   | { limited: false }
-  | { limited: true; retryAfterSeconds: number };
+  | { limited: true; retryAfterSeconds: number }
+  | {
+      /** 满容量且该键是新键:fail-closed,不建立 bucket、不淘汰任何既有 bucket(§48/§59) */
+      limited: true;
+      capacityExceeded: true;
+    };
 
 export interface FixedWindowRateLimiterOptions {
   /** 窗口长度(ms)*/
@@ -24,7 +33,7 @@ export interface FixedWindowRateLimiterOptions {
   /** 测试接缝:假时钟;生产不传 */
   clock?: RateLimitClock;
   sweepIntervalMs?: number;
-  /** 键数量上限:超限按插入序淘汰最旧键,防止攻击者用海量键撑爆内存 */
+  /** 键数量上限:先 sweep 过期键,仍满则新键 fail-closed(绝不淘汰 active bucket,P10 §46) */
   maxKeys?: number;
 }
 
@@ -74,6 +83,9 @@ export class FixedWindowRateLimiter {
   /**
    * 记录一次计数并给出判定:已达上限则**不计数**直接拒,
    * 否则计数 +1 放行 —— 被拒的请求不该把窗口继续往后推。
+   *
+   * P10 §46/§59 新键路径:先 sweep 过期键;仍满容量 → capacityExceeded(不插入、不淘汰)。
+   * 已存在的键永远走上面的计数分支,不受满容量影响(§52)。
    */
   register(key: string): RateLimitDecision {
     const decision = this.peek(key);
@@ -84,9 +96,25 @@ export class FixedWindowRateLimiter {
       existing.count += 1;
       return { limited: false };
     }
-    this.evictOldestForInsert();
+    this.sweep();
+    if (this.buckets.size >= this.maxKeys) {
+      return { limited: true, capacityExceeded: true };
+    }
     this.buckets.set(key, { count: 1, windowStart: now });
     return { limited: false };
+  }
+
+  /**
+   * P10 §50:这个键现在能不能建立 / 继续使用(不改变任何计数)。
+   * 已存在的键恒有容量(§52);新键先 sweep 过期桶,仍满即无容量。
+   * 单线程事件循环下与 register 之间没有 await,「先查容量、再成对注册」不会裂开。
+   */
+  hasCapacity(key: string): boolean {
+    if (this.buckets.has(key)) {
+      return true;
+    }
+    this.sweep();
+    return this.buckets.size < this.maxKeys;
   }
 
   /** 主动清零(登录成功后不再背失败账) */
@@ -113,15 +141,6 @@ export class FixedWindowRateLimiter {
     if (this.sweepTimer !== undefined) {
       clearInterval(this.sweepTimer);
       this.sweepTimer = undefined;
-    }
-  }
-
-  /** 超过键上限时按插入序淘汰最旧键,保证新键可插入 */
-  private evictOldestForInsert(): void {
-    while (this.buckets.size >= this.maxKeys) {
-      const oldest = this.buckets.keys().next();
-      if (oldest.done) break;
-      this.buckets.delete(oldest.value);
     }
   }
 }

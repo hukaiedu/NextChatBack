@@ -110,7 +110,7 @@ describe("LoginRateLimiter(AUTH-24)", () => {
     });
   });
 
-  it("键上限淘汰:超限时按插入序淘汰最旧键,新键可插入", () => {
+  it("键上限 fail-closed:满容量时新键失败不被记账、不淘汰 active bucket;过期后容量释放(P10 §46/§47)", () => {
     const clock = fakeClock();
     const limiter = tracked(createLimiter(clock, 2));
 
@@ -118,16 +118,19 @@ describe("LoginRateLimiter(AUTH-24)", () => {
     clock.advance(1);
     limiter.registerFailure("ip-2");
     clock.advance(1);
+    // map 已满(2 keys):ip-3 的失败不再走「淘汰 ip-1」路径 —— 不淘汰任何 active bucket,
+    // 该次失败也不被记账(登录限流在容量下 fail-open;任务书只要求 anonymous/chat 面 503)
     limiter.registerFailure("ip-3");
-
-    // ip-1 最旧被淘汰,桶被删除
-    expect(limiter.check("ip-1").blocked).toBe(false);
-    expect(limiter.check("ip-2").blocked).toBe(false);
     expect(limiter.check("ip-3").blocked).toBe(false);
-
-    // 淘汰后的键可重新插入并按新窗口计数
-    for (let i = 0; i < MAX_ATTEMPTS; i += 1) limiter.registerFailure("ip-1");
+    // 已存在的键状态原样保留:ip-1 仍到顶、ip-2 仍在窗口内
     expect(limiter.check("ip-1").blocked).toBe(true);
+    expect(limiter.check("ip-2").blocked).toBe(false);
+
+    // 推进时钟让 ip-1 / ip-2 过期,sweep 释放容量后 ip-3 可正常记账
+    clock.advance(WINDOW_MS + 1_000);
+    limiter.sweep();
+    for (let i = 0; i < MAX_ATTEMPTS; i += 1) limiter.registerFailure("ip-3");
+    expect(limiter.check("ip-3").blocked).toBe(true);
   });
 
   it("sweep 清理过期窗口,保留活跃窗口", () => {

@@ -151,6 +151,15 @@ export function createAuthRouter(
         }
         const decision = anonymousIpLimiter.consume(req.ip ?? UNKNOWN_RATE_LIMIT_KEY);
         if (decision.limited) {
+          // P10 §50:限流器自身满容量 → 服务容量 503,与本 IP 是否超限无关,也不得创建身份
+          if ("capacityExceeded" in decision) {
+            return next(
+              new AppError(
+                ErrorCodes.RATE_LIMITER_CAPACITY_EXCEEDED,
+                "Identity rate limiter capacity exceeded",
+              ),
+            );
+          }
           // §18:沿用既有 Auth 限流的 Public 契约(AUTH_RATE_LIMITED + 429 + Retry-After)
           return next(
             new RetryAfterError(

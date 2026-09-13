@@ -100,6 +100,8 @@ export async function setupTestContext(options?: {
       userMaxActiveRequests: options?.abuse?.userMaxActiveRequests ?? 1,
       globalMaxPendingRequests: options?.abuse?.globalMaxPendingRequests ?? 10_000,
       clock: options?.abuse?.clock,
+      // P10 §45:限流器键容量上限(测试注入小值来验证 fail-closed;缺省 = 生产默认)
+      maxKeys: options?.abuse?.maxKeys,
     },
     geminiAdapter: options?.geminiAdapter ?? new FakeGeminiAdapter(),
     scheduler: {

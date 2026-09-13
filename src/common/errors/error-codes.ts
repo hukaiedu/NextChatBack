@@ -83,6 +83,9 @@ export const ErrorCodes = {
   USER_PENDING_LIMIT_REACHED: "USER_PENDING_LIMIT_REACHED",
   // 容量:全库排队已满(服务容量,不是这个用户的违规)
   GLOBAL_QUEUE_FULL: "GLOBAL_QUEUE_FULL",
+  // V1.3 P10 §48/§49:限流器自身容量已满(键数量达到 maxKeys 且 sweep 后仍满)。
+  // 这是服务容量状态,不是该键自己达到限速 —— 新键 fail-closed,对外折成 SERVICE_BUSY(503)。
+  RATE_LIMITER_CAPACITY_EXCEEDED: "RATE_LIMITER_CAPACITY_EXCEEDED",
 
   // V1.3-B3-2 §13:Public 错误抽象的三个通用码。它们**只存在于对外视图**
   // (HTTP 错误信封 / SSE 帧 / Public DTO),永不写进数据库或日志 —— 原始码见 public-error.ts

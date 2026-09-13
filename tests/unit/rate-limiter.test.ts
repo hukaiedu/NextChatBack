@@ -104,18 +104,60 @@ describe("FixedWindowRateLimiter(P6 §19 通用限流原语)", () => {
     expect(limiter.peek("new").limited).toBe(true);
   });
 
-  it("P6-LIM-06 键数有上限:超限按插入序淘汰最旧键,新键始终进得来", () => {
+  it("P6-LIM-06 键数有上限:满容量时新键 fail-closed,绝不淘汰还在窗口内的 bucket(P10 §46/§47)", () => {
     const { clock } = fakeClock();
-    const limiter = new FixedWindowRateLimiter({ windowMs: 1_000, max: 1, clock, maxKeys: 2 });
+    const limiter = new FixedWindowRateLimiter({ windowMs: 1_000, max: 2, clock, maxKeys: 2 });
     disposables.push(limiter);
 
-    limiter.register("k1");
-    limiter.register("k2");
-    limiter.register("k3");
+    limiter.register("k1"); // count 1
+    limiter.register("k1"); // count 2 = k1 已到自己的窗口上限
+    limiter.register("k2"); // map 满(2 keys)
+    const blocked = limiter.register("k3");
+    expect(blocked).toEqual({ limited: true, capacityExceeded: true });
     expect(limiter.keyCount()).toBe(2);
-    // k1 被淘汰 ⇒ 它的旧计数一并消失(再次 register 从 1 起算)
-    expect(limiter.register("k1").limited).toBe(false);
-    expect(limiter.peek("k3").limited).toBe(true);
+    // k1 仍在原窗口、仍带着 count=2(max=1 分不出这一条,必须 max=2):
+    // 若被淘汰重插,它会变成新桶(count=1、窗口重启),而这里它读起来仍是「到顶」
+    expect(limiter.peek("k1")).toEqual({ limited: true, retryAfterSeconds: 1 });
+    expect(limiter.keyCount()).toBe(2);
+  });
+
+  it("P10-LIMIT-01/A LIMIT-CAP-01 maxKeys=3:A/B/C 活跃,D 到达 → capacityExceeded 且 A/B/C 不被删除(§54)", () => {
+    const { clock } = fakeClock();
+    const limiter = new FixedWindowRateLimiter({ windowMs: 60_000, max: 100, clock, maxKeys: 3 });
+    disposables.push(limiter);
+    for (const k of ["A", "B", "C"]) {
+      expect(limiter.register(k).limited).toBe(false);
+    }
+    expect(limiter.register("D")).toEqual({ limited: true, capacityExceeded: true });
+    expect(limiter.keyCount()).toBe(3);
+    for (const k of ["A", "B", "C"]) {
+      expect(limiter.hasCapacity(k)).toBe(true);
+    }
+  });
+
+  it("P10-LIMIT-02/A LIMIT-CAP-02 D 被拒后 A 保留原 count,未被淘汰重置(§55/§52)", () => {
+    const { clock } = fakeClock();
+    const limiter = new FixedWindowRateLimiter({ windowMs: 60_000, max: 2, clock, maxKeys: 3 });
+    disposables.push(limiter);
+    limiter.register("A"); // count 1
+    limiter.register("A"); // count 2 = A 已到顶
+    limiter.register("B");
+    limiter.register("C");
+    expect(limiter.register("D").capacityExceeded).toBe(true);
+    // A 仍是 count=2(在窗口内、在 map 里),不是被淘汰后清零
+    expect(limiter.peek("A")).toEqual({ limited: true, retryAfterSeconds: 60 });
+  });
+
+  it("P10-LIMIT-01/B LIMIT-CAP-03 推进时钟让 A/B 过期:sweep 释放容量,D 重新可建(§53/§56)", () => {
+    const { clock, advance } = fakeClock();
+    const limiter = new FixedWindowRateLimiter({ windowMs: 1_000, max: 10, clock, maxKeys: 3 });
+    disposables.push(limiter);
+    limiter.register("A");
+    limiter.register("B");
+    advance(1_500); // A/B 全部过期
+    limiter.register("C"); // C 在 1500ms 起新窗口
+    expect(limiter.register("D").limited).toBe(false); // sweep 先清掉 A/B 再建 D
+    expect(limiter.keyCount()).toBe(2); // C + D,map 未膨胀
   });
 
   it("P6-LIM-07 定时器 unref + dispose:测试环境不会因它挂住(§20/§106)", () => {
@@ -225,6 +267,17 @@ describe("AnonymousIpRateLimiter(P6 §18 小时 + 天双窗口)", () => {
     for (const timer of timers) {
       expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
     }
+  });
+
+  it("P10-LIMIT-03 匿名双窗口满容量:consume 返回 capacityExceeded 且两边都不计数(§50)", () => {
+    const { clock } = fakeClock();
+    const limiter = new AnonymousIpRateLimiter({ perHour: 10, perDay: 100, maxKeys: 1, clock });
+    disposables.push(limiter);
+    expect(limiter.consume("ip1").limited).toBe(false); // 占满两个窗口各自的唯一键位
+    const second = limiter.consume("ip2");
+    expect(second).toEqual({ limited: true, capacityExceeded: true });
+    // 拒绝发生在成对注册之前:任一个窗口都没插半边
+    expect(limiter.keyCount()).toEqual({ hour: 1, day: 1 });
   });
 });
 

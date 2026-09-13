@@ -1,0 +1,31 @@
+# personChat Backend — systemd unit example (canonical topology: Nginx → Next → Backend)
+#
+# 原则:
+#   - secrets(AUTH_PASSWORD / AUTH_SESSION_SECRET 等)一律走 EnvironmentFile,
+#     不写进本文件(§121/§125/§126:placeholder 只在 .env.example,真实值不入任何 tracked 文件);
+#   - Backend 只监听 loopback:3010,由 Nginx 转发;firewall 需封死 3010 对公网;
+#   - Backend replicas = 1:persistent Chromium profile 不能被两个进程同时使用(§81/§85);
+#   - 停止信号 SIGTERM → 优雅关机(在飞 Request 保留给下次启动的 recovery)。
+[Unit]
+Description=personChat Backend (Express + SQLite + Gemini automation)
+After=network.target
+
+[Service]
+Type=simple
+User=personchat
+Group=personchat
+WorkingDirectory=/opt/personchat
+# Node >= 22(引擎约束),systemd 里显式指定解释器路径
+ExecStart=/usr/bin/node /opt/personchat/dist/main.js
+# secrets 唯一来源;0640 root:personchat(见 docs/P8_DEPLOYMENT_SOP.md)
+EnvironmentFile=/etc/personchat/env
+Restart=on-failure
+RestartSec=3
+# 优雅停机走 SIGTERM(main.ts 已注册 SIGTERM/SIGINT)
+KillSignal=SIGTERM
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

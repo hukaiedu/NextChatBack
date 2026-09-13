@@ -110,6 +110,13 @@ export class MessageService {
     // P6 §23/§28 步骤 3:提交频率按认证用户计(键 = userId,不是 IP),ADMIN/COMPAT 同样受限
     const rate = this.admission.submitLimiter.register(userId);
     if (rate.limited) {
+      // P10 §51:限流器自身满容量 → 服务容量 503,与该用户是否超频无关,且不落任何 Message/Request
+      if ("capacityExceeded" in rate) {
+        throw new AppError(
+          ErrorCodes.RATE_LIMITER_CAPACITY_EXCEEDED,
+          "Message rate limiter capacity exceeded",
+        );
+      }
       throw new RetryAfterError(
         ErrorCodes.CHAT_SUBMIT_RATE_LIMITED,
         "Too many messages submitted",

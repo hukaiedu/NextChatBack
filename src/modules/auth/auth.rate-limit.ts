@@ -40,9 +40,14 @@ export class LoginRateLimiter {
 
   check(key: string): LoginRateLimitStatus {
     const decision = this.limiter.peek(key);
-    return decision.limited
-      ? { blocked: true, retryAfterSeconds: decision.retryAfterSeconds }
-      : { blocked: false };
+    if (!decision.limited) {
+      return { blocked: false };
+    }
+    // peek 不会返回容量分支(容量只在 register 的新键路径产生),这里只是类型收窄
+    if ("capacityExceeded" in decision) {
+      return { blocked: true, retryAfterSeconds: 1 };
+    }
+    return { blocked: true, retryAfterSeconds: decision.retryAfterSeconds };
   }
 
   registerFailure(key: string): void {

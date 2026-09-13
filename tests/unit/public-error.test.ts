@@ -37,6 +37,8 @@ const BUSY: readonly string[] = [
   ErrorCodes.CHAT_SUBMIT_RATE_LIMITED,
   ErrorCodes.USER_PENDING_LIMIT_REACHED,
   ErrorCodes.GLOBAL_QUEUE_FULL,
+  // V1.3 P10 §49:限流器自身满容量,对外同样只折 SERVICE_BUSY
+  ErrorCodes.RATE_LIMITER_CAPACITY_EXCEEDED,
 ];
 
 const TIMEOUT: readonly string[] = [

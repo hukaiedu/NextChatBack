@@ -55,17 +55,29 @@ export class AnonymousIpRateLimiter {
    *
    * 原子性(§22):peek 与 register 之间没有任何 await,单线程事件循环下这一对就是原子的,
    * 所以 50 个并发 fresh 请求不可能全部越过同一时刻的计数。
+   *
+   * P10 §50:容量是双窗口共享的准入前提 —— 任一个窗口的 map 已满(先 sweep 过期键仍满)
+   * 就返回 capacityExceeded 且**两个窗口都不计数**,绝不半边插入。这是 fail-closed:
+   * 满容量时不得新建 Anonymous User(§50),也不为陌生 IP 建立/淘汰任何 bucket(§59)。
    */
   consume(ip: string): RateLimitDecision {
     const hourDecision = this.hour.peek(ip);
     const dayDecision = this.day.peek(ip);
     if (hourDecision.limited || dayDecision.limited) {
       // 两个窗口都在计时:等得久的那个才是真正可用的最早时刻
+      // peek 不产生容量分支;in-check 只是让两种 limited 变体都能通过类型收窄
       const retryAfterSeconds = Math.max(
-        hourDecision.limited ? hourDecision.retryAfterSeconds : 0,
-        dayDecision.limited ? dayDecision.retryAfterSeconds : 0,
+        hourDecision.limited && "retryAfterSeconds" in hourDecision
+          ? hourDecision.retryAfterSeconds
+          : 0,
+        dayDecision.limited && "retryAfterSeconds" in dayDecision
+          ? dayDecision.retryAfterSeconds
+          : 0,
       );
       return { limited: true, retryAfterSeconds };
+    }
+    if (!this.hour.hasCapacity(ip) || !this.day.hasCapacity(ip)) {
+      return { limited: true, capacityExceeded: true };
     }
     this.hour.register(ip);
     this.day.register(ip);

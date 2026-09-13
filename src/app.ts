@@ -97,6 +97,8 @@ export interface AbuseProtectionConfig {
   userMaxActiveRequests?: number;
   globalMaxPendingRequests?: number;
   clock?: RateLimitClock;
+  /** P10 §45:限流器键数量上限(默认 10000)。达到后新键 fail-closed(503 SERVICE_BUSY),不淘汰 active bucket */
+  maxKeys?: number;
 }
 
 export interface AppDeps {
@@ -198,11 +200,13 @@ export function createApp(deps: AppDeps): AppHandle {
     perHour: abuse.anonymousIpLimitPerHour ?? ANONYMOUS_IP_LIMIT_PER_HOUR,
     perDay: abuse.anonymousIpLimitPerDay ?? ANONYMOUS_IP_LIMIT_PER_DAY,
     clock: abuse.clock,
+    maxKeys: abuse.maxKeys,
   });
   const chatSubmitLimiter = new FixedWindowRateLimiter({
     windowMs: CHAT_SUBMIT_RATE_WINDOW_MS,
     max: abuse.chatSubmitRatePerMinute ?? CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE,
     clock: abuse.clock,
+    maxKeys: abuse.maxKeys,
   });
   const admission: MessageAdmission = {
     submitLimiter: chatSubmitLimiter,

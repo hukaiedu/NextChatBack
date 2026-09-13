@@ -775,3 +775,74 @@ describe("P6-PRE 昂贵附件工作的准入优先级(FIX-01B §15~§18)", () =>
     expect(expensiveCalls).toEqual({ parse: 1, digest: 1 });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P10 §45~§59:限流器键容量 fail-closed(不再淘汰 active bucket)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("P6-CAP 限流器容量 fail-closed(P10 §50/§51/§52/§57/§58)", () => {
+  it("LIMIT-CAP-04 匿名限流器满容量:新 IP 503 SERVICE_BUSY,0 User / 0 Session(§57)", async () => {
+    // trust proxy=loopback 让「测试客户端 = 环形回源」成立:用 X-Forwarded-For 仿真三个来源 IP,
+    // 每个 IP 恰好建 1 个身份就把两个窗口的 map(maxKeys=2)填满,第三个 IP 撞 fail-closed。
+    const ctx = await open(
+      { anonymousIpLimitPerHour: 1, anonymousIpLimitPerDay: 100, maxKeys: 2 },
+      authDeps({ trustProxy: true }),
+    );
+    const create = async (xff: string): Promise<Response> =>
+      fetch(`${ctx.baseUrl}/api/auth/anonymous`, {
+        method: "POST",
+        headers: { "X-Forwarded-For": xff },
+      });
+
+    expect((await create("203.0.113.1")).status).toBe(200);
+    expect((await create("203.0.113.2")).status).toBe(200);
+
+    const third = await create("203.0.113.3");
+    expect(third.status).toBe(503);
+    expect(errorOf(await third.json()).code).toBe(PublicErrorCodes.SERVICE_BUSY);
+    // 零副作用:这次 503 没有创建任何 User / Session
+    const c = await counts(ctx.prisma);
+    expect(c.createdAnonymousUsers).toBe(2);
+    expect(c.sessions).toBe(2);
+
+    // 已存在的 IP 不受影响:满容量下它们照常按自己的窗口判定(§52)
+    const replayed = await create("203.0.113.1");
+    expect(replayed.status).toBe(429); // 它自己 1 次/小时的额度已用完
+    expect(errorOf(await replayed.json()).code).toBe(ErrorCodes.AUTH_RATE_LIMITED);
+  });
+
+  it("LIMIT-CAP-05 消息限流器满容量:新用户 503 SERVICE_BUSY,零 Message/Request/reserve(§58)", async () => {
+    const ctx = await open({ chatSubmitRatePerMinute: 10_000, maxKeys: 2 });
+    const user1 = await newUserWithConversations(ctx, 2);
+    const user2 = await newUserWithConversations(ctx, 1);
+    const user3 = await newUserWithConversations(ctx, 1);
+
+    expect((await send(ctx, user1.cookie, user1.conversationIds[0]!, "cap-5-a")).status).toBe(202);
+    expect((await send(ctx, user2.cookie, user2.conversationIds[0]!, "cap-5-b")).status).toBe(202);
+
+    // chatSubmitLimiter 已有 user1/user2 两个键 = 满容量(user3 是新键)
+    resetExpensiveCalls();
+    const blocked = await send(
+      ctx,
+      user3.cookie,
+      user3.conversationIds[0]!,
+      "cap-5-c",
+      "hi",
+      [attachment("image/png")],
+    );
+    expect(blocked.status).toBe(503);
+    expect(errorOf(blocked.body).code).toBe(PublicErrorCodes.SERVICE_BUSY);
+    // 昂贵附件路径与占位都发生在频率准入之后:一次都不许跑
+    expect(expensiveCalls).toEqual({ parse: 0, digest: 0 });
+    expect(ctx.attachmentStore.stats()).toEqual({ slotCount: 0, liveBytes: 0, slots: [] });
+    // 零副作用:请求数仍只有前面两条,user3 的身份也没产生任何业务数据
+    expect((await counts(ctx.prisma)).requests).toBe(2);
+    expect(await ctx.prisma.modelRequest.count({ where: { userMessage: { conversation: { userId: user3.userId } } } })).toBe(0);
+
+    // §52:已存在的键在满容量下照常工作(user1 自己还有额度,换个会话继续发)
+    expect(
+      (await send(ctx, user1.cookie, user1.conversationIds[1]!, "cap-5-a2")).status,
+    ).toBe(202);
+    expect((await counts(ctx.prisma)).requests).toBe(3);
+  });
+});

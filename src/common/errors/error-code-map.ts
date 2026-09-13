@@ -73,6 +73,8 @@ export const ERROR_CODE_HTTP_STATUS = {
   CHAT_SUBMIT_RATE_LIMITED: 429,
   USER_PENDING_LIMIT_REACHED: 429,
   GLOBAL_QUEUE_FULL: 503,
+  // P10:限流器自身满容量 = 服务容量,与全库排队满同档 503(§49)
+  RATE_LIMITER_CAPACITY_EXCEEDED: 503,
 
   // 兜底
   // V1.3-B3-2 Public 通用码:HTTP 状态取自**原始码**(见 public-error.ts),这三项只是

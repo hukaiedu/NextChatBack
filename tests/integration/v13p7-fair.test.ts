@@ -778,6 +778,34 @@ describe("P7 多用户端到端模拟(HTTP)", () => {
     );
     expect(await ctx.prisma.modelRequest.count()).toBe(6);
   });
+
+  it("LOAD-01 10 用户 × 5 请求 correctness stress:无超发、无饿死、单 worker、全部终态(§148)", async () => {
+    const { ctx, adapter } = await mount(
+      { conversationUrls: URLS },
+      {},
+      { abuse: { userMaxPendingRequests: 50, globalMaxPendingRequests: 100 } },
+    );
+    // 每用户 5 个会话 5 条请求:text = 标签,执行序列读回来就是 A1..J5
+    for (const userChar of "ABCDEFGHIJ") {
+      const user = await newUserWithConversations(ctx, 5);
+      for (let i = 1; i <= 5; i += 1) {
+        const label = `${userChar}${i}`;
+        expect(
+          (await send(ctx, user.cookie, user.conversationIds[i - 1]!, `load-${label}`, label))
+            .status,
+        ).toBe(202);
+      }
+    }
+
+    await ctx.scheduler!.runOnce();
+
+    // 50 条全部真实执行、全部终态;单 worker 下轮转不出现连续同用户(其它用户未排空时)
+    expect(adapter.attempted).toHaveLength(50);
+    const totals = Object.fromEntries("ABCDEFGHIJ".split("").map((c) => [c, 5]));
+    assertNoStarvation(adapter.attempted, totals);
+    expect(await pendingPrompts(ctx)).toEqual([]);
+    expectQueueEmpty(ctx);
+  });
 });
 
 /**
