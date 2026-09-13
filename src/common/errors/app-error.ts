@@ -19,3 +19,21 @@ export class AppError extends Error {
     this.cause = cause;
   }
 }
+
+/**
+ * 带退避建议的错误:统一错误出口据此写 `Retry-After`(V1.3 P6 §78)。
+ *
+ * 抛出点(Service / Repository)拿不到 res,所以秒数挂在错误对象上由出口集中写头 ——
+ * 否则每个入口各自 setHeader,同一码的退避值就会开始分叉。
+ */
+export class RetryAfterError extends AppError {
+  constructor(
+    code: ErrorCode,
+    message: string,
+    readonly retryAfterSeconds: number,
+    cause?: unknown,
+  ) {
+    super(code, message, cause);
+    this.name = "AppError";
+  }
+}

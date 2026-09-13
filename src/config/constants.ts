@@ -68,6 +68,44 @@ export const AUTH_LOGIN_MAX_ATTEMPTS = 5;
 /** 登录限流:fixed window 长度(10 分钟) */
 export const AUTH_LOGIN_WINDOW_MS = 10 * 60 * 1000;
 
+/** req.ip 取不到时的兜底限流键(只决定分组,绝不落日志/响应) */
+export const UNKNOWN_RATE_LIMIT_KEY = "unknown";
+
+// —— V1.3 P6 入口防刷与队列容量(docs:任务书 §11/§12;env 可覆盖,这里是唯一默认值来源)——
+
+/** 匿名身份新建:同一 IP 每小时最多新建多少身份(Abuse-01 保护「建新身份」而非「使用身份」) */
+export const ANONYMOUS_IP_LIMIT_PER_HOUR = 20;
+
+/** 匿名身份新建:同一 IP 每 24 小时最多新建多少身份 */
+export const ANONYMOUS_IP_LIMIT_PER_DAY = 100;
+
+/** 匿名身份新建:小时窗口长度 */
+export const ANONYMOUS_IP_HOUR_WINDOW_MS = 60 * 60 * 1000;
+
+/** 匿名身份新建:天窗口长度 */
+export const ANONYMOUS_IP_DAY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** 消息提交频率:单用户每分钟最多提交多少条(键 = req.auth.userId,ADMIN/COMPAT 同样受限) */
+export const CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE = 30;
+
+/** 消息提交频率窗口长度(1 分钟) */
+export const CHAT_SUBMIT_RATE_WINDOW_MS = 60 * 1000;
+
+/** 单用户 PENDING 上限(§33) */
+export const USER_MAX_PENDING_REQUESTS = 5;
+
+/**
+ * 单用户在飞(PROCESSING/CANCELLING)上限(§57)。
+ * 当前一进程 = 一 Gemini Page = 一 worker,因此 >1 不提高并行度,只是调度不变量与未来边界。
+ */
+export const USER_MAX_ACTIVE_REQUESTS = 1;
+
+/** 全库 PENDING 上限(§34:服务容量,超限 503 而非用户违规) */
+export const GLOBAL_MAX_PENDING_REQUESTS = 100;
+
+/** quota 拒绝的 Retry-After 建议秒数(§33:1~5 秒之间取一个固定值并保持一致) */
+export const QUEUE_FULL_RETRY_AFTER_SECONDS = 3;
+
 // —— V1.3 多用户:哨兵 User 常量(值必须与 B1 migration 的 INSERT OR IGNORE 逐字一致)——
 
 /** 固定 ADMIN User:共享密码登录后的唯一管理员身份 */

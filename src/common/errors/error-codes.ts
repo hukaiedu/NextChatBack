@@ -76,6 +76,14 @@ export const ErrorCodes = {
   // V1.3-B3-3 §21:已认证但身份不是 ADMIN → 运维 API 拒绝。只说明权限,不说明资源存在性
   AUTH_FORBIDDEN: "AUTH_FORBIDDEN",
 
+  // V1.3 P6 入口防刷与队列容量(对外一律折进 SERVICE_BUSY,原码只进日志/Admin)
+  // 频率:同一用户在时间窗内提交太快(与队列容量无关,重放也算)
+  CHAT_SUBMIT_RATE_LIMITED: "CHAT_SUBMIT_RATE_LIMITED",
+  // 容量:该用户自己排队已满(他自己的额度)
+  USER_PENDING_LIMIT_REACHED: "USER_PENDING_LIMIT_REACHED",
+  // 容量:全库排队已满(服务容量,不是这个用户的违规)
+  GLOBAL_QUEUE_FULL: "GLOBAL_QUEUE_FULL",
+
   // V1.3-B3-2 §13:Public 错误抽象的三个通用码。它们**只存在于对外视图**
   // (HTTP 错误信封 / SSE 帧 / Public DTO),永不写进数据库或日志 —— 原始码见 public-error.ts
   CHAT_FAILED: "CHAT_FAILED",

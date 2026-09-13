@@ -33,6 +33,10 @@ const BUSY: readonly string[] = [
   ErrorCodes.PROVIDER_RATE_LIMITED,
   ErrorCodes.ATTACHMENT_CAPACITY_EXCEEDED,
   ErrorCodes.PROVIDER_NOT_READY,
+  // V1.3 P6:提交频率超限与两级排队容量,对外一律「服务忙」
+  ErrorCodes.CHAT_SUBMIT_RATE_LIMITED,
+  ErrorCodes.USER_PENDING_LIMIT_REACHED,
+  ErrorCodes.GLOBAL_QUEUE_FULL,
 ];
 
 const TIMEOUT: readonly string[] = [

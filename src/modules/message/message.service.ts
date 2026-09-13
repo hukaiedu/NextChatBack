@@ -1,18 +1,22 @@
 import { randomUUID } from "node:crypto";
 
 import type { PrismaClient } from "../../generated/prisma/client.js";
+import type { DbClient } from "../../database/prisma.js";
 import type { MessageModel, ModelRequestModel } from "../../generated/prisma/models.js";
-import { AppError } from "../../common/errors/app-error.js";
+import { AppError, RetryAfterError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
+import type { FixedWindowRateLimiter } from "../../common/rate-limit/rate-limiter.js";
+import { QUEUE_FULL_RETRY_AFTER_SECONDS } from "../../config/constants.js";
 import { computeRequestFingerprint } from "../../common/utils/fingerprint.js";
 import { isUniqueViolation, uniqueViolationInfo } from "../../common/utils/prisma-error.js";
 import type { UniqueViolationInfo } from "../../common/utils/prisma-error.js";
 import { detectTriggerAbort } from "../../common/utils/trigger-abort.js";
 import { ConversationRepository } from "../conversation/conversation.repository.js";
 import type { AttachmentStore } from "../request/request.attachment-store.js";
+import type { QueueLimits, RequestAdmissionGate } from "../request/request.admission.js";
 import { RequestRepository } from "../request/request.repository.js";
 import { computeAttachmentsDigest, parseAttachments } from "./attachment.js";
-import type { RawAttachment } from "./attachment.js";
+import type { AttachmentFile, RawAttachment } from "./attachment.js";
 import { MessageRepository } from "./message.repository.js";
 import {
   USER_MESSAGE_STATUS,
@@ -21,9 +25,27 @@ import {
 import type { MessageListItem, MessageListPage, SendMessageResult } from "./message.types.js";
 import type { ListMessagesQuery } from "./message.schema.js";
 
-/** 新 Request 事务提交后的回调(app 装配时指向 Scheduler.notify) */
+/**
+ * 新 Request 事务提交后的回调(app 装配时指向 Scheduler.notify)。
+ * P7 §50:除 id 外还要带上归属 userId —— 公平调度按用户轮转,拿不到 owner 就只能再查一次库。
+ */
 export interface RequestCreationListener {
-  onRequestCreated(requestId: string): void;
+  onRequestCreated(requestId: string, userId: string): void;
+}
+
+/**
+ * V1.3 P6:发消息入口的三道准入(§27 冻结顺序里的「频率 → 配额」两步)。
+ *
+ * 判据分得很清:**频率**活在内存(重启清零,§77),**排队容量**只认数据库计数
+ * (§30:重启后残留的 PENDING 仍然占额度),内存锁只负责让同进程的 check+create 串行。
+ */
+export interface MessageAdmission {
+  /** 提交频率(§23):键 = req.auth.userId,ADMIN 与 COMPAT 都不绕过(§24/§25) */
+  submitLimiter: FixedWindowRateLimiter;
+  /** 配额复核 + 创建的短临界区(§36) */
+  gate: RequestAdmissionGate;
+  /** 两级排队上限(§33/§34) */
+  limits: QueueLimits;
 }
 
 export class MessageService {
@@ -33,7 +55,9 @@ export class MessageService {
     private readonly conversationRepo: ConversationRepository,
     private readonly requestRepo: RequestRepository,
     private readonly attachmentStore: AttachmentStore,
-    private readonly requestCreationListener?: RequestCreationListener,
+    private readonly requestCreationListener: RequestCreationListener | undefined,
+    /** P6:必填 —— 装配层「明确知道自己有没有接限流」,不能靠漏传静默退化 */
+    private readonly admission: MessageAdmission,
   ) {}
 
   /**
@@ -54,6 +78,17 @@ export class MessageService {
    * V1.2 I1:附件按固定顺序处理 —— 复核 → 指纹 → 幂等预检 → 占位 → 事务 → 确认 → 通知。
    * 幂等预检必须在 reserve 之前:同 Key 重放要原样返回既有 Request,既不新建 slot,
    * 也不碰既有 slot(ATT-IDEM-01)。纯文本(attachments 缺省)一条附件路径都不走。
+   *
+   * V1.3 P6 §27/§28 + FIX-01B §11 冻结顺序:
+   * trim → owned Conversation gate → 提交频率 → 附件复核 + 指纹 → 幂等预检 → 排队配额 →
+   * 附件占位 → 事务(内再复核配额)→ notify。三道门槛的语义不同,报告 §79 要按这个区分对外解释:
+   * - ownership gate 保护「数据归属」,必须永远是第一个业务判断
+   * - 频率 limiter 保护「提交太快」,幂等重放同样算一次(它就是真实的一次 HTTP 提交)
+   * - 配额 admission 保护「排队长度」,必须排在 dedupe 之后:队列已满不能让合法重放失败
+   * 附件复核与指纹排在两道准入之后(I0.1 §4.3 规则 6–8 的成本判据):它们随 payload 体积线性增长,
+   * 因此「被挡掉的请求」不得替服务付这笔账 —— 跨用户请求拿 404、超频请求拿 429,都发生在解码之前。
+   * 唯一保持在前的是 body limit 的 413:那是 transport 层行为,不属于本方法。
+   * 拒绝路径一律零副作用:没有 Message/Request 落库、不占附件 slot、不 notify(§41)。
    */
   async sendMessage(
     userId: string,
@@ -63,22 +98,37 @@ export class MessageService {
     modelKey?: string,
     rawAttachments?: RawAttachment[],
   ): Promise<SendMessageResult> {
+    // FIX-01B §11 步骤 1:最小 text normalization —— 只有 trim,不碰任何昂贵路径
     const content = rawContent.trim();
-    const attachments = parseAttachments(rawAttachments);
-    const fingerprint = computeRequestFingerprint(
-      conversationId,
-      content,
-      modelKey,
-      attachments === undefined ? undefined : computeAttachmentsDigest(attachments),
-    );
 
-    // §14 步骤 1:目标会话必须先属于当前用户(不存在与属于别人同为 404)
+    // §14 步骤 2:目标会话必须先属于当前用户(不存在与属于别人同为 404)
     const gated = await this.conversationRepo.findOwnedById(this.prisma, conversationId, userId);
     if (!gated) {
       throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
     }
 
-    // 幂等预检(同 Key 常见重复请求直接返回,避免无谓事务)
+    // P6 §23/§28 步骤 3:提交频率按认证用户计(键 = userId,不是 IP),ADMIN/COMPAT 同样受限
+    const rate = this.admission.submitLimiter.register(userId);
+    if (rate.limited) {
+      throw new RetryAfterError(
+        ErrorCodes.CHAT_SUBMIT_RATE_LIMITED,
+        "Too many messages submitted",
+        rate.retryAfterSeconds,
+      );
+    }
+
+    // FIX-01B §12 步骤 4:附件物化(base64 解码 → Buffer 分配 → magic byte 复核)与指纹
+    // (对解码后字节做 sha256)是整条链路里唯一随 payload 体积增长的开销,因此排在
+    // ownership + rate 之后:被别人挡掉的请求不再替攻击者付这笔账。
+    const attachments = parseAttachments(rawAttachments);
+    const fingerprint = this.buildRequestFingerprint(
+      conversationId,
+      content,
+      modelKey,
+      attachments,
+    );
+
+    // 步骤 5:幂等预检(同 Key 常见重复请求直接返回,避免无谓事务;§42:排队已满也绝不能挡掉合法重放)
     const existing = await this.requestRepo.findByIdempotencyKey(this.prisma, idempotencyKey);
     if (existing) {
       return this.resolveIdempotent(existing, conversationId, fingerprint);
@@ -87,83 +137,28 @@ export class MessageService {
     // 附件字节只进内存:先按预分配 id 占位,再让同一条 id 落库,两侧才对得上。
     // reserve 抛错(容量不足 / id 冲突)时 slot 一个都没建,下面 finally 自然 no-op。
     let requestId: string | undefined;
-    if (attachments !== undefined) {
-      requestId = randomUUID();
-      this.attachmentStore.reserve(requestId, attachments);
-    }
     try {
-      const result = await this.prisma.$transaction(async (tx) => {
-        // 1. Conversation 属于当前用户 + ACTIVE(§13:owner 条件进事务,与写路径同源)
-        const conversation = await this.conversationRepo.findOwnedById(tx, conversationId, userId);
-        if (!conversation) {
-          throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
+      const result = await this.admission.gate.runExclusive(async () => {
+        // P6 §35/§36:配额复核与创建事务在准入锁内成对出现。事务外单独 count 不算判定 ——
+        // 并发下两条请求会同时读到「还没满」。附件占位排在配额通过之后(§28 红线),
+        // 因此任何入口拒绝都留不下副作用(§41)。
+        await this.assertQueueHasRoom(userId);
+        if (attachments !== undefined) {
+          requestId = randomUUID();
+          this.attachmentStore.reserve(requestId, attachments);
         }
-        if (conversation.status === "DELETED") {
-          throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted");
-        }
-        if (conversation.status === "ARCHIVED") {
-          throw new AppError(
-            ErrorCodes.CONVERSATION_ARCHIVED,
-            "Conversation is archived, restore it before sending messages",
-          );
-        }
-
-        // 2. 同 Conversation 没有活动 Request(数据库 partial unique index 兜底并发)
-        const hasActive = await this.requestRepo.hasActive(tx, conversationId);
-        if (hasActive) {
-          throw new AppError(
-            ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
-            "Conversation already has a request in progress",
-          );
-        }
-
-        // 3. position 严格递增(事务内取 max,唯一约束 (conversationId, position) 兜底)
-        const maxPosition = await this.messageRepo.findMaxPosition(tx, conversationId);
-        const start = (maxPosition ?? 0) + 1;
-
-        const userMessage = await this.messageRepo.create(tx, {
-          conversationId,
-          role: "USER",
-          content,
-          status: USER_MESSAGE_STATUS,
-          position: start,
-        });
-        const assistantMessage = await this.messageRepo.create(tx, {
-          conversationId,
-          role: "ASSISTANT",
-          content: "",
-          status: "PENDING",
-          position: start + 1,
-        });
-        const request = await this.requestRepo.create(tx, {
-          // 附件路径必须沿用占位时的 id:AttachmentStore 与数据库靠它对齐(纯文本传 undefined = 用默认 id)
-          id: requestId,
-          conversationId,
-          userMessageId: userMessage.id,
-          assistantMessageId: assistantMessage.id,
-          idempotencyKey,
-          requestFingerprint: fingerprint,
-          status: "PENDING",
-          provider: conversation.provider,
-          requestedModelKey: modelKey ?? conversation.preferredModelKey ?? null,
-          // 只落份数;字节在内存
-          attachmentCount: attachments?.length ?? 0,
-        });
-
-        // 4. 显式提交模型键 → 同事务同步会话偏好;省略则只刷新 updatedAt,偏好绝不变动
-        await this.conversationRepo.updateOwned(
-          tx,
-          conversationId,
-          userId,
-          modelKey === undefined ? {} : { preferredModelKey: modelKey },
+        return this.prisma.$transaction((tx) =>
+          this.createRequestRows(tx, {
+            conversationId,
+            userId,
+            content,
+            attachments,
+            requestId,
+            idempotencyKey,
+            fingerprint,
+            modelKey,
+          }),
         );
-
-        return {
-          request,
-          userMessage: { ...userMessage, attachmentCount: request.attachmentCount },
-          assistantMessage,
-          deduplicated: false,
-        };
       });
       // RESERVED → READY:事务已提交,字节就此交给执行链;本地所有权随即摘掉,
       // 释放权转给 Scheduler 的 finally。交接必须早于 notify,否则 Scheduler 抢在 READY 之前 take。
@@ -172,8 +167,9 @@ export class MessageService {
         requestId = undefined;
       }
       if (!result.deduplicated) {
-        // 事务已提交才通知;幂等命中(deduplicated)不重复通知
-        this.requestCreationListener?.onRequestCreated(result.request.id);
+        // 事务已提交才通知;幂等命中(deduplicated)不重复通知。
+        // P7 §50:带上归属 userId —— 它来自 req.auth.userId(不是请求体),Scheduler 只用它入队
+        this.requestCreationListener?.onRequestCreated(result.request.id, userId);
       }
       return result;
     } catch (err) {
@@ -226,6 +222,158 @@ export class MessageService {
         this.attachmentStore.drop(requestId);
       }
     }
+  }
+
+  /**
+   * FIX-01B §16:幂等指纹的独立 seam —— 纯计算、无 IO、语义与直接调用逐字节相同。
+   *
+   * 单拆这一层只为让测试能证明「被 ownership / rate 挡掉的请求没有付 sha256 的账」;
+   * 不为它加任何判断,也不借此重构 sendMessage。
+   */
+  private buildRequestFingerprint(
+    conversationId: string,
+    content: string,
+    modelKey: string | undefined,
+    attachments: AttachmentFile[] | undefined,
+  ): string {
+    return computeRequestFingerprint(
+      conversationId,
+      content,
+      modelKey,
+      attachments === undefined ? undefined : computeAttachmentsDigest(attachments),
+    );
+  }
+
+  /**
+   * P6 §33/§34/§35:两级排队容量的权威复核,只在准入锁内调用。
+   *
+   * 计数只来自数据库(PENDING 条数):内存队列会随重启清空,而库里的 PENDING 才是
+   * 真正待执行的量(§75/§76)。超限一律 RetryAfterError —— 拒绝是暂时的,客户端按
+   * 固定秒数退避即可,不需要知道是哪一档限额拦下的(§79)。
+   */
+  private async assertQueueHasRoom(userId: string): Promise<void> {
+    const [userPending, globalPending] = await Promise.all([
+      this.requestRepo.countPendingForUser(this.prisma, userId),
+      this.requestRepo.countPending(this.prisma),
+    ]);
+    if (userPending >= this.admission.limits.userMaxPending) {
+      throw new RetryAfterError(
+        ErrorCodes.USER_PENDING_LIMIT_REACHED,
+        "User already has too many queued requests",
+        QUEUE_FULL_RETRY_AFTER_SECONDS,
+      );
+    }
+    if (globalPending >= this.admission.limits.globalMaxPending) {
+      throw new RetryAfterError(
+        ErrorCodes.GLOBAL_QUEUE_FULL,
+        "Service request queue is full",
+        QUEUE_FULL_RETRY_AFTER_SECONDS,
+      );
+    }
+  }
+
+  /**
+   * 事务体:一条事务内完成 owner 复核 → 活动请求检查 → position 递增 → 三行落库 → 偏好同步。
+   * 从 sendMessage 整体搬出,只为让准入锁只包住「配额复核 + 本事务」这一小段(§38);
+   * 内部顺序与判据逐条保持原样。
+   */
+  private async createRequestRows(
+    tx: DbClient,
+    input: {
+      conversationId: string;
+      userId: string;
+      content: string;
+      /** undefined = 纯文本:一条附件路径都不走 */
+      attachments: AttachmentFile[] | undefined;
+      /** 附件路径的预分配 id(与 AttachmentStore 的占位对齐);纯文本 = undefined = 用默认 id */
+      requestId?: string;
+      idempotencyKey: string;
+      fingerprint: string;
+      modelKey?: string;
+    },
+  ) {
+    const {
+      conversationId,
+      userId,
+      content,
+      attachments,
+      requestId,
+      idempotencyKey,
+      fingerprint,
+      modelKey,
+    } = input;
+
+    // 1. Conversation 属于当前用户 + ACTIVE(§13:owner 条件进事务,与写路径同源)
+    const conversation = await this.conversationRepo.findOwnedById(tx, conversationId, userId);
+    if (!conversation) {
+      throw new AppError(ErrorCodes.CONVERSATION_NOT_FOUND, "Conversation not found");
+    }
+    if (conversation.status === "DELETED") {
+      throw new AppError(ErrorCodes.CONVERSATION_DELETED, "Conversation is deleted");
+    }
+    if (conversation.status === "ARCHIVED") {
+      throw new AppError(
+        ErrorCodes.CONVERSATION_ARCHIVED,
+        "Conversation is archived, restore it before sending messages",
+      );
+    }
+
+    // 2. 同 Conversation 没有活动 Request(数据库 partial unique index 兜底并发)
+    const hasActive = await this.requestRepo.hasActive(tx, conversationId);
+    if (hasActive) {
+      throw new AppError(
+        ErrorCodes.CONVERSATION_REQUEST_IN_PROGRESS,
+        "Conversation already has a request in progress",
+      );
+    }
+
+    // 3. position 严格递增(事务内取 max,唯一约束 (conversationId, position) 兜底)
+    const maxPosition = await this.messageRepo.findMaxPosition(tx, conversationId);
+    const start = (maxPosition ?? 0) + 1;
+
+    const userMessage = await this.messageRepo.create(tx, {
+      conversationId,
+      role: "USER",
+      content,
+      status: USER_MESSAGE_STATUS,
+      position: start,
+    });
+    const assistantMessage = await this.messageRepo.create(tx, {
+      conversationId,
+      role: "ASSISTANT",
+      content: "",
+      status: "PENDING",
+      position: start + 1,
+    });
+    const request = await this.requestRepo.create(tx, {
+      // 附件路径必须沿用占位时的 id:AttachmentStore 与数据库靠它对齐(纯文本传 undefined = 用默认 id)
+      id: requestId,
+      conversationId,
+      userMessageId: userMessage.id,
+      assistantMessageId: assistantMessage.id,
+      idempotencyKey,
+      requestFingerprint: fingerprint,
+      status: "PENDING",
+      provider: conversation.provider,
+      requestedModelKey: modelKey ?? conversation.preferredModelKey ?? null,
+      // 只落份数;字节在内存
+      attachmentCount: attachments?.length ?? 0,
+    });
+
+    // 4. 显式提交模型键 → 同事务同步会话偏好;省略则只刷新 updatedAt,偏好绝不变动
+    await this.conversationRepo.updateOwned(
+      tx,
+      conversationId,
+      userId,
+      modelKey === undefined ? {} : { preferredModelKey: modelKey },
+    );
+
+    return {
+      request,
+      userMessage: { ...userMessage, attachmentCount: request.attachmentCount },
+      assistantMessage,
+      deduplicated: false,
+    };
   }
 
   /**

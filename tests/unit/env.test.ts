@@ -146,3 +146,34 @@ describe("parseEnv BROWSER_PROXY_URL(P8-PROXY-03)", () => {
     expect(message).not.toContain("secret");
   });
 });
+
+/**
+ * V1.3 P6 §11/§12:六个入口防刷与队列容量 env 的 canonical 名、默认值与范围。
+ * 表驱动一次覆盖「边界内通过 / 0 与非整数拒绝 / 越上限拒绝」——
+ * 上限写错(env 收到比 runtime 更大或更小的值)只能在这里被钉住。
+ */
+describe("parseEnv V1.3 P6 限额 env(§11/§12 范围)", () => {
+  const limits = [
+    { key: "AUTH_ANONYMOUS_IP_LIMIT_PER_HOUR", def: 20, min: 1, max: 10_000 },
+    { key: "AUTH_ANONYMOUS_IP_LIMIT_PER_DAY", def: 100, min: 1, max: 100_000 },
+    { key: "CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE", def: 30, min: 1, max: 10_000 },
+    { key: "USER_MAX_PENDING_REQUESTS", def: 5, min: 1, max: 100 },
+    { key: "USER_MAX_ACTIVE_REQUESTS", def: 1, min: 1, max: 10 },
+    { key: "GLOBAL_MAX_PENDING_REQUESTS", def: 100, min: 1, max: 10_000 },
+  ] as const;
+
+  for (const { key, def, min, max } of limits) {
+    it(`${key}:默认 ${def},边界内通过,越界与小数拒绝`, () => {
+      expect(parseEnv({ ...base })[key]).toBe(def);
+      for (const ok of [String(min), String(max), String(def)]) {
+        expect(parseEnv({ ...base, [key]: ok })[key]).toBe(Number(ok));
+      }
+      expect(() => parseEnv({ ...base, [key]: "0" })).toThrow(new RegExp(key));
+      expect(() => parseEnv({ ...base, [key]: String(max + 1) })).toThrow(
+        new RegExp(key),
+      );
+      expect(() => parseEnv({ ...base, [key]: "1.5" })).toThrow(new RegExp(key));
+      expect(() => parseEnv({ ...base, [key]: "many" })).toThrow(new RegExp(key));
+    });
+  }
+});

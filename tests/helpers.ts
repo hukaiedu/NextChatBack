@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import type { Express } from "express";
 
 import { createApp } from "../src/app.js";
-import type { SchedulerConfig, StreamingConfig } from "../src/app.js";
+import type { AbuseProtectionConfig, AppHandle, SchedulerConfig, StreamingConfig } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
 import { ADMIN_USER_ID, AUTH_COOKIE_NAME, COMPAT_USER_ID } from "../src/config/constants.js";
 import type { LoginRateLimiter } from "../src/modules/auth/auth.rate-limit.js";
@@ -41,6 +41,8 @@ export interface TestContext {
   attachmentStore: AttachmentStore;
   /** V1.3-B2:DB Session 运行时(enabled 时非 null;测试直接驱动 sweepExpired) */
   authSessions: AuthSessionService | null;
+  /** V1.3 P6:两个入口限流器(窗口推进 / 键数量清理断言;close() 统一 dispose) */
+  rateLimits: AppHandle["rateLimits"];
   /** 当前存活的 SSE 连接数 */
   sseConnections(): number;
   reset(): Promise<void>;
@@ -59,6 +61,11 @@ export async function setupTestContext(options?: {
   auth?: AuthDeps | null;
   /** SEC-1 测试接缝:注入带假时钟的 limiter(AUTH-07 限流窗口推进) */
   loginRateLimiter?: LoginRateLimiter;
+  /**
+   * V1.3 P6:入口限额。默认放到 env 允许的最宽档 —— 这份 helper 被几十个既有测试文件共用,
+   * 它们测的是业务流程而不是限流;P6 专项用例按需传窄值(或自己的假时钟),不改动别人的语义。
+   */
+  abuse?: AbuseProtectionConfig;
 }): Promise<TestContext> {
   const prisma = await createPrismaClient(TEST_DATABASE_URL);
   const logger = createLogger("silent");
@@ -66,13 +73,34 @@ export async function setupTestContext(options?: {
   // 默认注入"永不启动"的 Browser Manager stub(provider 测试才需要真实/可操纵实例)
   const browserManager = options?.browserManager ?? createFakeManager(new FakeDriver());
 
-  const { app, scheduler, recovery, sse, events, cancellation, executor, attachmentStore, authSessions } = createApp({
+  const {
+    app,
+    scheduler,
+    recovery,
+    sse,
+    events,
+    cancellation,
+    executor,
+    attachmentStore,
+    authSessions,
+    rateLimits,
+  } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
     browserManager,
     auth: options?.auth ?? null,
     loginRateLimiter: options?.loginRateLimiter,
+    abuse: {
+      anonymousIpLimitPerHour: options?.abuse?.anonymousIpLimitPerHour ?? 10_000,
+      anonymousIpLimitPerDay: options?.abuse?.anonymousIpLimitPerDay ?? 100_000,
+      chatSubmitRatePerMinute: options?.abuse?.chatSubmitRatePerMinute ?? 10_000,
+      userMaxPendingRequests: options?.abuse?.userMaxPendingRequests ?? 100,
+      // 在飞上限保持生产默认 1:单 worker 下这是事实,不是可调参数
+      userMaxActiveRequests: options?.abuse?.userMaxActiveRequests ?? 1,
+      globalMaxPendingRequests: options?.abuse?.globalMaxPendingRequests ?? 10_000,
+      clock: options?.abuse?.clock,
+    },
     geminiAdapter: options?.geminiAdapter ?? new FakeGeminiAdapter(),
     scheduler: {
       scanIntervalMs: options?.scheduler?.scanIntervalMs ?? 25,
@@ -99,6 +127,7 @@ export async function setupTestContext(options?: {
     executor,
     attachmentStore,
     authSessions,
+    rateLimits,
 
     sseConnections(): number {
       return sse.connectionCount();
@@ -123,6 +152,9 @@ export async function setupTestContext(options?: {
 
     async close(): Promise<void> {
       scheduler.stop();
+      // P6:两个入口限流器的 sweep 定时器与生产停机同一批撤掉
+      rateLimits.anonymousIp.dispose();
+      rateLimits.chatSubmit.dispose();
       // 附件容器的孤儿清理是定时任务:不撤掉,它可能在 $disconnect 之后才发起查询
       attachmentStore.dispose();
       // SSE 是长连接:不先结束掉,server.close() 会永远不回调

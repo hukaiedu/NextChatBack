@@ -2,9 +2,13 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import { z } from "zod";
 
-import { AppError } from "../../common/errors/app-error.js";
+import { AppError, RetryAfterError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
-import { AUTH_COOKIE_NAME } from "../../config/constants.js";
+import {
+  AUTH_COOKIE_NAME,
+  UNKNOWN_RATE_LIMIT_KEY,
+} from "../../config/constants.js";
+import { AnonymousIpRateLimiter } from "./auth.anonymous-rate-limit.js";
 import {
   clearSessionCookie,
   extractCookie,
@@ -16,6 +20,14 @@ import type { AuthService } from "./auth.service.js";
 import type { AuthDeps, UserType } from "./auth.types.js";
 
 const loginSchema = z.object({ password: z.string().min(1) });
+
+/** 两个入口限流器都由装配层(app.ts)创建:控制器不负责窗口与淘汰策略 */
+export interface AuthRateLimiters {
+  /** 测试接缝:带假时钟的登录限流器;省略 = 新建 */
+  loginLimiter?: LoginRateLimiter;
+  /** P6 §14:匿名身份新建的 IP 双窗口限流器 */
+  anonymousIpLimiter: AnonymousIpRateLimiter;
+}
 
 function toIso(at: Date): string {
   return at.toISOString();
@@ -39,7 +51,7 @@ export function createAuthRouter(
   auth: AuthDeps | null,
   authService: AuthService | null,
   sessions: AuthSessionService | null,
-  limiterOverride?: LoginRateLimiter,
+  rateLimits: AuthRateLimiters,
 ): Router {
   const router = Router();
 
@@ -63,7 +75,8 @@ export function createAuthRouter(
   }
 
   // limiter 可注入(测试假时钟);生产默认新建
-  const limiter = limiterOverride ?? new LoginRateLimiter();
+  const limiter = rateLimits.loginLimiter ?? new LoginRateLimiter();
+  const anonymousIpLimiter = rateLimits.anonymousIpLimiter;
 
   router.post("/login", (req, res, next) => {
     // 400 不计入限流;只有「密码错误」注册失败
@@ -71,12 +84,15 @@ export function createAuthRouter(
     if (!input.success) {
       return next(new AppError(ErrorCodes.VALIDATION_ERROR, "login: invalid body"));
     }
-    const key = req.ip ?? "unknown";
+    const key = req.ip ?? UNKNOWN_RATE_LIMIT_KEY;
     const status = limiter.check(key);
     if (status.blocked) {
-      res.setHeader("Retry-After", String(status.retryAfterSeconds));
       return next(
-        new AppError(ErrorCodes.AUTH_RATE_LIMITED, "Too many failed login attempts"),
+        new RetryAfterError(
+          ErrorCodes.AUTH_RATE_LIMITED,
+          "Too many failed login attempts",
+          status.retryAfterSeconds,
+        ),
       );
     }
     if (!authService.verifyPassword(input.data.password)) {
@@ -115,20 +131,47 @@ export function createAuthRouter(
 
   router.post("/anonymous", (req, res, next) => {
     // §8:位于业务 requireAuth 之前;无/无效 Cookie → 事务内建 User+Session 并 Set-Cookie
+    const token = extractCookie(req.headers.cookie, AUTH_COOKIE_NAME);
+    // P6 §21:IP 额度必须排在「既有 Session 能否复用」之后 —— 有效身份反复调用
+    // /anonymous 是正常行为,不该被算成刷身份;只有会真的新建 User 的那一次才消耗额度。
     void sessions
-      .bootstrapAnonymous(extractCookie(req.headers.cookie, AUTH_COOKIE_NAME))
-      .then((result) => {
-        if (result.kind === "disabled") {
+      .resolve(token, { touch: false })
+      .then((resolved) => {
+        if (resolved.kind === "active") {
+          res.status(200).json({
+            data: sessionPayload(true, resolved.expiresAt, resolved.auth.userType),
+          });
+          return undefined;
+        }
+        if (resolved.kind === "disabled") {
           // Cookie 指向 DISABLED User:不新建、不覆盖 Cookie,交回客户端 401
           return next(
             new AppError(ErrorCodes.AUTH_REQUIRED, "Session belongs to a disabled user"),
           );
         }
-        if (result.kind === "created") {
-          setSessionCookie(res, req, auth, result.rawToken, auth.ttlAnonymousSeconds);
+        const decision = anonymousIpLimiter.consume(req.ip ?? UNKNOWN_RATE_LIMIT_KEY);
+        if (decision.limited) {
+          // §18:沿用既有 Auth 限流的 Public 契约(AUTH_RATE_LIMITED + 429 + Retry-After)
+          return next(
+            new RetryAfterError(
+              ErrorCodes.AUTH_RATE_LIMITED,
+              "Too many anonymous identities created",
+              decision.retryAfterSeconds,
+            ),
+          );
         }
-        res.status(200).json({
-          data: sessionPayload(true, result.expiresAt, result.auth.userType),
+        return sessions.bootstrapAnonymous(token).then((result) => {
+          if (result.kind === "disabled") {
+            return next(
+              new AppError(ErrorCodes.AUTH_REQUIRED, "Session belongs to a disabled user"),
+            );
+          }
+          if (result.kind === "created") {
+            setSessionCookie(res, req, auth, result.rawToken, auth.ttlAnonymousSeconds);
+          }
+          res.status(200).json({
+            data: sessionPayload(true, result.expiresAt, result.auth.userType),
+          });
         });
       })
       .catch(next);

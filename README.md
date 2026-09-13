@@ -34,6 +34,8 @@
 - [24. 相关仓库](#24-相关仓库)
 - [25. V1.1 模型选择（Gemini Web）](#25-v11-模型选择gemini-web)
 - [26. 访问鉴权（SEC-1）](#26-访问鉴权sec-1)
+- [27. 防刷限额与排队容量（V1.3 P6）](#27-防刷限额与排队容量v13-p6)
+- [28. 公平调度（V1.3 P7）](#28-公平调度v13-p7)
 
 ---
 
@@ -462,7 +464,7 @@ PENDING
 
 - **全局最多 1 个 Gemini Request 在执行。** 不同 Conversation 都可以创建各自的 PENDING Request，但 Scheduler 全局串行、逐个认领。
 - 默认每 `1000ms` 扫描一次 PENDING；新 Request 提交后会 `notify()` 立即触发一轮，不必等下个周期。
-- 认领顺序：多个 PENDING 按 `createdAt` 从老到新。
+- 认领顺序：**按用户轮转（round-robin）、用户内 FIFO**，不再全局 `createdAt` 排队；详见 [§28](#28-公平调度v13-p7)。
 - **Provider 门禁**（认领之前）：`READY` → 放行执行；`LOGIN_REQUIRED` → 认领后直接判 `FAILED`（`PROVIDER_LOGIN_REQUIRED`），从不触碰 Adapter；启动 / 导航等瞬时故障 → 本轮 `WAIT`，Request 留在 PENDING 等待，不失败。
 - 执行期间 `BrowserManager` 置 `BUSY`。
 - **只有确认 Gemini 已停止生成（`confirmIdle`）或 Browser 已安全重置后，才释放全局 slot：**
@@ -546,6 +548,8 @@ HTTP 状态码小结：
 | `CANCELLING` | → `FAILED` | `SERVER_RESTARTED_DURING_CANCELLING` |
 
 - **`PROCESSING` / `CANCELLING` / 带附件的 `PENDING` 不自动重发 Gemini Prompt**：无法确认上一进程是否已把 Prompt 提交给 Gemini（带附件 PENDING 则是附件字节已随进程丢失），强制 `FAILED` 且禁止重发，由用户显式重新发送。
+- **纯文本 `PENDING` 的重启恢复是公平的**：首轮扫描按 `(createdAt, id)` 读回全部遗留行，按归属用户分桶后继续轮转，既不退化成「按用户成块」的 FIFO，也不依赖上一进程的内存队列（见 [§28](#28-公平调度v13-p7)）。
+- **遗留积压超过 P6 限额时照旧全部恢复**：限额只控制「新进入系统的工作」，恢复路径不删任何历史行、也不会因超限启动失败；超限期间新的提交继续被拒。
 - 对应 Assistant Message 一律 → `FAILED`（不落 `CANCELLED`，否则会出现 Request `FAILED` + Assistant `CANCELLED` 的非法配对）。
 - 恢复末尾跑一次 Request ↔ Assistant 配对检查：**只发现、只记 error，不修复**（自动修复会销毁事故现场）。
 
@@ -781,9 +785,11 @@ SQLite + 单 Browser Profile + 全局单飞，决定只能单实例运行。同�
 
 > **NOT READY FOR PUBLIC INTERNET RELEASE（V1.3-C）**
 >
-> V1.3-C 只完成了前端 Admin Console、Public 错误契约收口与旧运维 alias 退役，**没有**改变发布闸门。以下能力仍未实现，上线公网多用户前必须逐项补齐：P6 Rate Limit / Quota、Scheduler 公平性（单用户无法长期独占全局单飞）、Browser Pool 与多 Gemini Account、邮箱 / OAuth 注册与账号体系。
+> V1.3-C 只完成了前端 Admin Console、Public 错误契约收口与旧运维 alias 退役，**没有**改变发布闸门。
 >
-> `AUTH_ENABLED=false` 只允许 loopback 监听（`HOST` 非 loopback 时启动即 fail-fast），它是单机兼容模式，不是隐式管理员模式。
+> V1.3 P6/P7 已完成 **技术闸门**：入口防刷限额、排队容量与 Scheduler 公平性（见 [§27](#27-防刷限额与排队容量v13-p6)、[§28](#28-公平调度v13-p7)），即「单用户无法长期独占全局单飞」这一条已成立。这不等于可公网发布。上线前仍必须逐项补齐 / 复核：反向代理 + HTTPS + `AUTH_TRUST_PROXY` 的**真实部署环境**确认（含 IP 分键与限流粒度验收）、Browser Pool 与多 Gemini Account、邮箱 / OAuth 注册与账号体系。
+>
+> `AUTH_ENABLED=false` 只允许 loopback 监听（`HOST` 非 loopback 时启动即 fail-fast），它是单机兼容模式，不是隐式管理员模式，也不豁免任何限额（兼容模式的身份 `COMPAT_USER_ID` 同样进限流桶）。
 
 ---
 
@@ -897,3 +903,75 @@ V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择�
 **Session 吊销**：无状态设计无在线撤销列表；**全局吊销 = 轮换 `AUTH_SESSION_SECRET` 并重启**（全部旧 Cookie 立即失效）；单设备登出 = `POST /api/auth/logout`。
 
 **前端配套**（front 仓库）：AuthGate 登录门 + `useAuthStore` 状态机（probe/login/logout/markUnauthorized）；业务 API 401 `AUTH_REQUIRED` 与 SSE 探测失效统一触发全局登出并关闭活跃 SSE（后端 Request 不取消，继续执行落库）。
+
+---
+
+## 27. 防刷限额与排队容量（V1.3 P6）
+
+入口防刷与排队容量共 6 个可调上限，由 `src/common/rate-limit/rate-limiter.ts`（fixed window）与 `src/modules/request/request.admission.ts`（配额）实现，Prisma Schema 零改动：
+
+| 变量 | 默认 | 范围 | 单位 | 保护什么 | 键 |
+| --- | --- | --- | --- | --- | --- |
+| `AUTH_ANONYMOUS_IP_LIMIT_PER_HOUR` | `20` | 1~10000 | 个 / 小时 | 同一 IP 每小时能**新建**多少个匿名身份 | `req.ip` |
+| `AUTH_ANONYMOUS_IP_LIMIT_PER_DAY` | `100` | 1~100000 | 个 / 24 小时 | 同上，日窗口 | `req.ip` |
+| `CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE` | `30` | 1~10000 | 条 / 分钟 | 单个用户提交消息的频率 | `userId` |
+| `USER_MAX_PENDING_REQUESTS` | `5` | 1~100 | 条 | 单个用户在库里排队（`PENDING`）的请求长度 | `userId` |
+| `USER_MAX_ACTIVE_REQUESTS` | `1` | 1~10 | 条 | 单个用户同时在飞（`PROCESSING`/`CANCELLING`）的条数 | `userId` |
+| `GLOBAL_MAX_PENDING_REQUESTS` | `100` | 1~10000 | 条 | 整个队列的容量（所有用户共享） | 全局 |
+
+**两类限额的语义刻意不同，不要混为一谈：**
+
+- **频率（前 3 项）= 纯内存状态**。计数活在进程内，**服务重启窗口即清零**；`CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE` 按 HTTP 提交计数，因此同 Key 的合法幂等重放也算一次提交（它就是一次真实提交）。匿名身份的**幂等调用不消耗建号额度**：带着有效 Cookie 反复 `POST /api/auth/anonymous` 一次都不计数，只有「真的会新建 User」的那一次才计。
+- **容量（后 3 项）= 数据库真相**。三档都是直接 `count` 数据库，只是读的状态不同：两档 `PENDING` 上限在**准入**时复核，`USER_MAX_ACTIVE_REQUESTS` 在**派发**时复核。因此**重启后残留的排队请求仍然占额度**；内存队列长度绝不参与配额判定（它可能因重启或竞态与库不同步）。配额复核与创建事务在准入锁内成对出现，并发提交不会超发。
+
+**`USER_MAX_ACTIVE_REQUESTS` 由数据库强制**：派发一个用户的新请求要同时满足「本进程该用户在飞数 < 上限」与「数据库里该用户 `PROCESSING`+`CANCELLING` 条数 < 上限」，后者才是最终真相（重启遗留、外部写入的在飞行只有它看得见）。一个 Gemini 页面 = 一个 worker，调大它不会提高并行度；它只挡住**这一个用户**，别人的排队照常轮转。在飞计数查询失败时本轮 drain 直接退出并记内部错误——绝不把「查不到」当成「没有」而放行。
+
+**拒绝次序（冻结）**：`content` trim → owned Conversation 归属 gate → 提交频率 → 附件复核 + 请求指纹 → 幂等预检 → 排队配额 → 附件占位 → 事务 → `notify`。含义：跨用户越权与不存在的响应不被限流副作用遮蔽（404 优先）；超频请求不替攻击者付附件的账——base64 解码、字节分配与 sha256 都随 payload 体积线性增长，因此排在两道准入之后；队列已满也不能让合法幂等重放失败。被拒的请求**零副作用**——不落 Message/Request、不占附件 slot、不进队列。唯一排在前面的拒绝是请求体超过 body limit 的 `413`，那是 transport 层行为。
+
+**HTTP 状态与 `Retry-After`（Public 面）**：
+
+| 场景 | HTTP | Public code | 内部码（只进日志 / Admin 面） | `Retry-After` |
+| --- | --- | --- | --- | --- |
+| 匿名建号撞 IP 窗口 | `429` | `AUTH_RATE_LIMITED` | 同 | 两窗口中剩余更久的那个（向上取整秒） |
+| 提交频率超限 | `429` | `SERVICE_BUSY` | `CHAT_SUBMIT_RATE_LIMITED` | 分钟窗口剩余秒数 |
+| 单用户排队已满 | `429` | `SERVICE_BUSY` | `USER_PENDING_LIMIT_REACHED` | 固定 `3` |
+| 全局队列容量已满 | `503` | `SERVICE_BUSY` | `GLOBAL_QUEUE_FULL` | 固定 `3` |
+
+Public 信封只有 `code` / `message` / `requestId` 三个键：**看不到内部码、看不到是哪一档限额、看不到当前计数或别人的积压**。排队满用固定退避秒数是因为「下一条什么时候执行」取决于 Provider，无法精确预测，因此同一错误固定同一策略。
+
+**部署边界（必须读）**：
+
+- 限额是**单进程**的。多实例部署（或多 Backend 共用一个前端）会让每台各自计数，实际放行量 = 配置值 × 实例数；本轮**没有**分布式限流、没有跨实例协调，也没有 Redis / 外部队列。要跨实例一致必须自行引入共享存储或边缘防护。
+- 频率 limiter 只保护「提交」这一侧；真正的执行吞吐仍由 [§12](#12-scheduler全局单飞) 的全局单飞天然封顶。
+- `req.ip` 完全交给 Express 的 `trust proxy` 规则推导（`AUTH_TRUST_PROXY`），**Backend 不自己解析 `X-Forwarded-For`**。默认 `false` 时键 = socket 地址：伪造 XFF 换不到新桶，但所有经同一本地反代进来的流量会共享一个桶。公网部署且前置代理会覆盖/清洗 XFF 时，才评估置 `true`，并且必须按真实拓扑重测分键与伪造两项行为（含 IPv6 与 `::ffff:` 映射形态，以 Express 实际给出的 `req.ip` 为准，禁止手写 canonicalizer）。
+- IP 维度限额会影响**共享 NAT / 机房出口**：`20/hour`、`100/day` 是 abuse protection 默认值，不是给单个用户的配额；按真实用户分布调整，不要往回收得像 `2/hour`。
+- **两层限额是互补的**：丢掉 Cookie 新建匿名身份确实会换一个提交频率桶（新 `userId`），但换不掉 per-IP 建号额度，所以「刷满 → 换身份 → 继续刷」的收益被封顶在「这个 IP 能建出多少身份」。
+- 日志侧：limiter 与准入路径本身不写任何日志，一次拒绝只经统一错误出口留下一条 `request failed`（`requestId` / 内部 `code` / `statusCode` / `message`），其中不含 IP、raw token、password、消息正文；本轮**没有**新增 `scope` / `current` / `limit` 这类计数日志。IP 只作为内存 Map 的键存在，不落库、不进日志。
+
+> 队列状态与配额**没有任何 HTTP 查询接口**（Admin 面也没有）：唯一观察窗是测试里的 `scheduler.snapshotQueue()`。
+
+---
+
+## 28. 公平调度（V1.3 P7）
+
+架构前提与 V1 一致且未变：**一个 Node 进程、一个 Scheduler、一个 Playwright Persistent Context、一个 Gemini Page、一把 ProviderPageLock，同一时刻仍只有一条 Request 真正在执行。** P7 改的是「单 worker 排给谁」，不是并行度。
+
+```text
+Request 到达
+  ↓ DB 准入（P6 容量复核，超了就地拒绝）
+PENDING 落库（owner 只认 Conversation.userId）
+  ↓ notify(userId) / 每轮对账
+perUser[userId]（用户内 FIFO）
+  ↓
+readyUsers（每个用户至多一项，轮转序）
+  ↓ 取队首用户的一条
+current（同一时刻至多一条）
+  ↓
+ProviderPageLock → Gemini
+```
+
+- **公平队列是派生状态，不是真相**：每轮推进都会用 `PENDING + 归属用户` 的数据库查询对账（追加式播种 + 遗忘已非 `PENDING` 的项），内存丢项能被重新播种，库里已终态的项在出队时跳过。公平性因此**不依赖上一进程的内存**：重启既不丢排队，也不会退化成「按用户成块」的 FIFO。
+- **用户内 FIFO、用户间 round-robin**：一个用户在轮转队列里至多占一个位置；某用户连发 10 条，最后到的别的用户也排在它的第 2 条之前。晚到的用户排在**本用户**剩余请求之前。
+- **跳过而非丢弃**：候选出队时若该用户的**数据库**在飞条数已达上限（每个 ready 用户每轮至多查一次，绝不原地自旋）、或归属解析不到（owner 只可能是库损坏），本条留在库里不动，drain 继续推进且**不空转**（取不到候选就退出这一轮，等下一次 notify/扫描），绝不把无主请求塞进共享桶。在飞计数查询本身失败时同样退出本轮并记内部错误：宁可不推进，也不能按「0」放行。
+- **不自动重试**：一条 Request 至多 claim 一次；崩溃、超时、Provider 判死都收敛到既有终态，其余用户的排队照常推进。
+- 与 P6 的分工：容量准入读**数据库 PENDING**，公平调度的**次序**读内存队列、**在飞条数**读数据库，两者职责不重叠；`snapshotQueue()` 只用于测试断言，不暴露成接口（[§17](#17-api-概览) 无新增端点）。队列里的 `userId` 只是分桶用的路由元数据，所有权与授权判据始终是 `Request → Conversation.userId`。

@@ -1,6 +1,9 @@
 import type { Logger } from "pino";
 
 import { createLogger } from "../src/common/logger/logger.js";
+import { FixedWindowRateLimiter } from "../src/common/rate-limit/rate-limiter.js";
+import type { MessageAdmission } from "../src/modules/message/message.service.js";
+import { RequestAdmissionGate } from "../src/modules/request/request.admission.js";
 import { BrowserManager } from "../src/providers/gemini/browser-manager.js";
 import { GeminiSessionChecker } from "../src/providers/gemini/session-checker.js";
 import type { GeminiSessionState } from "../src/providers/gemini/session-checker.js";
@@ -1001,6 +1004,18 @@ export interface FakeAdapterBehavior {
   listModelsDelayMs?: number;
   /** ensureModel 抛出的错误(signal 未 abort 时);省略 = 从目录查 label 直接返回 */
   ensureModelError?: unknown;
+}
+
+/**
+ * 直连 MessageService 的用例(不经 createApp)所用的准入替身:限额宽到不构成断言干扰。
+ * P6 的限流语义由 v13p6 专项矩阵覆盖 —— 那里按需传窄限额与假时钟。
+ */
+export function createTestAdmission(): MessageAdmission {
+  return {
+    submitLimiter: new FixedWindowRateLimiter({ windowMs: 60_000, max: 10_000 }),
+    gate: new RequestAdmissionGate(),
+    limits: { userMaxPending: 100, globalMaxPending: 10_000 },
+  };
 }
 
 export const FAKE_CONVERSATION_URL = "https://gemini.google.com/app/f1e2d3c4b5a69788";

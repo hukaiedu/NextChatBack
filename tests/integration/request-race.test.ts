@@ -9,6 +9,7 @@ import { MessageService } from "../../src/modules/message/message.service.js";
 import { AttachmentStore } from "../../src/modules/request/request.attachment-store.js";
 import { RequestRepository } from "../../src/modules/request/request.repository.js";
 import { attachment, decodedBytes, expectAttachmentInvariant } from "../attachment-fixtures.js";
+import { createTestAdmission } from "../fakes.js";
 import { setupTestContext } from "../helpers.js";
 import type { TestContext } from "../helpers.js";
 
@@ -51,7 +52,15 @@ beforeEach(async () => {
     // 用例里手动驱动断言,不需要后台定时器插手
     sweepIntervalMs: 3_600_000,
   });
-  service = new MessageService(prisma, messageRepo, new ConversationRepository(), requestRepo, store);
+  service = new MessageService(
+    prisma,
+    messageRepo,
+    new ConversationRepository(),
+    requestRepo,
+    store,
+    undefined,
+    createTestAdmission(),
+  );
 });
 
 afterEach(async () => {

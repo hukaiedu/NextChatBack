@@ -4,7 +4,20 @@ import type { Express } from "express";
 import { errorHandler } from "./common/middleware/error-handler.js";
 import { requestId } from "./common/middleware/request-id.js";
 import type { Logger } from "./common/logger/logger.js";
-import { ATTACHMENT_BODY_LIMIT, HEALTH_PATH, MESSAGES_BODY_PATH } from "./config/constants.js";
+import { FixedWindowRateLimiter } from "./common/rate-limit/rate-limiter.js";
+import type { RateLimitClock } from "./common/rate-limit/rate-limiter.js";
+import {
+  ANONYMOUS_IP_LIMIT_PER_DAY,
+  ANONYMOUS_IP_LIMIT_PER_HOUR,
+  ATTACHMENT_BODY_LIMIT,
+  CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE,
+  CHAT_SUBMIT_RATE_WINDOW_MS,
+  GLOBAL_MAX_PENDING_REQUESTS,
+  HEALTH_PATH,
+  MESSAGES_BODY_PATH,
+  USER_MAX_ACTIVE_REQUESTS,
+  USER_MAX_PENDING_REQUESTS,
+} from "./config/constants.js";
 import type { PrismaClient } from "./generated/prisma/client.js";
 import { createHealthRouter } from "./modules/health/health.controller.js";
 import type { HealthProbe } from "./modules/health/health.controller.js";
@@ -24,8 +37,10 @@ import { ConversationService } from "./modules/conversation/conversation.service
 import { createConversationRouter } from "./modules/conversation/conversation.controller.js";
 import { MessageRepository } from "./modules/message/message.repository.js";
 import { MessageService } from "./modules/message/message.service.js";
+import type { MessageAdmission } from "./modules/message/message.service.js";
 import { createMessageRouter } from "./modules/message/message.controller.js";
 import { AttachmentStore } from "./modules/request/request.attachment-store.js";
+import { RequestAdmissionGate } from "./modules/request/request.admission.js";
 import { RequestRepository } from "./modules/request/request.repository.js";
 import { RequestService } from "./modules/request/request.service.js";
 import { RequestScheduler } from "./modules/request/request.scheduler.js";
@@ -48,6 +63,7 @@ import { AuthService } from "./modules/auth/auth.service.js";
 import { AuthSessionRepository } from "./modules/auth/auth.session.repository.js";
 import { AuthSessionService } from "./modules/auth/auth.session.service.js";
 import { AuthUserRepository } from "./modules/auth/auth.user.repository.js";
+import { AnonymousIpRateLimiter } from "./modules/auth/auth.anonymous-rate-limit.js";
 import type { LoginRateLimiter } from "./modules/auth/auth.rate-limit.js";
 import type { AuthDeps } from "./modules/auth/auth.types.js";
 
@@ -65,6 +81,24 @@ export interface StreamingConfig {
   updateIntervalMs?: number;
 }
 
+/**
+ * V1.3 P6:入口防刷与队列容量的 runtime config(env → 这里,绝不进数据库)。
+ *
+ * 每一项省略即回落到 constants 里的 canonical 默认值,所以生产(只有 main.ts 一个装配点)
+ * 必须逐项显式传 env,而测试可以只写它关心的那一档。
+ * clock 是测试接缝:三个 limiter 共用同一个可推进假时钟,用来验证窗口边界(不进生产路径)。
+ */
+export interface AbuseProtectionConfig {
+  anonymousIpLimitPerHour?: number;
+  anonymousIpLimitPerDay?: number;
+  chatSubmitRatePerMinute?: number;
+  userMaxPendingRequests?: number;
+  /** 单用户在飞上限(§57 + FIX-01A):按数据库 PROCESSING/CANCELLING 条数强制;单 worker 下不提高并行度 */
+  userMaxActiveRequests?: number;
+  globalMaxPendingRequests?: number;
+  clock?: RateLimitClock;
+}
+
 export interface AppDeps {
   prisma: PrismaClient;
   probeDatabase: HealthProbe;
@@ -75,6 +109,8 @@ export interface AppDeps {
   auth: AuthDeps | null;
   /** SEC-1 测试接缝:注入带假时钟的 limiter 验证限流窗口(AUTH-07);生产不传 */
   loginRateLimiter?: LoginRateLimiter;
+  /** V1.3 P6:防刷与排队容量;省略 = 全部走 canonical 默认值 */
+  abuse?: AbuseProtectionConfig;
   scheduler?: SchedulerConfig;
   streaming?: StreamingConfig;
 }
@@ -99,6 +135,14 @@ export interface AppHandle {
   attachmentStore: AttachmentStore;
   /** V1.3-B2:DB Session 运行时(enabled 时非 null;main.ts 用它启动 sweep) */
   authSessions: AuthSessionService | null;
+  /**
+   * V1.3 P6:两个入口限流器。停机必须 dispose(撤 sweep 定时器),
+   * 测试用它们断言窗口边界与「过期键被清理、键数不无限增长」。
+   */
+  rateLimits: {
+    anonymousIp: AnonymousIpRateLimiter;
+    chatSubmit: FixedWindowRateLimiter;
+  };
 }
 
 export function createApp(deps: AppDeps): AppHandle {
@@ -148,13 +192,34 @@ export function createApp(deps: AppDeps): AppHandle {
           }),
         }
       : null;
+  // V1.3 P6 §11/§82:三道入口准入的 runtime 组件(env → config → 这里;测试可注入假时钟)
+  const abuse = deps.abuse ?? {};
+  const anonymousIpLimiter = new AnonymousIpRateLimiter({
+    perHour: abuse.anonymousIpLimitPerHour ?? ANONYMOUS_IP_LIMIT_PER_HOUR,
+    perDay: abuse.anonymousIpLimitPerDay ?? ANONYMOUS_IP_LIMIT_PER_DAY,
+    clock: abuse.clock,
+  });
+  const chatSubmitLimiter = new FixedWindowRateLimiter({
+    windowMs: CHAT_SUBMIT_RATE_WINDOW_MS,
+    max: abuse.chatSubmitRatePerMinute ?? CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE,
+    clock: abuse.clock,
+  });
+  const admission: MessageAdmission = {
+    submitLimiter: chatSubmitLimiter,
+    gate: new RequestAdmissionGate(),
+    limits: {
+      userMaxPending: abuse.userMaxPendingRequests ?? USER_MAX_PENDING_REQUESTS,
+      globalMaxPending: abuse.globalMaxPendingRequests ?? GLOBAL_MAX_PENDING_REQUESTS,
+    },
+  };
+
   app.use(
     "/api/auth",
     createAuthRouter(
       deps.auth ?? null,
       authRuntime?.service ?? null,
       authRuntime?.sessions ?? null,
-      deps.loginRateLimiter,
+      { loginLimiter: deps.loginRateLimiter, anonymousIpLimiter },
     ),
   );
   if (authRuntime !== null && deps.auth !== null) {
@@ -193,7 +258,10 @@ export function createApp(deps: AppDeps): AppHandle {
     requestRepo,
     attachmentStore,
     // scheduler 在下方创建:回调只在新 Request 提交后才运行,前向引用安全
-    { onRequestCreated: () => scheduler.notify() },
+    {
+      onRequestCreated: (requestId, userId) => scheduler.notify(requestId, userId),
+    },
+    admission,
   );
   const geminiStreamService = new GeminiStreamService({
     messageService,
@@ -226,6 +294,8 @@ export function createApp(deps: AppDeps): AppHandle {
     options: {
       scanIntervalMs: deps.scheduler?.scanIntervalMs,
       executionTimeoutMs: deps.scheduler?.executionTimeoutMs,
+      // P7 §57:公平调度的单用户在飞上限(env USER_MAX_ACTIVE_REQUESTS)
+      userMaxActiveRequests: abuse.userMaxActiveRequests,
     },
   });
   const recovery = new RequestRecovery({
@@ -290,5 +360,6 @@ export function createApp(deps: AppDeps): AppHandle {
     executor: geminiPromptService,
     attachmentStore,
     authSessions: authRuntime?.sessions ?? null,
+    rateLimits: { anonymousIp: anonymousIpLimiter, chatSubmit: chatSubmitLimiter },
   };
 }

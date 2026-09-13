@@ -27,7 +27,7 @@ async function main(): Promise<void> {
     logger,
   });
 
-  const { app, scheduler, recovery, sse, attachmentStore, authSessions } = createApp({
+  const { app, scheduler, recovery, sse, attachmentStore, authSessions, rateLimits } = createApp({
     prisma,
     probeDatabase: () => probeDatabase(prisma),
     logger,
@@ -39,6 +39,15 @@ async function main(): Promise<void> {
       options: { responseTimeoutMs: env.GEMINI_RESPONSE_TIMEOUT_MS },
       logger,
     }),
+    // V1.3 P6:限额全部来自 env(§13:不进数据库);生产逐项显式传,不依赖代码默认值
+    abuse: {
+      anonymousIpLimitPerHour: env.AUTH_ANONYMOUS_IP_LIMIT_PER_HOUR,
+      anonymousIpLimitPerDay: env.AUTH_ANONYMOUS_IP_LIMIT_PER_DAY,
+      chatSubmitRatePerMinute: env.CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE,
+      userMaxPendingRequests: env.USER_MAX_PENDING_REQUESTS,
+      userMaxActiveRequests: env.USER_MAX_ACTIVE_REQUESTS,
+      globalMaxPendingRequests: env.GLOBAL_MAX_PENDING_REQUESTS,
+    },
     // 启动顺序由下面三行掌握:恢复 → 开始扫描 → 才开始接受 HTTP 请求
     scheduler: {
       executionTimeoutMs: env.REQUEST_EXECUTION_TIMEOUT_MS,
@@ -78,14 +87,17 @@ async function main(): Promise<void> {
     }
     shuttingDown = true;
     logger.info({ signal }, "shutting down");
-    // 关闭顺序:停 Scheduler → 撤定时器 → 释放附件 → 结束 SSE → 停止 HTTP → 关 Browser → disconnect Prisma
+    // 关闭顺序:停 Scheduler → 撤定时器 → 释放限流器 → 释放附件 → 结束 SSE → 停止 HTTP → 关 Browser → disconnect Prisma
     // Scheduler 先停:在飞的 Request 留在 PROCESSING/CANCELLING,由下次启动的 recovery 落 FAILED
-    // AttachmentStore/Session sweep 紧随其后:撤掉定时器,否则它们可能在 $disconnect 之后才发起查询
+    // AttachmentStore/Session sweep/限流器 sweep 紧随其后:撤掉定时器,否则它们可能在 $disconnect 之后才发起查询
     scheduler.stop();
     if (authSweepTimer !== null) {
       clearInterval(authSweepTimer);
       authSweepTimer = null;
     }
+    // P6 §20:两个入口限流器只有内存态 + unref 的 sweep 定时器;停机撤掉,不留下还在跑的窗口清理
+    rateLimits.anonymousIp.dispose();
+    rateLimits.chatSubmit.dispose();
     attachmentStore.dispose();
     sse.closeAll();
     // 空闲 keep-alive 立即断开(in-flight 请求不受影响),否则 server.close() 要等客户端保活超时

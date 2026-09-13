@@ -2,11 +2,10 @@ import {
   AUTH_LOGIN_MAX_ATTEMPTS,
   AUTH_LOGIN_WINDOW_MS,
 } from "../../config/constants.js";
+import { FixedWindowRateLimiter } from "../../common/rate-limit/rate-limiter.js";
+import type { RateLimitClock } from "../../common/rate-limit/rate-limiter.js";
 
-export interface RateLimitClock {
-  /** unix 毫秒;测试注入固定时钟 */
-  now(): number;
-}
+export type { RateLimitClock };
 
 export interface LoginRateLimiterOptions {
   clock?: RateLimitClock;
@@ -18,90 +17,48 @@ export type LoginRateLimitStatus =
   | { blocked: false }
   | { blocked: true; retryAfterSeconds: number };
 
-interface Bucket {
-  count: number;
-  /** 窗口起点 = 该窗口内第一次失败时刻(fixed window) */
-  windowStart: number;
-}
-
-const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
-const DEFAULT_MAX_KEYS = 10_000;
-
 /**
  * 登录限流:仅 login;进程内 fixed window,无 Redis(§十)。
  * 键 = req.ip(trust proxy=false 时即 socket remoteAddress)。
  * 只计失败(400 不计数),成功清零;窗口过期后下一次失败重新起算。
+ *
+ * V1.3 P6 §19:窗口/淘汰/sweep 的实现已收进 FixedWindowRateLimiter —— 匿名身份新建与
+ * 消息提交频率要用同一套语义,这里只保留 login 特有的「只计失败 + 成功清零」。
  */
 export class LoginRateLimiter {
-  private readonly buckets = new Map<string, Bucket>();
-  private readonly clock: RateLimitClock;
-  private readonly sweepIntervalMs: number;
-  private readonly maxKeys: number;
-  private sweepTimer: NodeJS.Timeout | undefined;
+  private readonly limiter: FixedWindowRateLimiter;
 
   constructor(options: LoginRateLimiterOptions = {}) {
-    this.clock = options.clock ?? { now: () => Date.now() };
-    this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
-    this.maxKeys = options.maxKeys ?? DEFAULT_MAX_KEYS;
-    this.sweepTimer = setInterval(() => {
-      this.sweep();
-    }, this.sweepIntervalMs);
-    this.sweepTimer.unref();
+    this.limiter = new FixedWindowRateLimiter({
+      windowMs: AUTH_LOGIN_WINDOW_MS,
+      max: AUTH_LOGIN_MAX_ATTEMPTS,
+      clock: options.clock,
+      sweepIntervalMs: options.sweepIntervalMs,
+      maxKeys: options.maxKeys,
+    });
   }
 
   check(key: string): LoginRateLimitStatus {
-    const bucket = this.buckets.get(key);
-    if (!bucket) return { blocked: false };
-    const elapsed = this.clock.now() - bucket.windowStart;
-    if (elapsed >= AUTH_LOGIN_WINDOW_MS) return { blocked: false };
-    if (bucket.count < AUTH_LOGIN_MAX_ATTEMPTS) return { blocked: false };
-    return {
-      blocked: true,
-      retryAfterSeconds: Math.max(
-        1,
-        Math.ceil((AUTH_LOGIN_WINDOW_MS - elapsed) / 1000),
-      ),
-    };
+    const decision = this.limiter.peek(key);
+    return decision.limited
+      ? { blocked: true, retryAfterSeconds: decision.retryAfterSeconds }
+      : { blocked: false };
   }
 
   registerFailure(key: string): void {
-    const now = this.clock.now();
-    const existing = this.buckets.get(key);
-    if (existing && now - existing.windowStart < AUTH_LOGIN_WINDOW_MS) {
-      existing.count += 1;
-      return;
-    }
-    this.evictOldestForInsert();
-    this.buckets.set(key, { count: 1, windowStart: now });
+    this.limiter.register(key);
   }
 
   /** 登录成功后清零 */
   reset(key: string): void {
-    this.buckets.delete(key);
+    this.limiter.reset(key);
   }
 
   sweep(): void {
-    const now = this.clock.now();
-    for (const [key, bucket] of this.buckets) {
-      if (now - bucket.windowStart >= AUTH_LOGIN_WINDOW_MS) {
-        this.buckets.delete(key);
-      }
-    }
+    this.limiter.sweep();
   }
 
   dispose(): void {
-    if (this.sweepTimer !== undefined) {
-      clearInterval(this.sweepTimer);
-      this.sweepTimer = undefined;
-    }
-  }
-
-  /** 超过键上限时按插入序淘汰最旧键,保证新键可插入 */
-  private evictOldestForInsert(): void {
-    while (this.buckets.size >= this.maxKeys) {
-      const oldest = this.buckets.keys().next();
-      if (oldest.done) break;
-      this.buckets.delete(oldest.value);
-    }
+    this.limiter.dispose();
   }
 }

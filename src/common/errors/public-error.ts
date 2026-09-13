@@ -60,11 +60,15 @@ const PASSTHROUGH: ReadonlySet<string> = new Set<string>([
   PublicErrorCodes.REQUEST_TIMEOUT,
 ]);
 
-/** 容量 / 排队 / Provider 未就绪类:入口拒绝,用户稍后重试即可(§15;P6 配额尚未实现,不在此创建 quota 语义) */
+/** 容量 / 排队 / Provider 未就绪类:入口拒绝,用户稍后重试即可(§15;V1.3 P6 的三个限额码同归此类) */
 const SERVICE_BUSY: ReadonlySet<string> = new Set<string>([
   ErrorCodes.PROVIDER_RATE_LIMITED,
   ErrorCodes.ATTACHMENT_CAPACITY_EXCEEDED,
   ErrorCodes.PROVIDER_NOT_READY,
+  // P6:频率超限与两级排队容量都只表达「现在不行,稍后再来」,不外泄是哪一档限额
+  ErrorCodes.CHAT_SUBMIT_RATE_LIMITED,
+  ErrorCodes.USER_PENDING_LIMIT_REACHED,
+  ErrorCodes.GLOBAL_QUEUE_FULL,
 ]);
 
 /** 超时类:同类统一(§16) */

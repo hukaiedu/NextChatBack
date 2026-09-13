@@ -2,7 +2,7 @@ import type { ErrorRequestHandler } from "express";
 
 import { REQUEST_ID_HEADER } from "../../config/constants.js";
 import { Prisma } from "../../generated/prisma/client.js";
-import { AppError } from "../errors/app-error.js";
+import { AppError, RetryAfterError } from "../errors/app-error.js";
 import { ErrorCodes } from "../errors/error-codes.js";
 import { errorExposureOf } from "../errors/error-exposure.js";
 import { toPublicError } from "../errors/public-error.js";
@@ -88,6 +88,11 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
     const exposed = toPublicError(appErr.code, appErr.message, {
       internal: errorExposureOf(res) === "admin",
     });
+
+    // P6 §78:限额类拒绝固定携带退避秒数,其余错误不写这个头
+    if (appErr instanceof RetryAfterError) {
+      res.setHeader("Retry-After", String(appErr.retryAfterSeconds));
+    }
 
     res.status(appErr.statusCode).json({
       error: {

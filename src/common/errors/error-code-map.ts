@@ -68,6 +68,12 @@ export const ERROR_CODE_HTTP_STATUS = {
   // V1.3-B3-3:非 ADMIN 访问运维 API
   AUTH_FORBIDDEN: 403,
 
+  // V1.3 P6:三个入口限额的 Public 码都是 SERVICE_BUSY,HTTP 状态仍由这里的原始码决定
+  // (提交太快 / 该用户排队已满 = 用户侧可退避重试 → 429;全库满 = 服务容量 → 503)
+  CHAT_SUBMIT_RATE_LIMITED: 429,
+  USER_PENDING_LIMIT_REACHED: 429,
+  GLOBAL_QUEUE_FULL: 503,
+
   // 兜底
   // V1.3-B3-2 Public 通用码:HTTP 状态取自**原始码**(见 public-error.ts),这三项只是
   // 直接以通用码抛错时的兜底值。Record<ErrorCode, number> 要求全覆盖,故必须登记。

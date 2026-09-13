@@ -2,6 +2,14 @@ import { z } from "zod";
 
 import { AppError } from "../common/errors/app-error.js";
 import { ErrorCodes } from "../common/errors/error-codes.js";
+import {
+  ANONYMOUS_IP_LIMIT_PER_DAY,
+  ANONYMOUS_IP_LIMIT_PER_HOUR,
+  CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE,
+  GLOBAL_MAX_PENDING_REQUESTS,
+  USER_MAX_ACTIVE_REQUESTS,
+  USER_MAX_PENDING_REQUESTS,
+} from "./constants.js";
 
 /** "true"/"false" → boolean(z.coerce.boolean 会把 "false" 变 true,不能用) */
 const boolFromString = z
@@ -79,6 +87,50 @@ const envSchema = z.object({
   AUTH_TRUST_PROXY: boolFromString.default("false"),
   /** 逗号分隔 Origin 白名单;每项规范化校验见 auth 模块(§7.2) */
   AUTH_ALLOWED_ORIGINS: z.string().optional(),
+
+  // —— V1.3 P6 入口防刷与队列容量(§11/§12:全部 env → runtime config,不进数据库)——
+  /** 同一 IP 每小时可新建多少个匿名身份(见任务书 Abuse-01:保护「创建」而非「使用」) */
+  AUTH_ANONYMOUS_IP_LIMIT_PER_HOUR: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10_000)
+    .default(ANONYMOUS_IP_LIMIT_PER_HOUR),
+  /** 同一 IP 每 24 小时可新建多少个匿名身份(小时窗口防快刷,天窗口防慢刷) */
+  AUTH_ANONYMOUS_IP_LIMIT_PER_DAY: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100_000)
+    .default(ANONYMOUS_IP_LIMIT_PER_DAY),
+  /** 单用户每分钟提交消息上限(键 = req.auth.userId,ADMIN/COMPAT 不绕过) */
+  CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10_000)
+    .default(CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE),
+  /** 单用户 PENDING Request 上限(队列容量,不是频率) */
+  USER_MAX_PENDING_REQUESTS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(USER_MAX_PENDING_REQUESTS),
+  /** 单用户在飞(PROCESSING/CANCELLING)上限;单 worker 下 >1 不提高并行度,只是未来边界 */
+  USER_MAX_ACTIVE_REQUESTS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .default(USER_MAX_ACTIVE_REQUESTS),
+  /** 全库 PENDING Request 上限(服务容量) */
+  GLOBAL_MAX_PENDING_REQUESTS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10_000)
+    .default(GLOBAL_MAX_PENDING_REQUESTS),
 }).refine(
   // 跨字段约束(ISSUE-03):执行 watchdog 上限必须严格高于单次 Prompt 响应上限,
   // 否则 watchdog 可能早于 Adapter 自身超时触发,把正常执行误判成 TIMEOUT。

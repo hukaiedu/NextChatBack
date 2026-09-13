@@ -202,22 +202,29 @@ describe("API 附件契约(§18)", () => {
     expect(ctx.attachmentStore.stats()).toEqual({ slotCount: 0, liveBytes: 0, slots: [] });
   });
 
-  it("ATT-API-11 附件校验排在会话存在性之前:不存在的会话 + 非法类型 → 415 而非 404", async () => {
+  it("ATT-API-11 会话归属排在附件复核之前:不存在的会话 + 非法类型 → 404,同一条非法附件落在自己会话才 415(FIX-01B §15)", async () => {
+    const illegal: RawAttachment = {
+      name: "a.bin",
+      mimeType: "application/octet-stream",
+      data: `data:application/octet-stream;base64,${Buffer.from([1, 2, 3, 4]).toString("base64")}`,
+    };
     const res = await sendMessage(
       ctx.baseUrl,
       "00000000-0000-0000-0000-000000000000",
       "看图",
       "api-11",
       undefined,
-      [
-        {
-          name: "a.bin",
-          mimeType: "application/octet-stream",
-          data: `data:application/octet-stream;base64,${Buffer.from([1, 2, 3, 4]).toString("base64")}`,
-        },
-      ],
+      [illegal],
     );
-    expect(res.status).toBe(415);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as ErrorBody).error.code).toBe("CONVERSATION_NOT_FOUND");
+    // 归属判据在前 = 昂贵路径一次都不走:没有 slot、没有 Request / Message
+    await expectRejectedCleanly("api-11");
+
+    // 415 的既有契约没有丢:同一份非法附件、合法归属,依旧被类型判据拒掉
+    const own = await send([illegal], "api-11b");
+    expect(own.status).toBe(415);
+    expect((own.body as ErrorBody).error.code).toBe("UNSUPPORTED_ATTACHMENT_TYPE");
   });
 
   it("ATT-API-12 响应与数据库都只有份数,没有附件字节", async () => {

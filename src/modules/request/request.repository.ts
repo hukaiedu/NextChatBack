@@ -55,6 +55,35 @@ export class RequestRepository {
     return found !== null;
   }
 
+  /**
+   * P6 §30:该用户的 PENDING 排队数。Request 本身不存 owner,归属沿 conversation.userId
+   * 关系过滤下推到数据库一次完成 —— 配额判定只认这一个来源,内存队列不参与。
+   */
+  async countPendingForUser(db: DbClient, userId: string): Promise<number> {
+    return db.modelRequest.count({
+      where: { status: "PENDING", conversation: { userId } },
+    });
+  }
+
+  /** P6 §30/§34:全库 PENDING 排队数(服务容量,与用户无关) */
+  async countPending(db: DbClient): Promise<number> {
+    return db.modelRequest.count({ where: { status: "PENDING" } });
+  }
+
+  /**
+   * FIX-01A §4:单用户**在飞**条数(`PROCESSING` + `CANCELLING`,即 Active 的冻结定义)。
+   *
+   * owner 只从 `Conversation.userId` 取(§51:不给 ModelRequest 加 userId 列),
+   * 状态集合复用 `REQUEST_IN_FLIGHT_STATUSES` —— 取消 / 恢复路径认的是同一份定义,
+   * 不能在这里另写一组字面量。查询失败**必须一路抛出**:它是准入判据,
+   * 「查不到」当成「没有」就是放行(§9)。
+   */
+  async countActiveForUser(db: DbClient, userId: string): Promise<number> {
+    return db.modelRequest.count({
+      where: { status: { in: [...REQUEST_IN_FLIGHT_STATUSES] }, conversation: { userId } },
+    });
+  }
+
   /** PAG-2:Message 分页 Request 摘要 —— 只按页内 assistantMessageId 查,空入参不发 IN [] */
   async findByAssistantIds(db: DbClient, ids: string[]): Promise<ModelRequestModel[]> {
     if (ids.length === 0) {
@@ -99,12 +128,30 @@ export class RequestRepository {
     return active;
   }
 
-  /** 最老的 PENDING(Scheduler 取任务;id 兜底同毫秒稳定排序) */
-  async findFirstPending(db: DbClient): Promise<ModelRequestModel | null> {
-    return db.modelRequest.findFirst({
+  /**
+   * P7 §53:公平调度用的「PENDING + 数据库归属」查询(替代旧的全局 FIFO 取一条)。
+   *
+   * - owner 只从 `conversation.userId` 取:那是唯一所有权真相(§51),内存里那份 userId
+   *   只是分桶用的路由元数据。
+   * - 排序 (createdAt, id) 全局最老在前:调用方按用户分桶后即得到
+   *   「每用户 FIFO + 用户按各自最老等待排队」的确定性起点(§54)。
+   * - 刻意不加 take:重启前遗留的排队必须全部恢复,新入队的量由 P6 准入上限管住。
+   * - `userId` 允许 null:owner 缺失只可能是库损坏,调用方必须按内部一致性错误跳过,
+   *   绝不可塞进共享桶(§56)。
+   */
+  async findPendingWithOwner(
+    db: DbClient,
+  ): Promise<Array<{ id: string; userId: string | null; createdAt: Date }>> {
+    const rows = await db.modelRequest.findMany({
       where: { status: "PENDING" },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, createdAt: true, conversation: { select: { userId: true } } },
     });
+    return rows.map((row) => ({
+      id: row.id,
+      userId: row.conversation?.userId ?? null,
+      createdAt: row.createdAt,
+    }));
   }
 
   /** §12.1 启动恢复扫描:上一进程遗留的全部 PROCESSING|CANCELLING(老到新,顺序稳定) */
