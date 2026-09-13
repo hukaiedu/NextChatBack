@@ -27,6 +27,10 @@ const PASSTHROUGH: readonly string[] = [
   ErrorCodes.AUTH_RATE_LIMITED,
   ErrorCodes.AUTH_CSRF_REJECTED,
   ErrorCodes.AUTH_FORBIDDEN,
+  // V1.4 U2:注册/账号面板需要逐字分支的三项业务码(design §15),一律 Public 透传
+  ErrorCodes.AUTH_USERNAME_ALREADY_TAKEN,
+  ErrorCodes.AUTH_IDENTITY_NOT_ANONYMOUS,
+  ErrorCodes.AUTH_USER_DISABLED,
 ];
 
 const BUSY: readonly string[] = [

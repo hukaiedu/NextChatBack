@@ -23,6 +23,8 @@ const PASSWORD = "test-password-123";
 /** 与 auth.v13b2 同量级的短 TTL:本文件不测续期,只需要 Session 在用例内有效 */
 const TTL_ANON = 7200;
 const TTL_ADMIN = 3600;
+/** V1.4 U2:REGISTERED 走自己那一档,与 anon/admin 取不同值 */
+const TTL_REGISTERED = 86_400;
 const TOUCH_INTERVAL = 60;
 
 function authDeps(overrides: Partial<AuthDeps> = {}): AuthDeps {
@@ -30,6 +32,7 @@ function authDeps(overrides: Partial<AuthDeps> = {}): AuthDeps {
     enabled: true,
     password: PASSWORD,
     ttlAnonymousSeconds: TTL_ANON,
+    ttlRegisteredSeconds: TTL_REGISTERED,
     ttlAdminSeconds: TTL_ADMIN,
     touchIntervalSeconds: TOUCH_INTERVAL,
     allowedOrigins: null,

@@ -69,6 +69,7 @@ export function buildAuthDeps(env: Env): AuthDeps {
     enabled: env.AUTH_ENABLED,
     password: env.AUTH_PASSWORD ?? "",
     ttlAnonymousSeconds: env.AUTH_SESSION_TTL_ANONYMOUS_SECONDS,
+    ttlRegisteredSeconds: env.AUTH_SESSION_TTL_REGISTERED_SECONDS,
     ttlAdminSeconds: env.AUTH_SESSION_TTL_SECONDS,
     touchIntervalSeconds: env.AUTH_SESSION_TOUCH_INTERVAL_SECONDS,
     allowedOrigins: parseAllowedOrigins(

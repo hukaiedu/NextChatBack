@@ -2,15 +2,20 @@ import { AppError } from "../../common/errors/app-error.js";
 import { ErrorCodes } from "../../common/errors/error-codes.js";
 import type { Logger } from "../../common/logger/logger.js";
 import { ADMIN_USER_ID } from "../../config/constants.js";
+import { uniqueViolationInfo } from "../../common/utils/prisma-error.js";
 import type { PrismaClient } from "../../generated/prisma/client.js";
+import { DUMMY_PASSWORD_HASH, verifyPassword } from "./auth.password.js";
 import type { AuthSessionRepository } from "./auth.session.repository.js";
 import { generateSessionToken, hashSessionToken, parseSessionToken } from "./auth.session-token.js";
 import type { AuthUserRepository } from "./auth.user.repository.js";
+import { normalizeUsername } from "./auth.username.js";
 import type { AuthContext, UserType } from "./auth.types.js";
 
 export interface AuthSessionServiceOptions {
-  /** V1.3 §15:ANONYMOUS(及 V1.4 前的 REGISTERED)Session TTL 秒 */
+  /** V1.3 §15:ANONYMOUS Session TTL 秒 */
   ttlAnonymousSeconds: number;
+  /** V1.4 U2 §7:REGISTERED Session TTL 秒(独立于匿名与 ADMIN) */
+  ttlRegisteredSeconds: number;
   /** V1.3 §15:ADMIN Session TTL 秒 */
   ttlAdminSeconds: number;
   /** V1.3 §13:lastSeenAt 距 now 超过该间隔才写库续期并重发 Set-Cookie */
@@ -35,20 +40,40 @@ export type ActiveSession = {
   expiresAt: Date;
   ttlSeconds: number;
   renewed: boolean;
+  /** Auth DTO 用(V1.4 U2 §39);ANONYMOUS / ADMIN 恒为 null */
+  username: string | null;
 };
 
 export type SessionResolution = { kind: "none" } | { kind: "disabled" } | ActiveSession;
 
 export type AnonymousBootstrap =
-  | { kind: "created"; rawToken: string; expiresAt: Date; auth: AuthContext }
-  | { kind: "existing"; expiresAt: Date; auth: AuthContext }
+  | { kind: "created"; rawToken: string; expiresAt: Date; auth: AuthContext; username: null }
+  | {
+      kind: "existing";
+      expiresAt: Date;
+      auth: AuthContext;
+      username: string | null;
+    }
   | { kind: "disabled" };
 
 export interface IssuedSession {
   rawToken: string;
   expiresAt: Date;
   auth: AuthContext;
+  /** V1.4 U2 §37:成功响应的第四个键来源;ADMIN / 匿名恒为 null */
+  username: string | null;
 }
+
+/**
+ * Registered 登录的结论(V1.4 U2 §48-§54)。
+ *
+ * 刻意不抛 AppError 表达「凭据不对」:limiter 的「只计失败」记账按 IP 键,而 IP 只有
+ * controller 知道。service 给出判别结果,controller 负责 `registerFailure` / `reset` 与出口码。
+ * 竞态失败(`deleteById` 命中 0)则是另一回事:它不是凭据违规,直接以 AUTH_REQUIRED 上抛。
+ */
+export type RegisteredLoginResult =
+  | { kind: "invalid-credentials" }
+  | { kind: "issued"; session: IssuedSession };
 
 /**
  * DB-backed Session 运行时(V1.3 §7/§13/§14)。
@@ -111,6 +136,7 @@ export class AuthSessionService {
       expiresAt: session.expiresAt,
       ttlSeconds,
       renewed: false,
+      username: session.user.username,
     };
     if (!settings.touch) {
       return current;
@@ -136,7 +162,12 @@ export class AuthSessionService {
   async bootstrapAnonymous(rawTokenFromCookie: string | undefined): Promise<AnonymousBootstrap> {
     const resolved = await this.resolve(rawTokenFromCookie, { touch: false });
     if (resolved.kind === "active") {
-      return { kind: "existing", expiresAt: resolved.expiresAt, auth: resolved.auth };
+      return {
+        kind: "existing",
+        expiresAt: resolved.expiresAt,
+        auth: resolved.auth,
+        username: resolved.username,
+      };
     }
     if (resolved.kind === "disabled") {
       return { kind: "disabled" };
@@ -158,6 +189,7 @@ export class AuthSessionService {
       kind: "created",
       rawToken,
       expiresAt,
+      username: null,
       auth: { userId: user.id, userType: "ANONYMOUS", sessionId: session.id, expiresAt },
     };
   }
@@ -184,6 +216,12 @@ export class AuthSessionService {
     const userType = admin.type as UserType;
     const expiresAt = new Date(now.getTime() + this.ttlForType(userType) * 1000);
     const session = await this.prisma.$transaction(async (tx) => {
+      // 与 V1.4 的差异是刻意的:这里对「解析不到旧 Session」选择跳过删除继续创建 —— 那是
+      // V1.3 已冻结的 ADMIN 登录契约(有测试覆盖:旧 Cookie 指向已消失的 Session 时登录仍要成功)。
+      // 而 register / loginRegistered / changePassword 要求首写删除**必须命中 1**,否则
+      // AUTH_REQUIRED 并回滚(见 registerAnonymous 的注释与 design §31.5/§31.6)。
+      // 不要因为「看起来该统一」把任一侧改成另一侧:一边放宽会打开 fixation 窗口,
+      // 一边收紧会打破 V1.3 契约。
       if (previous !== null) {
         const existing = await this.sessions.findByTokenHash(tx, hashSessionToken(previous));
         if (existing !== null) {
@@ -200,6 +238,7 @@ export class AuthSessionService {
     return {
       rawToken,
       expiresAt,
+      username: admin.username,
       auth: { userId: admin.id, userType, sessionId: session.id, expiresAt },
     };
   }
@@ -226,6 +265,230 @@ export class AuthSessionService {
     return count;
   }
 
+  /**
+   * V1.4 U2 §30:注册前的用户名预查。
+   *
+   * 它**不是**唯一性的裁决者 —— 那是 DB 的 `UNIQUE(usernameNormalized)`(§35)。
+   * 存在的唯一理由:让「用户名已被占用」在花钱跑 Argon2id 之前返回(design §21 CPU 保护)。
+   */
+  async isUsernameTaken(username: string): Promise<boolean> {
+    const user = await this.users.findByNormalizedUsername(
+      this.prisma,
+      normalizeUsername(username),
+    );
+    return user !== null;
+  }
+
+  /**
+   * V1.4 U2 §23/§45:匿名 User 原地升级为 REGISTERED(design R7)。
+   *
+   * 写入顺序是 design §31 冻结的唯一顺序:
+   *   1. FIRST WRITE = 精准删除本次呈现的匿名 Session,且必须命中 1
+   *      命中 0 ⇒ 身份已被并发替换 → AUTH_REQUIRED + 回滚(绝不留下新 Session)
+   *   2. CAS 升级 User(WHERE id AND type='ANONYMOUS'):count=0 ⇒ AUTH_IDENTITY_NOT_ANONYMOUS + 回滚
+   *      —— 第 1 步的删除随之恢复,所以双提交不会出现「两个都成功」
+   *   3. 用**同一个 userId** 建 REGISTERED Session
+   * 事务里没有任何 Conversation/Message/ModelRequest 语句 ⇒ 零业务数据搬迁是结构性的(§47)。
+   */
+  async registerAnonymous(input: {
+    userId: string;
+    sessionId: string;
+    username: string;
+    passwordHash: string;
+  }): Promise<IssuedSession> {
+    const usernameNormalized = normalizeUsername(input.username);
+    const rawToken = generateSessionToken();
+    const now = this.clock();
+    const expiresAt = new Date(now.getTime() + this.options.ttlRegisteredSeconds * 1000);
+    try {
+      const session = await this.prisma.$transaction(async (tx) => {
+        if ((await this.sessions.deleteById(tx, input.sessionId)) !== 1) {
+          throw new AppError(
+            ErrorCodes.AUTH_REQUIRED,
+            "Presented session is no longer active",
+          );
+        }
+        const upgraded = await this.users.upgradeAnonymousToRegistered(tx, {
+          userId: input.userId,
+          username: input.username,
+          usernameNormalized,
+          passwordHash: input.passwordHash,
+        });
+        if (upgraded !== 1) {
+          throw new AppError(
+            ErrorCodes.AUTH_IDENTITY_NOT_ANONYMOUS,
+            "Identity is no longer anonymous",
+          );
+        }
+        return this.sessions.create(tx, {
+          userId: input.userId,
+          tokenHash: hashSessionToken(rawToken),
+          expiresAt,
+          lastSeenAt: now,
+        });
+      });
+      return {
+        rawToken,
+        expiresAt,
+        username: input.username,
+        auth: {
+          userId: input.userId,
+          userType: "REGISTERED",
+          sessionId: session.id,
+          expiresAt,
+        },
+      };
+    } catch (err) {
+      // §46:同名并发由 DB UNIQUE 裁决。判定只看 uniqueViolationInfo 的结构化 fields,
+      // 绝不解析 error.message 或索引名 —— Prisma 对文案不承诺兼容(见 prisma-error.ts 的 I1.1 教训)。
+      // 两个 AppError(401/409)不是 P2002,fields 恒为空 ⇒ 原样上抛。
+      if (uniqueViolationInfo(err).fields.includes("usernameNormalized")) {
+        throw new AppError(
+          ErrorCodes.AUTH_USERNAME_ALREADY_TAKEN,
+          "Username is already taken",
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * V1.4 U2 §48-§56:用户名 + 口令登录已有 REGISTERED 账号。
+   *
+   * 顺序刻意为「先验证凭据,再动 Session」(§51):否则任何拿到他人 Cookie 的人都能用
+   * 错误密码把当前用户踢下线。凭据不成立时不做任何写入,也不区分「用户不存在 / 密码错 /
+   * 已禁用 / 不是注册用户」—— 四种情况一律同一结论,同一 CPU 形状(§49 + design §6)。
+   *
+   * 凭据成立后按 §31 走事务:解析到 active presented Session 就必须删掉它且命中 1,
+   * 命中 0 ⇒ AUTH_REQUIRED + 回滚(并发重复提交的败方不会留下第二条 Session);
+   * 完全没有 presented Session 的访客不执行删除,直接 create(§52)。
+   * 只删呈现的那一条 ⇒ 同账号其它设备的 Session 仍然有效(§56),绝不 deleteAllForUser。
+   */
+  async loginRegistered(input: {
+    username: string;
+    password: string;
+    presentedToken: string | undefined;
+  }): Promise<RegisteredLoginResult> {
+    const user = await this.users.findByNormalizedUsername(
+      this.prisma,
+      normalizeUsername(input.username),
+    );
+    // user 为 null 或 passwordHash 为 null(匿名/管理员行)时打 DUMMY:同等 CPU,不泄漏该用户名是否存在
+    const ok = await verifyPassword(user?.passwordHash ?? DUMMY_PASSWORD_HASH, input.password);
+    if (!ok) {
+      return { kind: "invalid-credentials" };
+    }
+    // 刻意排在 verify 之后:提前返回就省掉了那次散列,CPU 差本身会变成枚举信号
+    if (user === null || user.type !== "REGISTERED" || user.status !== "ACTIVE") {
+      return { kind: "invalid-credentials" };
+    }
+    const presented = await this.resolve(input.presentedToken, { touch: false });
+    const presentedSessionId = presented.kind === "active" ? presented.auth.sessionId : null;
+    const rawToken = generateSessionToken();
+    const now = this.clock();
+    const expiresAt = new Date(now.getTime() + this.options.ttlRegisteredSeconds * 1000);
+    const session = await this.prisma.$transaction(async (tx) => {
+      if (presentedSessionId !== null) {
+        if ((await this.sessions.deleteById(tx, presentedSessionId)) !== 1) {
+          throw new AppError(
+            ErrorCodes.AUTH_REQUIRED,
+            "Presented session is no longer active",
+          );
+        }
+      }
+      return this.sessions.create(tx, {
+        userId: user.id,
+        tokenHash: hashSessionToken(rawToken),
+        expiresAt,
+        lastSeenAt: now,
+      });
+    });
+    return {
+      kind: "issued",
+      session: {
+        rawToken,
+        expiresAt,
+        username: user.username,
+        auth: {
+          userId: user.id,
+          userType: "REGISTERED",
+          sessionId: session.id,
+          expiresAt,
+        },
+      },
+    };
+  }
+
+  /**
+   * V1.4 U2 §60:改密前校验当前口令。与登录共用同一条 verify 原语,不触碰任何 Session。
+   *
+   * 身份不是 REGISTERED 或摘要缺失时返回 false(而不是抛新码):这条路径的 Public 出口
+   * 本来就是 AUTH_INVALID_CREDENTIALS,多一个码只是多一个可观测的分支。
+   */
+  async verifyRegisteredPassword(userId: string, currentPassword: string): Promise<boolean> {
+    const user = await this.users.findById(this.prisma, userId);
+    if (user === null || user.type !== "REGISTERED" || user.passwordHash === null) {
+      return false;
+    }
+    return verifyPassword(user.passwordHash, currentPassword);
+  }
+
+  /**
+   * V1.4 U2 §61:写入新摘要并收敛 Session 集合。
+   *
+   * 事务顺序同样服从 §31:首写删除当前 Session 必须命中 1;随后
+   * `updatePasswordHash`(WHERE 带 type='REGISTERED' ⇒ 命中 0 说明身份已不是注册用户,
+   * 属数据异常 → INTERNAL_ERROR 回滚,绝不静默写匿名行)、
+   * `deleteAllForUser`(此刻当前条已删 ⇒ 语义恰为「其它设备全部退出」)、再为当前设备建新 Session。
+   * 全事务不碰 User 的其它列,也不碰任何业务表(§62)。
+   */
+  async changeRegisteredPassword(input: {
+    userId: string;
+    sessionId: string;
+    passwordHash: string;
+  }): Promise<IssuedSession> {
+    const rawToken = generateSessionToken();
+    const now = this.clock();
+    const expiresAt = new Date(now.getTime() + this.options.ttlRegisteredSeconds * 1000);
+    const { session, username } = await this.prisma.$transaction(async (tx) => {
+      if ((await this.sessions.deleteById(tx, input.sessionId)) !== 1) {
+        throw new AppError(ErrorCodes.AUTH_REQUIRED, "Presented session is no longer active");
+      }
+      if (
+        (await this.users.updatePasswordHash(tx, {
+          userId: input.userId,
+          passwordHash: input.passwordHash,
+        })) !== 1
+      ) {
+        throw new AppError(
+          ErrorCodes.INTERNAL_ERROR,
+          "password change target is not an active REGISTERED user",
+        );
+      }
+      await this.sessions.deleteAllForUser(tx, input.userId);
+      const created = await this.sessions.create(tx, {
+        userId: input.userId,
+        tokenHash: hashSessionToken(rawToken),
+        expiresAt,
+        lastSeenAt: now,
+      });
+      // 事务内回读展示名:保证响应里的 username 与刚提交的状态一致,而不是请求前的快照
+      const updated = await this.users.findById(tx, input.userId);
+      return { session: created, username: updated?.username ?? null };
+    });
+    return {
+      rawToken,
+      expiresAt,
+      username,
+      auth: {
+        userId: input.userId,
+        userType: "REGISTERED",
+        sessionId: session.id,
+        expiresAt,
+      },
+    };
+  }
+
   /** V1.3 §19:只删已过期 Session(不碰 User);失败只记日志,绝不打崩服务 */
   async sweepExpired(): Promise<number> {
     try {
@@ -240,9 +503,29 @@ export class AuthSessionService {
     }
   }
 
-  /** §15:ADMIN 用 ADMIN TTL;ANONYMOUS / REGISTERED(暂)用匿名 TTL */
+  /**
+   * §15 + V1.4 U2 §26:三种身份各自的 TTL **穷举**。
+   *
+   * 不再写成 `ADMIN ? admin : anonymous` —— 那种写法会把 REGISTERED 静默归到匿名档,
+   * 而注册账号的存活时长是需要独立运维的业务契约(design §7)。
+   * default 分支由 `never` 收窄:将来新增 UserType 而忘记登记 TTL 时会在这里编译失败/运行期 fail-fast。
+   */
   private ttlForType(userType: UserType): number {
-    return userType === "ADMIN" ? this.options.ttlAdminSeconds : this.options.ttlAnonymousSeconds;
+    switch (userType) {
+      case "ADMIN":
+        return this.options.ttlAdminSeconds;
+      case "REGISTERED":
+        return this.options.ttlRegisteredSeconds;
+      case "ANONYMOUS":
+        return this.options.ttlAnonymousSeconds;
+      default: {
+        const unreachable: never = userType;
+        throw new AppError(
+          ErrorCodes.INTERNAL_ERROR,
+          `no session TTL configured for user type ${String(unreachable)}`,
+        );
+      }
+    }
   }
 
   /** CAS 续期;失败 fail-open(§14):本次请求照常继续,只是不重发 Set-Cookie */

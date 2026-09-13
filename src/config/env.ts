@@ -7,6 +7,9 @@ import {
   ANONYMOUS_IP_LIMIT_PER_HOUR,
   CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE,
   GLOBAL_MAX_PENDING_REQUESTS,
+  REGISTER_IP_MAX_ATTEMPTS,
+  SESSION_TTL_REGISTERED_SECONDS,
+  USER_LOGIN_IP_MAX_FAILURES,
   USER_MAX_ACTIVE_REQUESTS,
   USER_MAX_PENDING_REQUESTS,
 } from "./constants.js";
@@ -77,6 +80,17 @@ const envSchema = z.object({
     .min(300)
     .max(2_592_000)
     .default(2_592_000),
+  /**
+   * V1.4 U2 §7:REGISTERED Session TTL(秒),默认 30 天。
+   * 独立 env 是刻意的:数值与匿名相同不代表可以复用同一份契约 —— 身份等级不同,
+   * 运维必须能单独收紧注册账号而不影响匿名访客。
+   */
+  AUTH_SESSION_TTL_REGISTERED_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .max(2_592_000)
+    .default(SESSION_TTL_REGISTERED_SECONDS),
   /** V1.3 §13:滑动续期阈值(秒):lastSeenAt 超过该间隔才写库续期并重发 Set-Cookie */
   AUTH_SESSION_TOUCH_INTERVAL_SECONDS: z.coerce
     .number()
@@ -103,6 +117,27 @@ const envSchema = z.object({
     .min(1)
     .max(100_000)
     .default(ANONYMOUS_IP_LIMIT_PER_DAY),
+  /**
+   * V1.4 U2:同一 IP 在 Registered 登录窗口内允许多少次**失败**(用户名不存在与密码错误都算)。
+   * 窗口长度沿用常量体系(USER_LOGIN_IP_MAX_FAILURES 对应的 USER_LOGIN_IP_WINDOW_MS);
+   * 与 ADMIN 登录 limiter 是独立的两个桶。
+   */
+  AUTH_USER_LOGIN_IP_MAX_FAILURES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000)
+    .default(USER_LOGIN_IP_MAX_FAILURES),
+  /**
+   * V1.4 U2:同一 IP 在注册窗口内允许多少次**尝试**。
+   * 刻意计尝试而非失败:Argon2id 的 CPU 成本在进入请求时就已产生,与结果无关。
+   */
+  AUTH_REGISTER_IP_MAX_ATTEMPTS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000)
+    .default(REGISTER_IP_MAX_ATTEMPTS),
   /** 单用户每分钟提交消息上限(键 = req.auth.userId,ADMIN/COMPAT 不绕过) */
   CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE: z.coerce
     .number()
@@ -132,6 +167,15 @@ const envSchema = z.object({
     .max(10_000)
     .default(GLOBAL_MAX_PENDING_REQUESTS),
 }).refine(
+  // V1.4 U2 §25:续期阈值必须严格小于 REGISTERED TTL,否则「滑动续期」名存实亡 ——
+  // 需要写库续期的时点永远落在 Session 已过期之后,注册账号反而会比匿名更早掉线。
+  (env) => env.AUTH_SESSION_TTL_REGISTERED_SECONDS > env.AUTH_SESSION_TOUCH_INTERVAL_SECONDS,
+  {
+    message:
+      "AUTH_SESSION_TTL_REGISTERED_SECONDS must be greater than AUTH_SESSION_TOUCH_INTERVAL_SECONDS",
+    path: ["AUTH_SESSION_TTL_REGISTERED_SECONDS"],
+  },
+).refine(
   // 跨字段约束(ISSUE-03):执行 watchdog 上限必须严格高于单次 Prompt 响应上限,
   // 否则 watchdog 可能早于 Adapter 自身超时触发,把正常执行误判成 TIMEOUT。
   // 相等同样非法(必须严格大于)。违反 → VALIDATION_ERROR + fail-fast。

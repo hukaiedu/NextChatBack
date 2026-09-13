@@ -45,6 +45,11 @@ const PASSTHROUGH: ReadonlySet<string> = new Set<string>([
   ErrorCodes.AUTH_RATE_LIMITED,
   ErrorCodes.AUTH_CSRF_REJECTED,
   ErrorCodes.AUTH_FORBIDDEN,
+  // V1.4 U2:注册/账号面板必须能逐字分支的三项业务码。折进 CHAT_FAILED 会让
+  // 「用户名不可用」和「服务出错」长成同一个响应,那是产品缺陷而不是收敛(design §15)
+  ErrorCodes.AUTH_USERNAME_ALREADY_TAKEN,
+  ErrorCodes.AUTH_IDENTITY_NOT_ANONYMOUS,
+  ErrorCodes.AUTH_USER_DISABLED,
   ErrorCodes.CONVERSATION_NOT_FOUND,
   ErrorCodes.CONVERSATION_DELETED,
   ErrorCodes.CONVERSATION_ARCHIVED,

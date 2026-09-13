@@ -1,9 +1,22 @@
 import type { DbClient } from "../../database/prisma.js";
 import type { SessionGetPayload } from "../../generated/prisma/models.js";
 
-/** 有效性判定需要连带 User 的 type/status;原始 token 永不落库(V1.3 §7) */
+/**
+ * 有效性判定需要连带 User 的 type/status;DTO 还需要 username(V1.4 U2 §39)。
+ *
+ * 这份投影是 Auth DTO 的唯一字段来源,因此**刻意不含** `passwordHash` 与
+ * `usernameNormalized`:凭据读取走 AuthUserRepository.findByNormalizedUsername 单独一条路径,
+ * 两者不共用投影 ⇒ 摘要串没有机会漂到响应面。
+ */
+const SESSION_USER_SELECT = {
+  id: true,
+  type: true,
+  status: true,
+  username: true,
+} as const;
+
 export type SessionWithUser = SessionGetPayload<{
-  include: { user: { select: { id: true; type: true; status: true } } };
+  include: { user: { select: typeof SESSION_USER_SELECT } };
 }>;
 
 export interface SessionCreateData {
@@ -29,14 +42,14 @@ export class AuthSessionRepository {
   async findByTokenHash(db: DbClient, tokenHash: string): Promise<SessionWithUser | null> {
     return db.session.findUnique({
       where: { tokenHash },
-      include: { user: { select: { id: true, type: true, status: true } } },
+      include: { user: { select: SESSION_USER_SELECT } },
     });
   }
 
   async create(db: DbClient, data: SessionCreateData): Promise<SessionWithUser> {
     return db.session.create({
       data,
-      include: { user: { select: { id: true, type: true, status: true } } },
+      include: { user: { select: SESSION_USER_SELECT } },
     });
   }
 

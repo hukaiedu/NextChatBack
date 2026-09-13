@@ -67,6 +67,10 @@ export const ERROR_CODE_HTTP_STATUS = {
   AUTH_CSRF_REJECTED: 403,
   // V1.3-B3-3:非 ADMIN 访问运维 API
   AUTH_FORBIDDEN: 403,
+  // V1.4 U2:用户名占用 / 身份不能注册 = 与当前状态冲突 → 409;禁用身份 → 401(design §15)
+  AUTH_USERNAME_ALREADY_TAKEN: 409,
+  AUTH_IDENTITY_NOT_ANONYMOUS: 409,
+  AUTH_USER_DISABLED: 401,
 
   // V1.3 P6:三个入口限额的 Public 码都是 SERVICE_BUSY,HTTP 状态仍由这里的原始码决定
   // (提交太快 / 该用户排队已满 = 用户侧可退避重试 → 429;全库满 = 服务容量 → 503)

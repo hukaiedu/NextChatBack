@@ -15,6 +15,10 @@ import {
   GLOBAL_MAX_PENDING_REQUESTS,
   HEALTH_PATH,
   MESSAGES_BODY_PATH,
+  REGISTER_IP_MAX_ATTEMPTS,
+  REGISTER_IP_WINDOW_MS,
+  USER_LOGIN_IP_MAX_FAILURES,
+  USER_LOGIN_IP_WINDOW_MS,
   USER_MAX_ACTIVE_REQUESTS,
   USER_MAX_PENDING_REQUESTS,
 } from "./config/constants.js";
@@ -64,7 +68,7 @@ import { AuthSessionRepository } from "./modules/auth/auth.session.repository.js
 import { AuthSessionService } from "./modules/auth/auth.session.service.js";
 import { AuthUserRepository } from "./modules/auth/auth.user.repository.js";
 import { AnonymousIpRateLimiter } from "./modules/auth/auth.anonymous-rate-limit.js";
-import type { LoginRateLimiter } from "./modules/auth/auth.rate-limit.js";
+import { LoginRateLimiter } from "./modules/auth/auth.rate-limit.js";
 import type { AuthDeps } from "./modules/auth/auth.types.js";
 
 export interface SchedulerConfig {
@@ -99,6 +103,16 @@ export interface AbuseProtectionConfig {
   clock?: RateLimitClock;
   /** P10 §45:限流器键数量上限(默认 10000)。达到后新键 fail-closed(503 SERVICE_BUSY),不淘汰 active bucket */
   maxKeys?: number;
+  /**
+   * V1.4 U2 §28:Registered 登录同一 IP 窗口内允许的**失败**次数(窗口 = USER_LOGIN_IP_WINDOW_MS)。
+   * 省略 = 常量默认。与 ADMIN 登录 limiter 是两个独立实例,互不见到对方的桶。
+   */
+  userLoginIpMaxFailures?: number;
+  /**
+   * V1.4 U2 §29:注册同一 IP 窗口内允许的**尝试**次数(窗口 = REGISTER_IP_WINDOW_MS)。
+   * 计尝试而非失败:Argon2id 的 CPU 在进入请求时就产生,与结果无关(§31)。
+   */
+  registerIpMaxAttempts?: number;
 }
 
 export interface AppDeps {
@@ -144,6 +158,10 @@ export interface AppHandle {
   rateLimits: {
     anonymousIp: AnonymousIpRateLimiter;
     chatSubmit: FixedWindowRateLimiter;
+    /** V1.4 U2 §74:Registered 登录 limiter,停机必须撤 sweep 定时器 */
+    userLogin: LoginRateLimiter;
+    /** V1.4 U2 §74:注册尝试 limiter,同上 */
+    register: FixedWindowRateLimiter;
   };
 }
 
@@ -188,6 +206,7 @@ export function createApp(deps: AppDeps): AppHandle {
             logger: deps.logger,
             options: {
               ttlAnonymousSeconds: deps.auth.ttlAnonymousSeconds,
+              ttlRegisteredSeconds: deps.auth.ttlRegisteredSeconds,
               ttlAdminSeconds: deps.auth.ttlAdminSeconds,
               touchIntervalSeconds: deps.auth.touchIntervalSeconds,
             },
@@ -208,6 +227,22 @@ export function createApp(deps: AppDeps): AppHandle {
     clock: abuse.clock,
     maxKeys: abuse.maxKeys,
   });
+  // V1.4 U2 §11/§73:Registered 登录复用同一个 LoginRateLimiter class(「只计失败 + 成功清零」
+  // 的语义与 ADMIN 登录完全一致),但实例独立 ⇒ 两个桶互不可见。绝不复制第二套 fixed-window 实现。
+  const userLoginLimiter = new LoginRateLimiter({
+    windowMs: USER_LOGIN_IP_WINDOW_MS,
+    max: abuse.userLoginIpMaxFailures ?? USER_LOGIN_IP_MAX_FAILURES,
+    clock: abuse.clock,
+    maxKeys: abuse.maxKeys,
+  });
+  // V1.4 U2 §29-§31:注册尝试 limiter 直接是裸原语 —— 语义就是「计一次尝试」,与 chatSubmit 同源,
+  // 不需要再包一层 class。
+  const registerLimiter = new FixedWindowRateLimiter({
+    windowMs: REGISTER_IP_WINDOW_MS,
+    max: abuse.registerIpMaxAttempts ?? REGISTER_IP_MAX_ATTEMPTS,
+    clock: abuse.clock,
+    maxKeys: abuse.maxKeys,
+  });
   const admission: MessageAdmission = {
     submitLimiter: chatSubmitLimiter,
     gate: new RequestAdmissionGate(),
@@ -223,7 +258,12 @@ export function createApp(deps: AppDeps): AppHandle {
       deps.auth ?? null,
       authRuntime?.service ?? null,
       authRuntime?.sessions ?? null,
-      { loginLimiter: deps.loginRateLimiter, anonymousIpLimiter },
+      {
+        loginLimiter: deps.loginRateLimiter,
+        anonymousIpLimiter,
+        userLoginLimiter,
+        registerLimiter,
+      },
     ),
   );
   if (authRuntime !== null && deps.auth !== null) {
@@ -364,6 +404,11 @@ export function createApp(deps: AppDeps): AppHandle {
     executor: geminiPromptService,
     attachmentStore,
     authSessions: authRuntime?.sessions ?? null,
-    rateLimits: { anonymousIp: anonymousIpLimiter, chatSubmit: chatSubmitLimiter },
+    rateLimits: {
+      anonymousIp: anonymousIpLimiter,
+      chatSubmit: chatSubmitLimiter,
+      userLogin: userLoginLimiter,
+      register: registerLimiter,
+    },
   };
 }

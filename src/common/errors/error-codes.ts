@@ -75,6 +75,16 @@ export const ErrorCodes = {
   AUTH_CSRF_REJECTED: "AUTH_CSRF_REJECTED",
   // V1.3-B3-3 §21:已认证但身份不是 ADMIN → 运维 API 拒绝。只说明权限,不说明资源存在性
   AUTH_FORBIDDEN: "AUTH_FORBIDDEN",
+  // V1.4 U2 注册用户(design §15 R19/R20/R17):三项都是注册页/账号面板必须能分支的业务码
+  /** 注册时归一化用户名已被占用(DB UNIQUE 是最终裁决,预查只是省掉一次昂贵散列) */
+  AUTH_USERNAME_ALREADY_TAKEN: "AUTH_USERNAME_ALREADY_TAKEN",
+  /** 当前身份不是 ANONYMOUS,不能注册;并发双提交的败方也走这一码 */
+  AUTH_IDENTITY_NOT_ANONYMOUS: "AUTH_IDENTITY_NOT_ANONYMOUS",
+  /**
+   * 携带 active Cookie 调注册/改密/撤销全部会话,而该 User 已 DISABLED。
+   * 刻意**不用于登录**:登录面一律统一成 `AUTH_INVALID_CREDENTIALS`,不额外暴露「这个用户名存在但被禁用」。
+   */
+  AUTH_USER_DISABLED: "AUTH_USER_DISABLED",
 
   // V1.3 P6 入口防刷与队列容量(对外一律折进 SERVICE_BUSY,原码只进日志/Admin)
   // 频率:同一用户在时间窗内提交太快(与队列容量无关,重放也算)

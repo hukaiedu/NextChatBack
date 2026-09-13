@@ -110,7 +110,7 @@ describe("LoginRateLimiter(AUTH-24)", () => {
     });
   });
 
-  it("键上限 fail-closed:满容量时新键失败不被记账、不淘汰 active bucket;过期后容量释放(P10 §46/§47)", () => {
+  it("键上限 fail-closed:满容量时新键被拒绝并给出容量事实、不淘汰 active bucket;过期后容量释放(P10 §46/§47 + V1.4 U2 §12/§33)", () => {
     const clock = fakeClock();
     const limiter = tracked(createLimiter(clock, 2));
 
@@ -118,17 +118,21 @@ describe("LoginRateLimiter(AUTH-24)", () => {
     clock.advance(1);
     limiter.registerFailure("ip-2");
     clock.advance(1);
-    // map 已满(2 keys):ip-3 的失败不再走「淘汰 ip-1」路径 —— 不淘汰任何 active bucket,
-    // 该次失败也不被记账(登录限流在容量下 fail-open;任务书只要求 anonymous/chat 面 503)
+    // map 已满(2 keys):ip-3 的失败不走「淘汰 ip-1」路径 —— 任何 active bucket 都不被淘汰。
+    // V1.4 U2 §12 之前的行为是 fail-**open**:check() 只看 peek(),而 peek 对未知键恒不 limited,
+    // 于是每个新 IP 都能直接放行到口令校验(等于限流被整体绕过 + 白付一次 Argon2id)。
+    // 那句「登录限流在容量下 fail-open」当时是被写成契约的,现在由 capacityExceeded 取代:
+    // 控制器据此回 503 SERVICE_BUSY(服务容量),而不是 429 AUTH_RATE_LIMITED(该 IP 自己超限)。
     limiter.registerFailure("ip-3");
-    expect(limiter.check("ip-3").blocked).toBe(false);
-    // 已存在的键状态原样保留:ip-1 仍到顶、ip-2 仍在窗口内
+    expect(limiter.check("ip-3")).toEqual({ blocked: true, capacityExceeded: true });
+    // 已存在的键状态原样保留:ip-1 仍到顶、ip-2 仍在窗口内且永不受容量分支影响
     expect(limiter.check("ip-1").blocked).toBe(true);
     expect(limiter.check("ip-2").blocked).toBe(false);
 
     // 推进时钟让 ip-1 / ip-2 过期,sweep 释放容量后 ip-3 可正常记账
     clock.advance(WINDOW_MS + 1_000);
     limiter.sweep();
+    expect(limiter.check("ip-3").blocked).toBe(false);
     for (let i = 0; i < MAX_ATTEMPTS; i += 1) limiter.registerFailure("ip-3");
     expect(limiter.check("ip-3").blocked).toBe(true);
   });

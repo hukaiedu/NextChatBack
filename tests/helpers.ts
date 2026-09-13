@@ -41,7 +41,7 @@ export interface TestContext {
   attachmentStore: AttachmentStore;
   /** V1.3-B2:DB Session 运行时(enabled 时非 null;测试直接驱动 sweepExpired) */
   authSessions: AuthSessionService | null;
-  /** V1.3 P6:两个入口限流器(窗口推进 / 键数量清理断言;close() 统一 dispose) */
+  /** 入口限流器(V1.4 U2 起四个):窗口推进 / 键数量清理断言;close() 统一 dispose */
   rateLimits: AppHandle["rateLimits"];
   /** 当前存活的 SSE 连接数 */
   sseConnections(): number;
@@ -99,6 +99,9 @@ export async function setupTestContext(options?: {
       // 在飞上限保持生产默认 1:单 worker 下这是事实,不是可调参数
       userMaxActiveRequests: options?.abuse?.userMaxActiveRequests ?? 1,
       globalMaxPendingRequests: options?.abuse?.globalMaxPendingRequests ?? 10_000,
+      // V1.4 U2 §28/§29:注册账号的两个 IP 计数;默认放最宽,专项用例按需传窄值
+      userLoginIpMaxFailures: options?.abuse?.userLoginIpMaxFailures ?? 1_000,
+      registerIpMaxAttempts: options?.abuse?.registerIpMaxAttempts ?? 1_000,
       clock: options?.abuse?.clock,
       // P10 §45:限流器键容量上限(测试注入小值来验证 fail-closed;缺省 = 生产默认)
       maxKeys: options?.abuse?.maxKeys,
@@ -154,9 +157,11 @@ export async function setupTestContext(options?: {
 
     async close(): Promise<void> {
       scheduler.stop();
-      // P6:两个入口限流器的 sweep 定时器与生产停机同一批撤掉
+      // 入口限流器的 sweep 定时器与生产停机同一批撤掉(V1.4 U2 起共四个)
       rateLimits.anonymousIp.dispose();
       rateLimits.chatSubmit.dispose();
+      rateLimits.userLogin.dispose();
+      rateLimits.register.dispose();
       // 附件容器的孤儿清理是定时任务:不撤掉,它可能在 $disconnect 之后才发起查询
       attachmentStore.dispose();
       // SSE 是长连接:不先结束掉,server.close() 会永远不回调
@@ -178,6 +183,8 @@ export const ADMIN_AUTH: AuthDeps = {
   enabled: true,
   password: "test-admin-password-123",
   ttlAnonymousSeconds: 7200,
+  // V1.4 U2:与上面两档取不同值,便于测试区分 TTL 选档
+  ttlRegisteredSeconds: 86_400,
   ttlAdminSeconds: 3600,
   touchIntervalSeconds: 60,
   allowedOrigins: null,

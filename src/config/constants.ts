@@ -116,3 +116,27 @@ export const COMPAT_USER_ID = "00000000-0000-0000-0000-000000000002";
 
 /** 过期 Session 清理周期(ms,§19);定时器 unref,不阻止进程退出 */
 export const AUTH_SESSION_SWEEP_INTERVAL_MS = 60_000;
+
+// —— V1.4 U2 注册用户凭据(design §7/§21;沿用「窗口=常量、计数可 env 覆盖」的既有体系)——
+
+/**
+ * REGISTERED Session TTL 默认秒数(30 天)。
+ * 与匿名 TTL 恰好同值纯属巧合:契约上各自独立 env,运维可分调(design §7 明确禁止悄悄复用)。
+ */
+export const SESSION_TTL_REGISTERED_SECONDS = 2_592_000;
+
+/** Registered 登录限流窗口(10 分钟)。与 ADMIN 登录同长度,但是**独立的桶**(§11) */
+export const USER_LOGIN_IP_WINDOW_MS = 10 * 60 * 1000;
+
+/** Registered 登录:同一 IP 窗口内允许的失败次数(用户名不存在与密码错误都算失败) */
+export const USER_LOGIN_IP_MAX_FAILURES = 5;
+
+/** 注册尝试限流窗口(10 分钟):保护的是 Argon2id 散列的 CPU 成本 */
+export const REGISTER_IP_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * 注册:同一 IP 窗口内允许的**尝试**次数。
+ * 刻意与登录 limiter 语义不同 —— 散列成本在进入请求时就产生,与结果无关,
+ * 所以计「尝试」而非「失败」。两种语义各自的理由必须留在代码里,防止被「统一」掉。
+ */
+export const REGISTER_IP_MAX_ATTEMPTS = 5;

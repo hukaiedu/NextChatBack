@@ -42,8 +42,10 @@ export interface AuthServiceOptions {
 export interface AuthDeps {
   enabled: boolean;
   password: string;
-  /** V1.3 §15:ANONYMOUS(及 V1.4 前的 REGISTERED)Session TTL 秒 */
+  /** V1.3 §15:ANONYMOUS Session TTL 秒 */
   ttlAnonymousSeconds: number;
+  /** V1.4 U2 §7:REGISTERED Session TTL 秒(独立 env,不与匿名共用契约) */
+  ttlRegisteredSeconds: number;
   /** V1.3 §15:ADMIN Session TTL 秒(AUTH_SESSION_TTL_SECONDS 语义已改为 ADMIN TTL) */
   ttlAdminSeconds: number;
   /** V1.3 §13:lastSeenAt 距 now 超过该间隔才写库续期并重发 Set-Cookie */

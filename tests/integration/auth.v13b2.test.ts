@@ -20,6 +20,8 @@ import { setupTestContext, type TestContext } from "../helpers.js";
 const PASSWORD = "test-password-123";
 const TTL_ANON = 7200;
 const TTL_ADMIN = 3600;
+/** V1.4 U2:与 anon/admin 都不同,便于断言 TTL 选档 */
+const TTL_REGISTERED = 86_400;
 const TOUCH_INTERVAL = 60;
 
 function authDeps(overrides: Partial<AuthDeps> = {}): AuthDeps {
@@ -27,6 +29,7 @@ function authDeps(overrides: Partial<AuthDeps> = {}): AuthDeps {
     enabled: true,
     password: PASSWORD,
     ttlAnonymousSeconds: TTL_ANON,
+    ttlRegisteredSeconds: TTL_REGISTERED,
     ttlAdminSeconds: TTL_ADMIN,
     touchIntervalSeconds: TOUCH_INTERVAL,
     allowedOrigins: null,
@@ -129,7 +132,16 @@ describe("SESS-01/02/03/05 DB Session 存储与校验(§5)", () => {
       });
       expect(probe.status).toBe(200);
       const body = (await probe.json()) as { data: Record<string, unknown> };
-      expect(Object.keys(body.data).sort()).toEqual(["authenticated", "expiresAt", "userType"]);
+      // V1.4 U2 §37/§70:auth DTO 的**有意契约扩展** —— authenticated 面从 3 键变 4 键,
+      // 新增 `username: string | null`(ANONYMOUS / ADMIN / COMPAT 恒 null,REGISTERED 才是登录名)。
+      // 这不是放宽断言:仍要求键集合逐字相等 ⇒ 凭据列 `passwordHash` / `usernameNormalized`
+      // 与 userId / sessionId / tokenHash 一样,依然没有任何机会出现在 Public 面。
+      expect(Object.keys(body.data).sort()).toEqual([
+        "authenticated",
+        "expiresAt",
+        "userType",
+        "username",
+      ]);
     });
   });
 
@@ -227,6 +239,7 @@ describe("ANON-01..03 匿名 bootstrap(§8)", () => {
         logger: createLogger("silent"),
         options: {
           ttlAnonymousSeconds: TTL_ANON,
+          ttlRegisteredSeconds: TTL_REGISTERED,
           ttlAdminSeconds: TTL_ADMIN,
           touchIntervalSeconds: TOUCH_INTERVAL,
         },

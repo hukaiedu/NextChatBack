@@ -12,6 +12,8 @@ const PASSWORD = "test-password-123";
 /** ADMIN 登录 Cookie 的 Max-Age(= AUTH_SESSION_TTL_SECONDS 语义) */
 const TTL_ADMIN = 3600;
 const TTL_ANON = 7200;
+/** V1.4 U2:与 anon/admin 都不同,便于断言「REGISTERED 走的是自己那一档 TTL」 */
+const TTL_REGISTERED = 86_400;
 const TOUCH_INTERVAL = 60;
 
 function authDeps(overrides: Partial<AuthDeps> = {}): AuthDeps {
@@ -19,6 +21,7 @@ function authDeps(overrides: Partial<AuthDeps> = {}): AuthDeps {
     enabled: true,
     password: PASSWORD,
     ttlAnonymousSeconds: TTL_ANON,
+    ttlRegisteredSeconds: TTL_REGISTERED,
     ttlAdminSeconds: TTL_ADMIN,
     touchIntervalSeconds: TOUCH_INTERVAL,
     allowedOrigins: null,

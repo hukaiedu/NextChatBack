@@ -47,6 +47,9 @@ async function main(): Promise<void> {
       userMaxPendingRequests: env.USER_MAX_PENDING_REQUESTS,
       userMaxActiveRequests: env.USER_MAX_ACTIVE_REQUESTS,
       globalMaxPendingRequests: env.GLOBAL_MAX_PENDING_REQUESTS,
+      // V1.4 U2 §28/§29:Registered 登录与注册尝试的 IP 计数(窗口长度是常量)
+      userLoginIpMaxFailures: env.AUTH_USER_LOGIN_IP_MAX_FAILURES,
+      registerIpMaxAttempts: env.AUTH_REGISTER_IP_MAX_ATTEMPTS,
     },
     // 启动顺序由下面三行掌握:恢复 → 开始扫描 → 才开始接受 HTTP 请求
     scheduler: {
@@ -95,9 +98,12 @@ async function main(): Promise<void> {
       clearInterval(authSweepTimer);
       authSweepTimer = null;
     }
-    // P6 §20:两个入口限流器只有内存态 + unref 的 sweep 定时器;停机撤掉,不留下还在跑的窗口清理
+    // P6 §20:入口限流器只有内存态 + unref 的 sweep 定时器;停机撤掉,不留下还在跑的窗口清理
+    // V1.4 U2 §74:新增的 Registered 登录与注册尝试 limiter 同批撤除,绝不漏一个定时器
     rateLimits.anonymousIp.dispose();
     rateLimits.chatSubmit.dispose();
+    rateLimits.userLogin.dispose();
+    rateLimits.register.dispose();
     attachmentStore.dispose();
     sse.closeAll();
     // 空闲 keep-alive 立即断开(in-flight 请求不受影响),否则 server.close() 要等客户端保活超时

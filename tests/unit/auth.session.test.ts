@@ -17,6 +17,8 @@ import { AuthUserRepository } from "../../src/modules/auth/auth.user.repository.
 const NOW = new Date("2026-09-11T12:00:00.000Z");
 const TTL_ANON = 7200;
 const TTL_ADMIN = 3600;
+/** V1.4 U2 §26:REGISTERED 必须走自己那一档,取第三个值以便区分 */
+const TTL_REGISTERED = 86_400;
 const TOUCH_INTERVAL = 60;
 
 function createHarness(overrides?: { now?: Date }) {
@@ -41,6 +43,7 @@ function createHarness(overrides?: { now?: Date }) {
     logger: createLogger("silent"),
     options: {
       ttlAnonymousSeconds: TTL_ANON,
+      ttlRegisteredSeconds: TTL_REGISTERED,
       ttlAdminSeconds: TTL_ADMIN,
       touchIntervalSeconds: TOUCH_INTERVAL,
     },
@@ -57,7 +60,7 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     expiresAt: new Date(NOW.getTime() + TTL_ANON * 1000),
     lastSeenAt: NOW,
     createdAt: NOW,
-    user: { id: "user-1", type: "ANONYMOUS", status: "ACTIVE" },
+    user: { id: "user-1", type: "ANONYMOUS", status: "ACTIVE", username: null },
     ...overrides,
   };
 }
@@ -195,6 +198,46 @@ describe("TOUCH-01..04 滑动续期 CAS(§13/§14)", () => {
       ttlSeconds: TTL_ANON,
       expiresAt: new Date(NOW.getTime() + TTL_ANON * 1000),
     });
+  });
+
+  it("TTL-REGISTERED-01 REGISTERED Session 用 REGISTERED TTL 续期(§26:不再隐式落入匿名档)", async () => {
+    const { service, sessions } = createHarness();
+    sessions.findByTokenHash.mockResolvedValue(
+      sessionRow({
+        lastSeenAt: new Date(NOW.getTime() - (TOUCH_INTERVAL + 60) * 1000),
+        user: { id: "user-1", type: "REGISTERED", status: "ACTIVE", username: "alice" },
+      }),
+    );
+    sessions.touchIfDue.mockResolvedValue(1);
+
+    const result = await service.resolve(generateSessionToken(), { touch: true });
+
+    expect(sessions.touchIfDue).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        expiresAt: new Date(NOW.getTime() + TTL_REGISTERED * 1000),
+      }),
+    );
+    expect(result).toMatchObject({
+      kind: "active",
+      renewed: true,
+      ttlSeconds: TTL_REGISTERED,
+      username: "alice",
+    });
+    // 三档 TTL 必须是三个互不相同的值,否则本用例无法证明「选对了档」
+    expect(TTL_REGISTERED).not.toBe(TTL_ANON);
+    expect(TTL_REGISTERED).not.toBe(TTL_ADMIN);
+  });
+
+  it("TTL-UNKNOWN-01 未知 userType → fail-fast,绝不静默套用某一档 TTL(§26 穷举)", async () => {
+    const { service, sessions } = createHarness();
+    sessions.findByTokenHash.mockResolvedValue(
+      sessionRow({ user: { id: "user-1", type: "ROBOT", status: "ACTIVE", username: null } }),
+    );
+
+    await expect(service.resolve(generateSessionToken(), { touch: false })).rejects.toThrow(
+      /no session TTL configured for user type/,
+    );
   });
 
   it("TOUCH-02b ADMIN Session 用 ADMIN TTL 续期", async () => {

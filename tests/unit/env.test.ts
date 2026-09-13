@@ -160,6 +160,9 @@ describe("parseEnv V1.3 P6 限额 env(§11/§12 范围)", () => {
     { key: "USER_MAX_PENDING_REQUESTS", def: 5, min: 1, max: 100 },
     { key: "USER_MAX_ACTIVE_REQUESTS", def: 1, min: 1, max: 10 },
     { key: "GLOBAL_MAX_PENDING_REQUESTS", def: 100, min: 1, max: 10_000 },
+    // V1.4 U2 §28/§29:注册账号的两个 IP 计数(窗口长度是常量,不进 env)
+    { key: "AUTH_USER_LOGIN_IP_MAX_FAILURES", def: 5, min: 1, max: 1_000 },
+    { key: "AUTH_REGISTER_IP_MAX_ATTEMPTS", def: 5, min: 1, max: 1_000 },
   ] as const;
 
   for (const { key, def, min, max } of limits) {
@@ -176,4 +179,75 @@ describe("parseEnv V1.3 P6 限额 env(§11/§12 范围)", () => {
       expect(() => parseEnv({ ...base, [key]: "many" })).toThrow(new RegExp(key));
     });
   }
+});
+
+/**
+ * V1.4 U2 §25:REGISTERED Session TTL 是**独立** env。
+ * 数值默认与匿名同为 30 天,但契约必须各自成立 —— 这里同时钉住
+ * 「独立可调」与「必须严格大于滑动续期阈值」这条跨字段约束。
+ */
+describe("parseEnv V1.4 U2 REGISTERED TTL(§25)", () => {
+  it("默认 30 天;边界与区间内值通过", () => {
+    expect(parseEnv({ ...base }).AUTH_SESSION_TTL_REGISTERED_SECONDS).toBe(2_592_000);
+    for (const ok of ["300", "86400", "2592000"]) {
+      expect(
+        parseEnv({
+          ...base,
+          AUTH_SESSION_TTL_REGISTERED_SECONDS: ok,
+          AUTH_SESSION_TOUCH_INTERVAL_SECONDS: "60",
+        }).AUTH_SESSION_TTL_REGISTERED_SECONDS,
+      ).toBe(Number(ok));
+    }
+  });
+
+  it("越界(0 / 299 / 上限+1)与小数、非整数一律拒绝", () => {
+    for (const bad of ["0", "299", "2592001", "300.5", "forever"]) {
+      expect(
+        () =>
+          parseEnv({
+            ...base,
+            AUTH_SESSION_TTL_REGISTERED_SECONDS: bad,
+            AUTH_SESSION_TOUCH_INTERVAL_SECONDS: "60",
+          }),
+        bad,
+      ).toThrow(/AUTH_SESSION_TTL_REGISTERED_SECONDS/);
+    }
+  });
+
+  it("跨字段 fail-fast:TTL 必须严格大于滑动续期阈值,相等同样非法(续期名存实亡)", () => {
+    expect(() =>
+      parseEnv({
+        ...base,
+        AUTH_SESSION_TTL_REGISTERED_SECONDS: "3600",
+        AUTH_SESSION_TOUCH_INTERVAL_SECONDS: "3600",
+      }),
+    ).toThrow(/must be greater than AUTH_SESSION_TOUCH_INTERVAL_SECONDS/);
+    expect(() =>
+      parseEnv({
+        ...base,
+        AUTH_SESSION_TTL_REGISTERED_SECONDS: "600",
+        AUTH_SESSION_TOUCH_INTERVAL_SECONDS: "3600",
+      }),
+    ).toThrow(/must be greater than AUTH_SESSION_TOUCH_INTERVAL_SECONDS/);
+    // 大 1 秒即合法:约束是「严格大于」,不是「大于等于」
+    expect(
+      parseEnv({
+        ...base,
+        AUTH_SESSION_TTL_REGISTERED_SECONDS: "3601",
+        AUTH_SESSION_TOUCH_INTERVAL_SECONDS: "3600",
+      }).AUTH_SESSION_TTL_REGISTERED_SECONDS,
+    ).toBe(3601);
+  });
+
+  it("匿名与 ADMIN 两档 TTL 不受该约束牵连(只有 REGISTERED 参与比较)", () => {
+    const env = parseEnv({
+      ...base,
+      AUTH_SESSION_TTL_ANONYMOUS_SECONDS: "300",
+      AUTH_SESSION_TTL_SECONDS: "300",
+      AUTH_SESSION_TOUCH_INTERVAL_SECONDS: "3600",
+      AUTH_SESSION_TTL_REGISTERED_SECONDS: "3601",
+    });
+    expect(env.AUTH_SESSION_TTL_ANONYMOUS_SECONDS).toBe(300);
+    expect(env.AUTH_SESSION_TTL_SECONDS).toBe(300);
+  });
 });
