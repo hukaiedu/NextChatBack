@@ -86,13 +86,19 @@ model ModelRequest {
 
 /// V1.3:统一身份主体。B1 只建结构;签发/读取/续期逻辑属 B2
 model User {
-  id        String   @id @default(uuid())
+  id                 String   @id @default(uuid())
   /// ANONYMOUS / REGISTERED / ADMIN(DDL 里为 CHECK 约束)
-  type      String   @default("ANONYMOUS")
+  type               String   @default("ANONYMOUS")
   /// ACTIVE / DISABLED(DDL 里为 CHECK 约束)
-  status    String   @default("ACTIVE")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  status             String   @default("ACTIVE")
+  /// V1.4 U1:登录名,保留用户输入的展示大小写;仅 REGISTERED 非空
+  username           String?
+  /// V1.4 U1:归一化(ASCII 小写)登录名,唯一约束的真相源;仅 REGISTERED 非空
+  usernameNormalized String?  @unique
+  /// V1.4 U1:口令摘要串(自描述格式;具体算法与写入点属 U2);明文永不落库
+  passwordHash       String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   sessions      Session[]
   conversations Conversation[]

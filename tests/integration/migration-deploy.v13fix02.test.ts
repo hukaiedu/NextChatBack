@@ -256,8 +256,9 @@ describe.skipIf(!existsSync(REAL_APP_DB))(
       const upgraded = openDatabase(target);
       const before = openDatabase(pristine);
       try {
-        // 原库停在 m1,因此真实 pending 链是 I1 → B1 → B4;runner 必须把它推到仓库最新
-        expect(appliedMigrations(upgraded)).toEqual(ALL_MIGRATIONS);
+        // 副本可能停在任意历史点(本机 app.db 会随开发推进),因此只断言「补齐到仓库最新」
+        // 这一完整性事实,与施加顺序无关。
+        expect(appliedMigrations(upgraded).slice().sort()).toEqual(ALL_MIGRATIONS);
 
         // §35/§36:userId 必填且没有默认值
         const userId = columnsOf(upgraded, "Conversation").find((c) => c.name === "userId")!;
@@ -266,10 +267,17 @@ describe.skipIf(!existsSync(REAL_APP_DB))(
         expect(
           rawCount(upgraded, `SELECT COUNT(*) c FROM "Conversation" WHERE "userId" IS NULL`),
         ).toBe(0);
-        // B1 的回填语义在真实数据上成立:历史会话归固定 ADMIN,而不是随便某个 User
-        expect(upgraded.prepare(`SELECT DISTINCT "userId" u FROM "Conversation"`).all()).toEqual([
-          { u: ADMIN_USER_ID },
-        ]);
+        // B1 的回填语义在真实数据上成立:历史会话归固定 ADMIN,而不是随便某个 User。
+        // 本机 app.db 的内容会随开发使用增长(COMPAT 主体也会拥有会话),因此这里断言
+        // 「无主行为 0 + owner 只可能是两个固定哨兵之一 + ADMIN 确实在其中」,而非写死单值。
+        const owners = (
+          upgraded.prepare(`SELECT DISTINCT "userId" u FROM "Conversation" ORDER BY "userId"`).all() as {
+            u: string;
+          }[]
+        ).map((row) => row.u);
+        expect(owners.length).toBeGreaterThan(0);
+        for (const owner of owners) expect([ADMIN_USER_ID, COMPAT_USER_ID]).toContain(owner);
+        expect(owners).toContain(ADMIN_USER_ID);
 
         // 守恒:逐字段比较(时间列已 CAST 成文本),而不是只比行数
         expect(historyRows(upgraded)).toEqual(historyRows(before));
@@ -389,7 +397,9 @@ describe.skipIf(!existsSync(REAL_APP_DB))(
       expect(retry.ok, retry.output).toBe(true);
       const done = openDatabase(target);
       try {
-        expect(appliedMigrations(done)).toEqual(ALL_MIGRATIONS);
+        // 完整性比较刻意与施加顺序无关:本用例的「前缀」= 除 B4 外的全部迁移,
+        // 因此任何目录名晚于 B4 的新迁移都会在第一次 deploy 时先落地,B4 经 resolve 后最后补上。
+        expect(appliedMigrations(done).slice().sort()).toEqual(ALL_MIGRATIONS);
         expect(
           rawCount(done, `SELECT COUNT(*) c FROM "Conversation" WHERE "userId" IS NULL`),
         ).toBe(0);
