@@ -2,13 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ADMIN_USER_ID, AUTH_COOKIE_NAME, COMPAT_USER_ID } from "../../src/config/constants.js";
 import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { PublicErrorCodes } from "../../src/common/errors/public-error.js";
+import { FixedWindowRateLimiter } from "../../src/common/rate-limit/rate-limiter.js";
 import { AuthSessionRepository } from "../../src/modules/auth/auth.session.repository.js";
 import { AuthUserRepository } from "../../src/modules/auth/auth.user.repository.js";
 import { ConversationRepository } from "../../src/modules/conversation/conversation.repository.js";
 import { hashSessionToken } from "../../src/modules/auth/auth.session-token.js";
+import * as authPassword from "../../src/modules/auth/auth.password.js";
 import { verifyPassword } from "../../src/modules/auth/auth.password.js";
 import type { AbuseProtectionConfig } from "../../src/app.js";
 import type { AuthDeps } from "../../src/modules/auth/auth.types.js";
+import type { FixedWindowRateLimiter as FixedWindowRateLimiterType } from "../../src/common/rate-limit/rate-limiter.js";
 import { ADMIN_AUTH, setupTestContext, type TestContext } from "../helpers.js";
 
 /**
@@ -21,6 +25,7 @@ import { ADMIN_AUTH, setupTestContext, type TestContext } from "../helpers.js";
 
 const PASSWORD = "Password123!";
 const NEW_PASSWORD = "Rotated123!";
+const D1B_PASSWORD_SENTINEL = "PERSONCHAT_D1B_PASSWORD_SENTINEL_xxxxx";
 /** 第二个注册账号(bob)的口令,与 alice 全程不同 */
 const OTHER = "AnotherPass123!";
 const TTL_ANON = 7200;
@@ -45,11 +50,16 @@ function authDeps(overrides: Partial<AuthDeps> = {}): AuthDeps {
 
 async function withApp<T>(
   fn: (ctx: TestContext) => Promise<T>,
-  options?: { auth?: AuthDeps | null; abuse?: AbuseProtectionConfig },
+  options?: {
+    auth?: AuthDeps | null;
+    abuse?: AbuseProtectionConfig;
+    passwordChangeRateLimiter?: FixedWindowRateLimiterType;
+  },
 ): Promise<T> {
   const ctx = await setupTestContext({
     auth: options && "auth" in options ? options.auth! : authDeps(),
     abuse: options?.abuse,
+    passwordChangeRateLimiter: options?.passwordChangeRateLimiter,
   });
   try {
     await ctx.reset();
@@ -388,6 +398,489 @@ describe("PWD 改密(V1.4 U2 §85)", () => {
       expect(await hashOf(ctx, alice.userId)).toBe(before);
       expect(await sessionsOf(ctx, alice.userId)).toBe(0);
     });
+  });
+});
+
+describe("PWD 改密 Argon2 abuse protection(D1B)", () => {
+  function limiter(options: { max?: number; maxKeys?: number; clock?: { now(): number } } = {}) {
+    return new FixedWindowRateLimiter({
+      windowMs: 60_000,
+      max: options.max ?? 5,
+      maxKeys: options.maxKeys,
+      clock: options.clock,
+    });
+  }
+
+  function fakeClock() {
+    let now = 0;
+    return {
+      now: () => now,
+      advance(ms: number): void {
+        now += ms;
+      },
+    };
+  }
+
+  it("PWD-RL-01/03 同一 User 第 1-5 次 attempt 放行,第 6 次 429;错误口令消耗额度", async () => {
+    const passwordLimiter = limiter();
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx);
+        for (let attempt = 1; attempt <= 5; attempt += 1) {
+          expect(
+            (
+              await post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: `WrongPass${attempt}!`, newPassword: NEW_PASSWORD },
+                alice.cookie,
+              )
+            ).status,
+          ).toBe(401);
+        }
+        const blocked = await post(
+          ctx,
+          "/api/auth/password/change",
+          { currentPassword: "WrongPass6!", newPassword: NEW_PASSWORD },
+          alice.cookie,
+        );
+        expect(blocked.status).toBe(429);
+        expect(errorCodeOf(await blocked.json())).toBe(ErrorCodes.AUTH_RATE_LIMITED);
+        expect(blocked.headers.get("Retry-After")).not.toBeNull();
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-02 429 严格排在 verify/hash 前", async () => {
+    const passwordLimiter = limiter({ max: 1 });
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx);
+        const verifySpy = vi.spyOn(authPassword, "verifyPassword");
+        const hashSpy = vi.spyOn(authPassword, "hashPassword");
+        try {
+          verifySpy.mockClear();
+          hashSpy.mockClear();
+          expect(
+            (
+              await post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: "WrongPass1!", newPassword: NEW_PASSWORD },
+                alice.cookie,
+              )
+            ).status,
+          ).toBe(401);
+          verifySpy.mockClear();
+          hashSpy.mockClear();
+
+          const blocked = await post(
+            ctx,
+            "/api/auth/password/change",
+            { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
+            alice.cookie,
+          );
+          expect(blocked.status).toBe(429);
+          expect(verifySpy).toHaveBeenCalledTimes(0);
+          expect(hashSpy).toHaveBeenCalledTimes(0);
+        } finally {
+          verifySpy.mockRestore();
+          hashSpy.mockRestore();
+        }
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-02b password sentinel 不进入 HTTP error surface", async () => {
+    const passwordLimiter = limiter();
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx);
+        const response = await post(
+          ctx,
+          "/api/auth/password/change",
+          { currentPassword: D1B_PASSWORD_SENTINEL, newPassword: NEW_PASSWORD },
+          alice.cookie,
+        );
+        const body = await response.text();
+        expect(response.status).toBe(401);
+        expect(body).not.toContain(D1B_PASSWORD_SENTINEL);
+        expect(body).not.toContain("$argon2id$");
+        expect(body).not.toContain("passwordHash");
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-04 正确改密也消费 attempt,成功不 reset", async () => {
+    const passwordLimiter = limiter();
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx);
+        for (let attempt = 1; attempt <= 4; attempt += 1) {
+          expect(
+            (
+              await post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: `WrongPass${attempt}!`, newPassword: NEW_PASSWORD },
+                alice.cookie,
+              )
+            ).status,
+          ).toBe(401);
+        }
+        const rotated = await post(
+          ctx,
+          "/api/auth/password/change",
+          { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
+          alice.cookie,
+        );
+        expect(rotated.status).toBe(200);
+
+        const blocked = await post(
+          ctx,
+          "/api/auth/password/change",
+          { currentPassword: NEW_PASSWORD, newPassword: "Rotated456!" },
+          cookieOf(rotated),
+        );
+        expect(blocked.status).toBe(429);
+        expect(errorCodeOf(await blocked.json())).toBe(ErrorCodes.AUTH_RATE_LIMITED);
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-05 同一 User 的多个 Session 共享 User.id bucket", async () => {
+    const passwordLimiter = limiter();
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx);
+        const secondDevice = await extraDevice(ctx, "alice", PASSWORD);
+        for (const [index, cookie] of [alice.cookie, secondDevice, alice.cookie, secondDevice, alice.cookie].entries()) {
+          expect(
+            (
+              await post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: `WrongPass${index + 1}!`, newPassword: NEW_PASSWORD },
+                cookie,
+              )
+            ).status,
+          ).toBe(401);
+        }
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: "WrongPass6!", newPassword: NEW_PASSWORD },
+              secondDevice,
+            )
+          ).status,
+        ).toBe(429);
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-06 Alice/Bob 使用相互独立的 User.id bucket", async () => {
+    const passwordLimiter = limiter();
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx, "alice", PASSWORD);
+        const bob = await registered(ctx, "bob", OTHER);
+        for (let attempt = 1; attempt <= 5; attempt += 1) {
+          expect(
+            (
+              await post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: `WrongPass${attempt}!`, newPassword: NEW_PASSWORD },
+                alice.cookie,
+              )
+            ).status,
+          ).toBe(401);
+        }
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: "WrongPass6!", newPassword: NEW_PASSWORD },
+              alice.cookie,
+            )
+          ).status,
+        ).toBe(429);
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: "WrongBob1!", newPassword: NEW_PASSWORD },
+              bob.cookie,
+            )
+          ).status,
+        ).toBe(401);
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-07 invalid/expired/disabled/ANONYMOUS/ADMIN/COMPAT 不创建 Registered bucket", async () => {
+    const passwordLimiter = limiter();
+    await withApp(
+      async (ctx) => {
+        const anon = await anonymous(ctx);
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
+              anon.cookie,
+            )
+          ).status,
+        ).toBe(403);
+        expect(passwordLimiter.keyCount()).toBe(0);
+
+        const admin = cookieOf(await post(ctx, "/api/auth/login", { password: ADMIN_AUTH.password }));
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: ADMIN_AUTH.password, newPassword: NEW_PASSWORD },
+              admin,
+            )
+          ).status,
+        ).toBe(403);
+        expect(passwordLimiter.keyCount()).toBe(0);
+
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
+              `${AUTH_COOKIE_NAME}=invalid-token`,
+            )
+          ).status,
+        ).toBe(401);
+        expect(passwordLimiter.keyCount()).toBe(0);
+
+        const expired = await registered(ctx, "expired", PASSWORD);
+        await ctx.prisma.session.updateMany({
+          where: { userId: expired.userId },
+          data: { expiresAt: new Date(0) },
+        });
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
+              expired.cookie,
+            )
+          ).status,
+        ).toBe(401);
+        expect(passwordLimiter.keyCount()).toBe(0);
+
+        const disabled = await registered(ctx, "disabled", PASSWORD);
+        await ctx.prisma.user.update({ where: { id: disabled.userId }, data: { status: "DISABLED" } });
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
+              disabled.cookie,
+            )
+          ).status,
+        ).toBe(401);
+        expect(passwordLimiter.keyCount()).toBe(0);
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+
+    await withApp(
+      async (ctx) => {
+        const res = await post(ctx, "/api/auth/password/change", {
+          currentPassword: PASSWORD,
+          newPassword: NEW_PASSWORD,
+        });
+        expect(res.status).toBe(403);
+        expect(passwordLimiter.keyCount()).toBe(0);
+      },
+      { auth: null, passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-08 maxKeys 满时新 User 为 503,且不进入 Argon2;既有 bucket 不被淘汰", async () => {
+    const passwordLimiter = limiter({ maxKeys: 1 });
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx, "alice", PASSWORD);
+        const bob = await registered(ctx, "bob", OTHER);
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: "WrongAlice1!", newPassword: NEW_PASSWORD },
+              alice.cookie,
+            )
+          ).status,
+        ).toBe(401);
+
+        const verifySpy = vi.spyOn(authPassword, "verifyPassword");
+        const hashSpy = vi.spyOn(authPassword, "hashPassword");
+        try {
+          verifySpy.mockClear();
+          hashSpy.mockClear();
+          const blocked = await post(
+            ctx,
+            "/api/auth/password/change",
+            { currentPassword: OTHER, newPassword: NEW_PASSWORD },
+            bob.cookie,
+          );
+          expect(blocked.status).toBe(503);
+          expect(errorCodeOf(await blocked.json())).toBe(PublicErrorCodes.SERVICE_BUSY);
+          expect(verifySpy).toHaveBeenCalledTimes(0);
+          expect(hashSpy).toHaveBeenCalledTimes(0);
+          expect(
+            (
+              await post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: "WrongAlice2!", newPassword: NEW_PASSWORD },
+                alice.cookie,
+              )
+            ).status,
+          ).toBe(401);
+        } finally {
+          verifySpy.mockRestore();
+          hashSpy.mockRestore();
+        }
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-09 并发 burst 的 Argon2 verify 数量不超过窗口额度", async () => {
+    const passwordLimiter = limiter();
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx);
+        const verifySpy = vi.spyOn(authPassword, "verifyPassword");
+        const hashSpy = vi.spyOn(authPassword, "hashPassword");
+        try {
+          verifySpy.mockClear();
+          hashSpy.mockClear();
+          const responses = await Promise.all(
+            Array.from({ length: 12 }, (_, index) =>
+              post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: `BurstWrong${index}!`, newPassword: NEW_PASSWORD },
+                alice.cookie,
+              ),
+            ),
+          );
+          expect(responses.filter((res) => res.status === 401)).toHaveLength(5);
+          expect(responses.filter((res) => res.status === 429)).toHaveLength(7);
+          expect(verifySpy).toHaveBeenCalledTimes(5);
+          expect(hashSpy).toHaveBeenCalledTimes(0);
+        } finally {
+          verifySpy.mockRestore();
+          hashSpy.mockRestore();
+        }
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-12 正确旧口令并发 burst 的 verify/hash 均受 User budget 约束", async () => {
+    const budget = 3;
+    const burst = 10;
+    const passwordLimiter = limiter({ max: budget });
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx);
+        const verifySpy = vi.spyOn(authPassword, "verifyPassword");
+        const hashSpy = vi.spyOn(authPassword, "hashPassword");
+        try {
+          verifySpy.mockClear();
+          hashSpy.mockClear();
+          const responses = await Promise.all(
+            Array.from({ length: burst }, (_, index) =>
+              post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: PASSWORD, newPassword: `CorrectBurst${index}!` },
+                alice.cookie,
+              ),
+            ),
+          );
+          // 不断言成功数量:多个请求共享一个 presented Session,事务轮换可能产生既有 race 出口。
+          expect(responses.filter((res) => res.status === 429).length).toBeGreaterThanOrEqual(
+            burst - budget,
+          );
+          expect(verifySpy.mock.calls.length).toBeLessThanOrEqual(budget);
+          expect(hashSpy.mock.calls.length).toBeLessThanOrEqual(budget);
+        } finally {
+          verifySpy.mockRestore();
+          hashSpy.mockRestore();
+        }
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
+  });
+
+  it("PWD-RL-10 fake clock 越过窗口后允许新一轮 attempt", async () => {
+    const clock = fakeClock();
+    const passwordLimiter = limiter({ clock });
+    await withApp(
+      async (ctx) => {
+        const alice = await registered(ctx);
+        for (let attempt = 1; attempt <= 5; attempt += 1) {
+          expect(
+            (
+              await post(
+                ctx,
+                "/api/auth/password/change",
+                { currentPassword: `WrongPass${attempt}!`, newPassword: NEW_PASSWORD },
+                alice.cookie,
+              )
+            ).status,
+          ).toBe(401);
+        }
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: "WrongPass6!", newPassword: NEW_PASSWORD },
+              alice.cookie,
+            )
+          ).status,
+        ).toBe(429);
+        clock.advance(60_001);
+        expect(
+          (
+            await post(
+              ctx,
+              "/api/auth/password/change",
+              { currentPassword: "WrongPass7!", newPassword: NEW_PASSWORD },
+              alice.cookie,
+            )
+          ).status,
+        ).toBe(401);
+        expect(passwordLimiter.keyCount()).toBe(1);
+      },
+      { passwordChangeRateLimiter: passwordLimiter },
+    );
   });
 });
 

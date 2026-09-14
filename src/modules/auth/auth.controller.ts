@@ -59,6 +59,8 @@ export interface AuthRateLimiters {
    * 就已产生,与结果无关。用裸 FixedWindowRateLimiter + register 语义,与 chatSubmit 同源。
    */
   registerLimiter: FixedWindowRateLimiter;
+  /** D1B:Registered 改密按 User.id 计 attempt,必须在 Argon2 前注册。 */
+  passwordChangeLimiter: FixedWindowRateLimiter;
 }
 
 function toIso(at: Date): string {
@@ -146,6 +148,7 @@ export function createAuthRouter(
   const anonymousIpLimiter = rateLimits.anonymousIpLimiter;
   const userLoginLimiter = rateLimits.userLoginLimiter;
   const registerLimiter = rateLimits.registerLimiter;
+  const passwordChangeLimiter = rateLimits.passwordChangeLimiter;
 
   /**
    * V1.4 U2 §42/§58/§102/§103:本 router 挂在全局 requireAuth **之前**,所以四个新端点拿不到
@@ -433,8 +436,7 @@ export function createAuthRouter(
    *
    * `newPassword === currentPassword` 排在 verify 之前(§59):那条判断不需要任何散列。
    * 当前口令校验失败**不改任何 Session**(§60) —— 否则拿到他人 Cookie 的人就能用错密码踢人下线。
-   * 刻意不加 limiter:走到两次散列必须先持有 active REGISTERED Session,
-   * 滥用面已被匿名创建与登录 limiter 前置封顶(design §21 要点 4)。
+   * D1B:按 active REGISTERED User.id 计 attempt,先于两次散列;成功不清零。
    */
   router.post(
     "/password/change",
@@ -450,6 +452,17 @@ export function createAuthRouter(
       }
       void (async () => {
         const identity = await resolveIdentityFor(req, "REGISTERED");
+        const decision = passwordChangeLimiter.register(identity.auth.userId);
+        if (decision.limited) {
+          if ("capacityExceeded" in decision) {
+            throw limiterCapacityExceeded();
+          }
+          throw new RetryAfterError(
+            ErrorCodes.AUTH_RATE_LIMITED,
+            "Too many password change attempts",
+            decision.retryAfterSeconds,
+          );
+        }
         if (
           !(await sessions.verifyRegisteredPassword(
             identity.auth.userId,

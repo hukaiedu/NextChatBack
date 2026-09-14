@@ -136,4 +136,18 @@ describe("V1.4 U2 auth 模块静态守卫", () => {
     expect(password).not.toMatch(/hashSync|verifySync|hashRawSync/);
     expect(password).toMatch(/export function hashPassword/);
   });
+
+  it("D1B production shutdown 必须 dispose 全部入口 limiter", () => {
+    const main = stripComments(readFileSync(join(process.cwd(), "src", "main.ts"), "utf8"));
+    const start = main.indexOf("rateLimits.anonymousIp.dispose()");
+    const end = main.indexOf("attachmentStore.dispose()", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const shutdown = main.slice(start, end);
+    expect(shutdown).toContain("rateLimits.anonymousIp.dispose()");
+    expect(shutdown).toContain("rateLimits.chatSubmit.dispose()");
+    expect(shutdown).toContain("rateLimits.userLogin.dispose()");
+    expect(shutdown).toContain("rateLimits.register.dispose()");
+    expect(shutdown).toContain("rateLimits.passwordChange.dispose()");
+  });
 });

@@ -104,6 +104,7 @@ async function main(): Promise<void> {
     rateLimits.chatSubmit.dispose();
     rateLimits.userLogin.dispose();
     rateLimits.register.dispose();
+    rateLimits.passwordChange.dispose();
     attachmentStore.dispose();
     sse.closeAll();
     // 空闲 keep-alive 立即断开(in-flight 请求不受影响),否则 server.close() 要等客户端保活超时

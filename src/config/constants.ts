@@ -140,3 +140,9 @@ export const REGISTER_IP_WINDOW_MS = 10 * 60 * 1000;
  * 所以计「尝试」而非「失败」。两种语义各自的理由必须留在代码里,防止被「统一」掉。
  */
 export const REGISTER_IP_MAX_ATTEMPTS = 5;
+
+/** Registered 改密尝试窗口:按 User.id 计数,保护 Argon2 verify + hash 的 CPU 成本。 */
+export const PASSWORD_CHANGE_WINDOW_MS = 60 * 1000;
+
+/** Registered 改密:每个 User 在窗口内最多进入五次口令处理。 */
+export const PASSWORD_CHANGE_MAX_ATTEMPTS = 5;
