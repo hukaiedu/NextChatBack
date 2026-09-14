@@ -33,7 +33,7 @@
 - [23. 安全说明](#23-安全说明)
 - [24. 相关仓库](#24-相关仓库)
 - [25. V1.1 模型选择（Gemini Web）](#25-v11-模型选择gemini-web)
-- [26. 访问鉴权（SEC-1）](#26-访问鉴权sec-1)
+- [26. V1.4 访问鉴权与身份契约](#26-v14-访问鉴权与身份契约)
 - [27. 防刷限额与排队容量（V1.3 P6）](#27-防刷限额与排队容量v13-p6)
 - [28. 公平调度（V1.3 P7）](#28-公平调度v13-p7)
 
@@ -49,14 +49,14 @@ personChat Backend 是 personChat 的服务端。
 
 **当前定位：**
 
-- 单用户
+- `ANONYMOUS` / `REGISTERED` / `ADMIN` 三种身份；普通用户使用 username/password 注册与登录
 - 单 Backend 实例
 - 自托管
 - 小规模内网使用
 
 **不适用于：**
 
-- 公网多租户 SaaS
+- 完整公网多租户 SaaS（Provider 账号 / Browser Profile 仍是共享的架构限制）
 - 多实例横向扩展
 - 无人值守的 Google 自动登录
 
@@ -759,9 +759,9 @@ Frontend: f1c5c8af56615152513ab3d41081cd48ed434301
 
 ## 21. 已知限制
 
-### 单用户
+### 共享 Provider 账号
 
-当前无多用户隔离：所有会话共享同一个 Backend、同一个 Browser profile、同一个 Google 登录态。
+V1.4 已有 User.id 级别的注册用户 ownership 与配额隔离；但所有用户仍共享同一个 Backend 实例、Browser profile 与 Google/Gemini 登录态，Provider 账号池与 Browser Pool 不属于 V1.4。
 
 ### 单实例
 
@@ -783,11 +783,11 @@ SQLite + 单 Browser Profile + 全局单飞，决定只能单实例运行。同�
 
 当前默认监听 `127.0.0.1`，**不应直接作为公网多租户服务暴露**。
 
-> **PUBLIC RELEASE CANDIDATE — 待真实环境干跑复核（V1.3 P10，2026-09-13）**
+> **V1.4 RELEASE FREEZE — 待 Production Release Review**
 >
 > P10 已完成：限流器键容量 fail-closed 加固（`RATE_LIMITER_CAPACITY_EXCEEDED` → `503 SERVICE_BUSY`，`LIMIT-CAP-01..05` 全绿）、canonical 部署拓扑冻结（`deploy/nginx/personchat.conf.example` + `deploy/systemd/*.service.example`；Nginx TLS → Next.js → Backend，`AUTH_TRUST_PROXY=true` 映射 Express `loopback` 信任）、`LOAD-01`（10 用户 ×5）压测通过。
 >
-> 上线前仍必须完成：**真实环境代理链干跑**（真实 Nginx + HTTPS 下的 XFF spoof / Secure Cookie / SSE 分块 / 大图 body 验收）与发布时的一次性非破坏性真实 Gemini smoke（`docs/P8_DEPLOYMENT_SOP.md` 与 `docs/V13_P10_PUBLIC_RELEASE_ACCEPTANCE_REPORT.md` 的 Operator Checklist）。Browser Pool / 多 Gemini Account 已重新分类为 **scalability limitation**（吞吐扩展），不再是 correctness / 安全阻塞项；P6 不是 L7 DDoS 防护，公网建议叠加 CDN / 反代限流。
+> U6 full-chain security acceptance 已 PASS；Production Release 仍必须完成 backup、真实 DB 指纹复核、`prisma migrate deploy`、production env/Nginx 核验、计划中的真实 Gemini smoke 与 post-deploy auth/browser smoke。Browser Pool / 多 Gemini Account 是 **scalability limitation**，P6 不是 L7 DDoS 防护。
 >
 > `AUTH_ENABLED=false` 只允许 loopback 监听（`HOST` 非 loopback 时启动即 fail-fast），它是单机兼容模式，不是隐式管理员模式，也不豁免任何限额（兼容模式的身份 `COMPAT_USER_ID` 同样进限流桶）。
 
@@ -813,7 +813,7 @@ SQLite + 单 Browser Profile + 全局单飞，决定只能单实例运行。同�
 **不要提交到 Git：**
 
 - `.env`
-- `AUTH_PASSWORD` / `AUTH_SESSION_SECRET`（[§26](#26-访问鉴权sec-1)）
+- `AUTH_PASSWORD`（仅作为 production ADMIN 配置输入；不提交真实值）
 - Google Cookie / Token
 - Browser Profile（`BROWSER_PROFILE_DIR`）
 - SQLite 正式数据（`DATABASE_URL` 指向的 DB 文件）
@@ -853,7 +853,7 @@ Backend:  https://github.com/hukaiedu/NextChatBack
 
 V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择，全部基于 Gemini Web 动态目录，无任何静态模型配置：
 
-- **请求链路定位**：NextChat Frontend → 本 Backend（REST / SSE）→ Playwright Chromium → Gemini Web；不使用 Gemini API；当前为单用户、单 Backend 实例的自托管方案。
+- **请求链路定位**：NextChat Frontend → 本 Backend（REST / SSE）→ Playwright Chromium → Gemini Web；不使用 Gemini API；当前为三身份、单 Backend 实例的自托管方案。
 - **模型目录**：`GET /api/provider/models`（Public），由 Provider 页面实时读取（`listModels()`）。仅 `READY` 可用；`LOGIN_REQUIRED` → `401`，其余非 READY 状态与 Page 锁被占用 → `503 SERVICE_BUSY`（内部码 `PROVIDER_NOT_READY` 只进日志与 Admin 信封，见 [§18.1](#181-public-信封v13-c-契约)）。
 - **三层模型字段**：
   - `Conversation.preferredModelKey` —— 会话模型偏好，经 `PATCH /api/conversations/:id` 保存（显式 `null` = 恢复默认模型）；
@@ -871,38 +871,28 @@ V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择�
 
 ---
 
-## 26. 访问鉴权（SEC-1）
+## 26. V1.4 访问鉴权与身份契约
 
-服务端鉴权（设计唯一来源：[docs/SEC1_AUTH_DESIGN.md](docs/SEC1_AUTH_DESIGN.md)）：Shared Password + 无状态 HMAC Session Cookie，零新依赖（无 Session 表 / Redis / JWT 库），Prisma Schema 零改动。
-
-**端点（始终挂载；`AUTH_ENABLED=false` 时进入 disabled 模式，恒返回 `authenticated: true`）：**
+身份只有 `ANONYMOUS`、`REGISTERED`、`ADMIN`。普通用户使用 username/password；不提供 email、OAuth、2FA、password recovery 或 account deletion。
 
 | 端点 | 行为 |
 | --- | --- |
-| `POST /api/auth/login` | body `{ password }`；成功 200 并 Set-Cookie，密码错 401 `AUTH_INVALID_CREDENTIALS`，限流 429 `AUTH_RATE_LIMITED`（带 `Retry-After`） |
-| `GET /api/auth/session` | 永不 401；返回 `{ authenticated, expiresAt }`，认证状态每次读 Backend 当前事实 |
-| `POST /api/auth/logout` | 幂等 204，`Max-Age=0` 清除 Session Cookie |
+| `POST /api/auth/anonymous` | 创建或复用匿名身份 |
+| `POST /api/auth/register` | 当前匿名身份注册为 REGISTERED；保留同一 `User.id` 与当前聊天 |
+| `POST /api/auth/user/login` | username/password 登录已有 REGISTERED；不迁移当前匿名聊天 |
+| `POST /api/auth/login` | ADMIN 专用密码登录 |
+| `POST /api/auth/password/change` | REGISTERED 当前 subject 改密；保持 subject |
+| `POST /api/auth/sessions/revoke-all` | REGISTERED 撤销该用户全部 Session |
+| `POST /api/auth/logout` | 撤销当前 Session，幂等 |
+| `GET /api/auth/session` | 只读当前身份事实，永不 401 |
 
-三个端点响应统一携带 `Cache-Control: no-store`。`AUTH_ENABLED=true` 时，除 Health 外的全部 `/api/*` 经 `requireAuth` 保护，未认证统一 401 `AUTH_REQUIRED`。
+Session 是随机 opaque token，不是 JWT；数据库只保存 token 的 SHA-256 hash。Cookie `personchat_session` 固定为 `HttpOnly`、`Secure`、`SameSite=Strict`、`Path=/`，无 `Domain`。REGISTERED TTL 以当前 production 环境默认值为准，不能把验收临时值写成永久生产事实；register/login/password change 都轮换当前 token。
 
-**环境变量（`AUTH_ENABLED=true` 时 fail-fast 校验）：**
+Conversation、Message、Request、SSE 的 ownership key 都是 `User.id`，不是 Session、username 或 IP；跨用户业务访问默认返回 404，ADMIN 没有业务 ownership bypass。`Idempotency-Key` 跨用户复用返回 409 是冻结的历史例外。已登录多 Session / 多设备共享 user-level quota/fairness；现有 SSE 在 revoke 后允许有界地继续，不能据此恢复已撤销身份。身份改变不会自动 replay mutation。
 
-| 变量 | 说明 |
-| --- | --- |
-| `AUTH_ENABLED` | 默认 `false`；`NODE_ENV=production` 时必须为 `true`（拒绝无鉴权上线） |
-| `AUTH_PASSWORD` | 开启时必填，min 12 字符；sha256 后恒定时间比较，不落日志 |
-| `AUTH_SESSION_SECRET` | 开启时必填，≥32 字符；推荐 `openssl rand -hex 32`；HMAC-SHA256 签名密钥 |
-| `AUTH_SESSION_TTL_SECONDS` | Session 有效期，默认 604800（7 天），范围 300~2592000 |
-| `AUTH_TRUST_PROXY` | 默认 `false`；只影响 `req.ip`（登录限流键），**不**影响 Cookie Secure |
-| `AUTH_ALLOWED_ORIGINS` | 逗号分隔 Origin 白名单；production + 开启时必填且每项必须 https |
+前端 `/` 为 anonymous-first；普通用户页面为 `/login`、`/register`，管理员页面为独立的 `/admin/login` 与 `/admin`。注册成功不清空当前 chat/messages；登录已有账号会关闭 streams、清除旧 conversation UI 与未发送敏感 draft 后加载目标账号；改密保持 subject；logout、revoke-all、identity lost 才是真正 subject transition。多 Tab 通过 focus/visibility 重新 probe；不引入额外 identity bus。
 
-**Cookie 与 CSRF**：`personchat_session` = `base64url(payload).base64url(HMAC)`，payload 为 `{v,iat,exp,sid}` 紧凑 JSON；属性恒 `HttpOnly` + `SameSite=Strict` + `Path=/`，production 恒 `Secure`（dev http 场景无 `Secure` 属预期）。CSRF 防线 = SameSite=Strict + unsafe method（POST/PUT/PATCH/DELETE）Origin 白名单校验，无 Origin 头（curl/supertest）放行，`Origin: null` 或非法 Origin → 403 `AUTH_CSRF_REJECTED`；禁止通配与子串匹配。
-
-**登录限流**：仅 login 端点；进程内 fixed window（5 次失败 / 10 分钟）按 `req.ip` 分桶；只计密码错误（400 不计、成功清零）；触发返回 429 + `Retry-After`。`AUTH_TRUST_PROXY=false`（默认）时键 = socket remoteAddress——防伪造的安全 fallback；公网部署且全部流量经同一本地代理时退化为全局共享桶（可用性限制，非安全问题）。`AUTH_TRUST_PROXY=true` 仅在真实反向代理覆盖/清洗 XFF 的部署中评估，且启用前必须重测限流键解析与伪造 XFF 两项验收（对应实施报告 REAL-09A/09B）。
-
-**Session 吊销**：无状态设计无在线撤销列表；**全局吊销 = 轮换 `AUTH_SESSION_SECRET` 并重启**（全部旧 Cookie 立即失效）；单设备登出 = `POST /api/auth/logout`。
-
-**前端配套**（front 仓库）：AuthGate 登录门 + `useAuthStore` 状态机（probe/login/logout/markUnauthorized）；业务 API 401 `AUTH_REQUIRED` 与 SSE 探测失效统一触发全局登出并关闭活跃 SSE（后端 Request 不取消，继续执行落库）。
+`AUTH_ENABLED=false` 仅为 loopback 兼容模式；production 必须启用认证。Origin 校验、登录/注册限流和 `AUTH_TRUST_PROXY` 规则以 [.env.example](.env.example) 与 [src/config/env.ts](src/config/env.ts) 为准。
 
 ---
 
