@@ -1,6 +1,8 @@
 import { parseOptions } from "@node-rs/argon2";
 import { describe, expect, it } from "vitest";
 
+import { ErrorCodes } from "../../src/common/errors/error-codes.js";
+import { Argon2CapacityGate } from "../../src/modules/auth/auth.argon2-capacity.js";
 import {
   ARGON2_MEMORY_COST,
   ARGON2_OUTPUT_LEN,
@@ -9,6 +11,7 @@ import {
   DUMMY_PASSWORD_HASH,
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
+  createPasswordCrypto,
   hashPassword,
   verifyPassword,
 } from "../../src/modules/auth/auth.password.js";
@@ -96,5 +99,40 @@ describe("auth.password(V1.4 U2)", () => {
     for (const value of [min, max]) {
       await expect(verifyPassword(await hashPassword(value), value)).resolves.toBe(true);
     }
+  });
+
+  it("D1C gated facade 在 raw verify throw 后释放 permit 并收敛 false", async () => {
+    const gate = new Argon2CapacityGate(1);
+    const crypto = createPasswordCrypto(gate, {
+      hash: async () => "hash",
+      verify: async () => { throw new Error("malformed"); },
+    });
+    await expect(crypto.verifyPassword("bad", PASSWORD)).resolves.toBe(false);
+    expect(gate.activeCount()).toBe(0);
+  });
+
+  it("D1C gated facade 满容量立即拒绝且不调用第二个 raw operation", async () => {
+    const gate = new Argon2CapacityGate(1);
+    let releaseFirst!: () => void;
+    const first = new Promise<string>((resolve) => {
+      releaseFirst = () => resolve("hash");
+    });
+    let hashCalls = 0;
+    const crypto = createPasswordCrypto(gate, {
+      hash: async () => {
+        hashCalls += 1;
+        return first;
+      },
+      verify: async () => false,
+    });
+    const firstRun = crypto.hashPassword(PASSWORD);
+    await Promise.resolve();
+    await expect(crypto.hashPassword("Password456!")).rejects.toMatchObject({
+      code: ErrorCodes.AUTH_CRYPTO_CAPACITY_EXCEEDED,
+    });
+    expect(hashCalls).toBe(1);
+    releaseFirst();
+    await expect(firstRun).resolves.toBe("hash");
+    expect(gate.activeCount()).toBe(0);
   });
 });

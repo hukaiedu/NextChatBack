@@ -15,7 +15,8 @@ import {
   extractCookie,
   setSessionCookie,
 } from "./auth.middleware.js";
-import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, hashPassword } from "./auth.password.js";
+import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "./auth.password.js";
+import type { PasswordCrypto } from "./auth.password.js";
 import { LoginRateLimiter } from "./auth.rate-limit.js";
 import type { ActiveSession, AuthSessionService } from "./auth.session.service.js";
 import type { AuthService } from "./auth.service.js";
@@ -45,6 +46,8 @@ const passwordChangeSchema = z.object({
 
 /** 所有入口限流器都由装配层(app.ts)创建:控制器不负责窗口与淘汰策略 */
 export interface AuthRateLimiters {
+  /** D1C:register/password-change hash 共用 app-runtime gated facade */
+  passwordCrypto: PasswordCrypto;
   /** 测试接缝:带假时钟的登录限流器;省略 = 新建 */
   loginLimiter?: LoginRateLimiter;
   /** P6 §14:匿名身份新建的 IP 双窗口限流器 */
@@ -149,6 +152,7 @@ export function createAuthRouter(
   const userLoginLimiter = rateLimits.userLoginLimiter;
   const registerLimiter = rateLimits.registerLimiter;
   const passwordChangeLimiter = rateLimits.passwordChangeLimiter;
+  const passwordCrypto = rateLimits.passwordCrypto;
 
   /**
    * V1.4 U2 §42/§58/§102/§103:本 router 挂在全局 requireAuth **之前**,所以四个新端点拿不到
@@ -357,7 +361,7 @@ export function createAuthRouter(
             decision.retryAfterSeconds,
           );
         }
-        const passwordHash = await hashPassword(input.data.password);
+        const passwordHash = await passwordCrypto.hashPassword(input.data.password);
         const issued = await sessions.registerAnonymous({
           userId: identity.auth.userId,
           sessionId: identity.auth.sessionId!,
@@ -471,7 +475,7 @@ export function createAuthRouter(
         ) {
           throw new AppError(ErrorCodes.AUTH_INVALID_CREDENTIALS, "Invalid password");
         }
-        const passwordHash = await hashPassword(input.data.newPassword);
+        const passwordHash = await passwordCrypto.hashPassword(input.data.newPassword);
         const issued = await sessions.changeRegisteredPassword({
           userId: identity.auth.userId,
           sessionId: identity.auth.sessionId!,

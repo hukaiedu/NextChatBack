@@ -43,6 +43,8 @@ const BUSY: readonly string[] = [
   ErrorCodes.GLOBAL_QUEUE_FULL,
   // V1.3 P10 §49:限流器自身满容量,对外同样只折 SERVICE_BUSY
   ErrorCodes.RATE_LIMITER_CAPACITY_EXCEEDED,
+  // D1C:Argon2 进程内容量满时,对外同样只折 SERVICE_BUSY
+  ErrorCodes.AUTH_CRYPTO_CAPACITY_EXCEEDED,
 ];
 
 const TIMEOUT: readonly string[] = [

@@ -8,7 +8,9 @@ import { AuthSessionRepository } from "../../src/modules/auth/auth.session.repos
 import { AuthUserRepository } from "../../src/modules/auth/auth.user.repository.js";
 import { ConversationRepository } from "../../src/modules/conversation/conversation.repository.js";
 import { hashSessionToken } from "../../src/modules/auth/auth.session-token.js";
+import { Argon2CapacityGate } from "../../src/modules/auth/auth.argon2-capacity.js";
 import * as authPassword from "../../src/modules/auth/auth.password.js";
+import { createPasswordCrypto } from "../../src/modules/auth/auth.password.js";
 import { verifyPassword } from "../../src/modules/auth/auth.password.js";
 import type { AbuseProtectionConfig } from "../../src/app.js";
 import type { AuthDeps } from "../../src/modules/auth/auth.types.js";
@@ -54,12 +56,20 @@ async function withApp<T>(
     auth?: AuthDeps | null;
     abuse?: AbuseProtectionConfig;
     passwordChangeRateLimiter?: FixedWindowRateLimiterType;
+    argon2MaxConcurrency?: number;
   },
 ): Promise<T> {
+  const argon2CapacityGate = new Argon2CapacityGate(options?.argon2MaxConcurrency ?? 2);
+  const passwordCrypto = createPasswordCrypto(argon2CapacityGate, {
+    hash: (password) => authPassword.hashPassword(password),
+    verify: (hashed, password) => authPassword.verifyPassword(hashed, password),
+  });
   const ctx = await setupTestContext({
     auth: options && "auth" in options ? options.auth! : authDeps(),
     abuse: options?.abuse,
     passwordChangeRateLimiter: options?.passwordChangeRateLimiter,
+    argon2CapacityGate,
+    passwordCrypto,
   });
   try {
     await ctx.reset();
@@ -797,7 +807,7 @@ describe("PWD 改密 Argon2 abuse protection(D1B)", () => {
           hashSpy.mockRestore();
         }
       },
-      { passwordChangeRateLimiter: passwordLimiter },
+      { passwordChangeRateLimiter: passwordLimiter, argon2MaxConcurrency: 16 },
     );
   });
 

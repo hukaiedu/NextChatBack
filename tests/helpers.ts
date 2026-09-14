@@ -6,6 +6,8 @@ import { createApp } from "../src/app.js";
 import type { AbuseProtectionConfig, AppHandle, SchedulerConfig, StreamingConfig } from "../src/app.js";
 import { createLogger } from "../src/common/logger/logger.js";
 import type { FixedWindowRateLimiter } from "../src/common/rate-limit/rate-limiter.js";
+import type { Argon2CapacityGate } from "../src/modules/auth/auth.argon2-capacity.js";
+import type { PasswordCrypto } from "../src/modules/auth/auth.password.js";
 import { ADMIN_USER_ID, AUTH_COOKIE_NAME, COMPAT_USER_ID } from "../src/config/constants.js";
 import type { LoginRateLimiter } from "../src/modules/auth/auth.rate-limit.js";
 import type { AuthSessionService } from "../src/modules/auth/auth.session.service.js";
@@ -44,6 +46,8 @@ export interface TestContext {
   authSessions: AuthSessionService | null;
   /** 入口限流器(V1.4 U2 + D1B 起五个):窗口推进 / 键数量清理断言;close() 统一 dispose */
   rateLimits: AppHandle["rateLimits"];
+  /** D1C:测试观察/注入用的 app-runtime Argon2 gate */
+  argon2CapacityGate: Argon2CapacityGate;
   /** 当前存活的 SSE 连接数 */
   sseConnections(): number;
   reset(): Promise<void>;
@@ -64,6 +68,9 @@ export async function setupTestContext(options?: {
   loginRateLimiter?: LoginRateLimiter;
   /** D1B 测试接缝:注入带假时钟的 Registered 改密 User.id limiter */
   passwordChangeRateLimiter?: FixedWindowRateLimiter;
+  argon2CapacityGate?: Argon2CapacityGate;
+  passwordCrypto?: PasswordCrypto;
+  argon2MaxConcurrency?: number;
   /**
    * V1.3 P6:入口限额。默认放到 env 允许的最宽档 —— 这份 helper 被几十个既有测试文件共用,
    * 它们测的是业务流程而不是限流;P6 专项用例按需传窄值(或自己的假时钟),不改动别人的语义。
@@ -86,6 +93,7 @@ export async function setupTestContext(options?: {
     executor,
     attachmentStore,
     authSessions,
+    argon2CapacityGate,
     rateLimits,
   } = createApp({
     prisma,
@@ -95,6 +103,9 @@ export async function setupTestContext(options?: {
     auth: options?.auth ?? null,
     loginRateLimiter: options?.loginRateLimiter,
     passwordChangeRateLimiter: options?.passwordChangeRateLimiter,
+    argon2CapacityGate: options?.argon2CapacityGate,
+    passwordCrypto: options?.passwordCrypto,
+    argon2MaxConcurrency: options?.argon2MaxConcurrency,
     abuse: {
       anonymousIpLimitPerHour: options?.abuse?.anonymousIpLimitPerHour ?? 10_000,
       anonymousIpLimitPerDay: options?.abuse?.anonymousIpLimitPerDay ?? 100_000,
@@ -137,6 +148,7 @@ export async function setupTestContext(options?: {
     attachmentStore,
     authSessions,
     rateLimits,
+    argon2CapacityGate,
 
     sseConnections(): number {
       return sse.connectionCount();

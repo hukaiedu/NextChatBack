@@ -17,6 +17,7 @@ import {
   MESSAGES_BODY_PATH,
   PASSWORD_CHANGE_MAX_ATTEMPTS,
   PASSWORD_CHANGE_WINDOW_MS,
+  AUTH_ARGON2_MAX_CONCURRENCY,
   REGISTER_IP_MAX_ATTEMPTS,
   REGISTER_IP_WINDOW_MS,
   USER_LOGIN_IP_MAX_FAILURES,
@@ -69,6 +70,9 @@ import { AuthService } from "./modules/auth/auth.service.js";
 import { AuthSessionRepository } from "./modules/auth/auth.session.repository.js";
 import { AuthSessionService } from "./modules/auth/auth.session.service.js";
 import { AuthUserRepository } from "./modules/auth/auth.user.repository.js";
+import { Argon2CapacityGate } from "./modules/auth/auth.argon2-capacity.js";
+import { createPasswordCrypto } from "./modules/auth/auth.password.js";
+import type { PasswordCrypto } from "./modules/auth/auth.password.js";
 import { AnonymousIpRateLimiter } from "./modules/auth/auth.anonymous-rate-limit.js";
 import { LoginRateLimiter } from "./modules/auth/auth.rate-limit.js";
 import type { AuthDeps } from "./modules/auth/auth.types.js";
@@ -129,6 +133,10 @@ export interface AppDeps {
   loginRateLimiter?: LoginRateLimiter;
   /** D1B 测试接缝:注入带假时钟的 Registered 改密 User.id limiter;生产不传 */
   passwordChangeRateLimiter?: FixedWindowRateLimiter;
+  /** D1C 测试接缝:注入 app-runtime Argon2 gate/password facade */
+  argon2CapacityGate?: Argon2CapacityGate;
+  passwordCrypto?: PasswordCrypto;
+  argon2MaxConcurrency?: number;
   /** V1.3 P6:防刷与排队容量;省略 = 全部走 canonical 默认值 */
   abuse?: AbuseProtectionConfig;
   scheduler?: SchedulerConfig;
@@ -155,6 +163,8 @@ export interface AppHandle {
   attachmentStore: AttachmentStore;
   /** V1.3-B2:DB Session 运行时(enabled 时非 null;main.ts 用它启动 sweep) */
   authSessions: AuthSessionService | null;
+  /** D1C:同一 app runtime 内 register/login/password-change 共用的 Argon2 gate */
+  argon2CapacityGate: Argon2CapacityGate;
   /**
    * V1.3 P6/V1.4 D1B:入口限流器。停机必须 dispose(撤 sweep 定时器),
    * 测试用它们断言窗口边界与「过期键被清理、键数不无限增长」。
@@ -173,6 +183,11 @@ export interface AppHandle {
 
 export function createApp(deps: AppDeps): AppHandle {
   const app = express();
+
+  const argon2CapacityGate =
+    deps.argon2CapacityGate ??
+    new Argon2CapacityGate(deps.argon2MaxConcurrency ?? AUTH_ARGON2_MAX_CONCURRENCY);
+  const passwordCrypto = deps.passwordCrypto ?? createPasswordCrypto(argon2CapacityGate);
 
   // §10.2:仅影响 req.ip(登录限流键/审计),必须在挂任何路由前设置
   if (deps.auth?.trustProxy === true) {
@@ -210,6 +225,7 @@ export function createApp(deps: AppDeps): AppHandle {
             sessions: new AuthSessionRepository(),
             users: new AuthUserRepository(),
             logger: deps.logger,
+            passwordCrypto,
             options: {
               ttlAnonymousSeconds: deps.auth.ttlAnonymousSeconds,
               ttlRegisteredSeconds: deps.auth.ttlRegisteredSeconds,
@@ -275,6 +291,7 @@ export function createApp(deps: AppDeps): AppHandle {
       authRuntime?.service ?? null,
       authRuntime?.sessions ?? null,
       {
+        passwordCrypto,
         loginLimiter: deps.loginRateLimiter,
         anonymousIpLimiter,
         userLoginLimiter,
@@ -421,6 +438,7 @@ export function createApp(deps: AppDeps): AppHandle {
     executor: geminiPromptService,
     attachmentStore,
     authSessions: authRuntime?.sessions ?? null,
+    argon2CapacityGate,
     rateLimits: {
       anonymousIp: anonymousIpLimiter,
       chatSubmit: chatSubmitLimiter,

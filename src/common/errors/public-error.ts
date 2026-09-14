@@ -76,6 +76,7 @@ const SERVICE_BUSY: ReadonlySet<string> = new Set<string>([
   ErrorCodes.GLOBAL_QUEUE_FULL,
   // P10 §49:限流器自身满容量同理 —— maxKeys / map 大小绝不外泄
   ErrorCodes.RATE_LIMITER_CAPACITY_EXCEEDED,
+  ErrorCodes.AUTH_CRYPTO_CAPACITY_EXCEEDED,
 ]);
 
 /** 超时类:同类统一(§16) */

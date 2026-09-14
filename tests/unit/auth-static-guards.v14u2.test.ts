@@ -150,4 +150,19 @@ describe("V1.4 U2 auth 模块静态守卫", () => {
     expect(shutdown).toContain("rateLimits.register.dispose()");
     expect(shutdown).toContain("rateLimits.passwordChange.dispose()");
   });
+
+  it("D1C @node-rs/argon2 只允许低层 password module 直接 import", () => {
+    const password = join(AUTH_DIR, "auth.password.ts");
+    expect(codeOf(password)).toContain('@node-rs/argon2');
+    const offenders = files
+      .filter((file) => file !== password)
+      .filter((file) => codeOf(file).includes("@node-rs/argon2"))
+      .map(rel);
+    expect(offenders).toEqual([]);
+    for (const file of ["auth.controller.ts", "auth.session.service.ts"]) {
+      expect(codeOf(join(AUTH_DIR, file))).not.toMatch(
+        /import\s*\{[^}]*\b(?:hashPassword|verifyPassword)\b[^}]*\}\s*from\s*["']\.\/auth\.password\.js["']/s,
+      );
+    }
+  });
 });

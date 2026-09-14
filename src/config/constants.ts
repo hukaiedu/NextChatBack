@@ -146,3 +146,6 @@ export const PASSWORD_CHANGE_WINDOW_MS = 60 * 1000;
 
 /** Registered 改密:每个 User 在窗口内最多进入五次口令处理。 */
 export const PASSWORD_CHANGE_MAX_ATTEMPTS = 5;
+
+/** D1C:一个 app runtime 内允许同时执行的 Argon2 操作数。 */
+export const AUTH_ARGON2_MAX_CONCURRENCY = 2;

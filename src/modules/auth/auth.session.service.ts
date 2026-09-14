@@ -4,7 +4,8 @@ import type { Logger } from "../../common/logger/logger.js";
 import { ADMIN_USER_ID } from "../../config/constants.js";
 import { uniqueViolationInfo } from "../../common/utils/prisma-error.js";
 import type { PrismaClient } from "../../generated/prisma/client.js";
-import { DUMMY_PASSWORD_HASH, verifyPassword } from "./auth.password.js";
+import { DUMMY_PASSWORD_HASH } from "./auth.password.js";
+import type { PasswordCrypto } from "./auth.password.js";
 import type { AuthSessionRepository } from "./auth.session.repository.js";
 import { generateSessionToken, hashSessionToken, parseSessionToken } from "./auth.session-token.js";
 import type { AuthUserRepository } from "./auth.user.repository.js";
@@ -27,6 +28,7 @@ export interface AuthSessionServiceDeps {
   sessions: AuthSessionRepository;
   users: AuthUserRepository;
   logger: Logger;
+  passwordCrypto: PasswordCrypto;
   options: AuthSessionServiceOptions;
   /** 测试接缝:假时钟(与 LoginRateLimiter 同一约定);生产不传 */
   clock?: () => Date;
@@ -89,12 +91,14 @@ export class AuthSessionService {
   private readonly logger: Logger;
   private readonly options: AuthSessionServiceOptions;
   private readonly clock: () => Date;
+  private readonly passwordCrypto: PasswordCrypto;
 
   constructor(deps: AuthSessionServiceDeps) {
     this.prisma = deps.prisma;
     this.sessions = deps.sessions;
     this.users = deps.users;
     this.logger = deps.logger;
+    this.passwordCrypto = deps.passwordCrypto;
     this.options = deps.options;
     this.clock = deps.clock ?? (() => new Date());
   }
@@ -374,7 +378,10 @@ export class AuthSessionService {
       normalizeUsername(input.username),
     );
     // user 为 null 或 passwordHash 为 null(匿名/管理员行)时打 DUMMY:同等 CPU,不泄漏该用户名是否存在
-    const ok = await verifyPassword(user?.passwordHash ?? DUMMY_PASSWORD_HASH, input.password);
+    const ok = await this.passwordCrypto.verifyPassword(
+      user?.passwordHash ?? DUMMY_PASSWORD_HASH,
+      input.password,
+    );
     if (!ok) {
       return { kind: "invalid-credentials" };
     }
@@ -430,7 +437,7 @@ export class AuthSessionService {
     if (user === null || user.type !== "REGISTERED" || user.passwordHash === null) {
       return false;
     }
-    return verifyPassword(user.passwordHash, currentPassword);
+    return this.passwordCrypto.verifyPassword(user.passwordHash, currentPassword);
   }
 
   /**

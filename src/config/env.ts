@@ -5,6 +5,7 @@ import { ErrorCodes } from "../common/errors/error-codes.js";
 import {
   ANONYMOUS_IP_LIMIT_PER_DAY,
   ANONYMOUS_IP_LIMIT_PER_HOUR,
+  AUTH_ARGON2_MAX_CONCURRENCY,
   CHAT_SUBMIT_RATE_LIMIT_PER_MINUTE,
   GLOBAL_MAX_PENDING_REQUESTS,
   REGISTER_IP_MAX_ATTEMPTS,
@@ -101,6 +102,8 @@ const envSchema = z.object({
   AUTH_TRUST_PROXY: boolFromString.default("false"),
   /** 逗号分隔 Origin 白名单;每项规范化校验见 auth 模块(§7.2) */
   AUTH_ALLOWED_ORIGINS: z.string().optional(),
+  /** D1C:进程内 Argon2 fail-fast 并发容量,不进数据库 */
+  AUTH_ARGON2_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(AUTH_ARGON2_MAX_CONCURRENCY),
 
   // —— V1.3 P6 入口防刷与队列容量(§11/§12:全部 env → runtime config,不进数据库)——
   /** 同一 IP 每小时可新建多少个匿名身份(见任务书 Abuse-01:保护「创建」而非「使用」) */

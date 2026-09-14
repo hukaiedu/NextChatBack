@@ -85,6 +85,8 @@ export const ErrorCodes = {
    * 刻意**不用于登录**:登录面一律统一成 `AUTH_INVALID_CREDENTIALS`,不额外暴露「这个用户名存在但被禁用」。
    */
   AUTH_USER_DISABLED: "AUTH_USER_DISABLED",
+  // D1C:Argon2 进程容量已满,对外统一折成 SERVICE_BUSY(503)
+  AUTH_CRYPTO_CAPACITY_EXCEEDED: "AUTH_CRYPTO_CAPACITY_EXCEEDED",
 
   // V1.3 P6 入口防刷与队列容量(对外一律折进 SERVICE_BUSY,原码只进日志/Admin)
   // 频率:同一用户在时间窗内提交太快(与队列容量无关,重放也算)

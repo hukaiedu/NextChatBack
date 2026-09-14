@@ -39,6 +39,7 @@ async function main(): Promise<void> {
       options: { responseTimeoutMs: env.GEMINI_RESPONSE_TIMEOUT_MS },
       logger,
     }),
+    argon2MaxConcurrency: env.AUTH_ARGON2_MAX_CONCURRENCY,
     // V1.3 P6:限额全部来自 env(§13:不进数据库);生产逐项显式传,不依赖代码默认值
     abuse: {
       anonymousIpLimitPerHour: env.AUTH_ANONYMOUS_IP_LIMIT_PER_HOUR,

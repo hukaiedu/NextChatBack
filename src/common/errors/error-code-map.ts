@@ -71,6 +71,7 @@ export const ERROR_CODE_HTTP_STATUS = {
   AUTH_USERNAME_ALREADY_TAKEN: 409,
   AUTH_IDENTITY_NOT_ANONYMOUS: 409,
   AUTH_USER_DISABLED: 401,
+  AUTH_CRYPTO_CAPACITY_EXCEEDED: 503,
 
   // V1.3 P6:三个入口限额的 Public 码都是 SERVICE_BUSY,HTTP 状态仍由这里的原始码决定
   // (提交太快 / 该用户排队已满 = 用户侧可退避重试 → 429;全库满 = 服务容量 → 503)

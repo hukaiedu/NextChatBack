@@ -163,6 +163,7 @@ describe("parseEnv V1.3 P6 限额 env(§11/§12 范围)", () => {
     // V1.4 U2 §28/§29:注册账号的两个 IP 计数(窗口长度是常量,不进 env)
     { key: "AUTH_USER_LOGIN_IP_MAX_FAILURES", def: 5, min: 1, max: 1_000 },
     { key: "AUTH_REGISTER_IP_MAX_ATTEMPTS", def: 5, min: 1, max: 1_000 },
+    { key: "AUTH_ARGON2_MAX_CONCURRENCY", def: 2, min: 1, max: 16 },
   ] as const;
 
   for (const { key, def, min, max } of limits) {

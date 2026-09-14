@@ -1,5 +1,7 @@
 import { Algorithm, hash, verify } from "@node-rs/argon2";
 
+import { Argon2CapacityGate } from "./auth.argon2-capacity.js";
+
 /**
  * V1.4 U2:口令散列与策略(design §6 / R5,任务书 §15-§18)。
  *
@@ -30,6 +32,16 @@ const ARGON2_OPTIONS = {
   outputLen: ARGON2_OUTPUT_LEN,
 } as const;
 
+export interface RawPasswordCrypto {
+  hash(password: string): Promise<string>;
+  verify(hashed: string, password: string): Promise<boolean>;
+}
+
+export interface PasswordCrypto {
+  hashPassword(password: string): Promise<string>;
+  verifyPassword(hashed: string, password: string): Promise<boolean>;
+}
+
 /**
  * 用户名不存在时也执行一次同等成本的 verify,缩小「查无此人」与「密码错误」的 CPU 时间差
  * (design §6)。这只降低信号强度,不声称 constant-time。
@@ -40,9 +52,32 @@ const ARGON2_OPTIONS = {
 export const DUMMY_PASSWORD_HASH =
   "$argon2id$v=19$m=19456,t=2,p=1$Pgl6ECXcP0IyrXiT4fclQQ$8JZBkcdDrwRGbCTXCHPoT23f4bgU6NKYwfxq11/lc8I";
 
+const rawPasswordCrypto: RawPasswordCrypto = {
+  hash: (password) => hash(password, ARGON2_OPTIONS),
+  verify: (hashed, password) => verify(hashed, password),
+};
+
+/** Production auth paths use this app-runtime-scoped gated facade. */
+export function createPasswordCrypto(
+  gate: Argon2CapacityGate,
+  raw: RawPasswordCrypto = rawPasswordCrypto,
+): PasswordCrypto {
+  return {
+    hashPassword: (password) => gate.run(() => raw.hash(password)),
+    verifyPassword: (hashed, password) =>
+      gate.run(async () => {
+        try {
+          return await raw.verify(hashed, password);
+        } catch {
+          return false;
+        }
+      }),
+  };
+}
+
 /** async-only:散列是 CPU 昂贵操作,请求路径上绝不用 hashSync/verifySync */
 export function hashPassword(password: string): Promise<string> {
-  return hash(password, ARGON2_OPTIONS);
+  return rawPasswordCrypto.hash(password);
 }
 
 /**
@@ -52,7 +87,7 @@ export function hashPassword(password: string): Promise<string> {
  */
 export async function verifyPassword(hashed: string, password: string): Promise<boolean> {
   try {
-    return await verify(hashed, password);
+    return await rawPasswordCrypto.verify(hashed, password);
   } catch {
     return false;
   }
