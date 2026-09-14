@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 /**
  * Migration 专项测试共用的临时库工装。
@@ -26,6 +26,48 @@ export interface RawDb {
 
 const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3") as new (file: string) => RawDb;
+const REAL_APP_DB = resolve(process.cwd(), "data", "database", "app.db");
+
+function canonicalPath(file: string): string {
+  return resolve(file).toLowerCase();
+}
+
+function assertSafeTarget(dbFile: string): string {
+  const target = resolve(dbFile);
+  if (canonicalPath(target) === canonicalPath(REAL_APP_DB)) {
+    throw new Error(`migration target must not be real app.db: ${target}`);
+  }
+  const databaseUrl = `file:${target.replace(/\\/g, "/")}`;
+  const parsedTarget = resolve(databaseUrl.slice("file:".length).replace(/\//g, "\\"));
+  if (canonicalPath(parsedTarget) !== canonicalPath(target)) {
+    throw new Error(`DATABASE_URL did not resolve to target DB: ${databaseUrl}`);
+  }
+  console.log(`REAL_DB=${REAL_APP_DB}`);
+  console.log(`TARGET_DB=${target}`);
+  console.log(`DATABASE_URL=${databaseUrl}`);
+  return databaseUrl;
+}
+
+/** 创建空 SQLite 文件并在 Prisma subprocess 前执行 real-app.db hard guard。 */
+export function prepareSafeMigrationDb(dbFile: string): string {
+  const databaseUrl = assertSafeTarget(dbFile);
+  const target = resolve(dbFile);
+  mkdirSync(dirname(target), { recursive: true });
+  rmSync(target, { force: true });
+  const db = new Database(target);
+  db.close();
+  return databaseUrl;
+}
+
+/** 对已存在的 temp DB 做同一 hard guard；不重置其内容。 */
+export function safeDatabaseUrl(dbFile: string): string {
+  const databaseUrl = assertSafeTarget(dbFile);
+  const target = resolve(dbFile);
+  if (!existsSync(target)) {
+    throw new Error(`migration target SQLite file does not exist: ${target}`);
+  }
+  return databaseUrl;
+}
 
 export function migrationSql(name: string): string {
   return readFileSync(join(process.cwd(), "prisma", "migrations", name, "migration.sql"), "utf8");

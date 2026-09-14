@@ -35,6 +35,78 @@ function isDatabaseError(err: unknown): boolean {
 }
 
 /**
+ * 错误日志只接收这份投影,不把原始 Error/cause 交给 Pino。
+ * body-parser 的 SyntaxError.body 是原始请求体,可能包含 password/currentPassword 等明文;
+ * 其它错误对象也可能通过嵌套 cause 携带 token/cookie/hash,所以过滤必须递归且不修改原对象。
+ */
+const SENSITIVE_ERROR_KEY =
+  /(?:body|password|token|cookie|authorization|secret|hash|api[_-]?key)/i;
+
+function isSensitiveErrorKey(key: string): boolean {
+  return key === "body" || key === "rawBody" || SENSITIVE_ERROR_KEY.test(key);
+}
+
+function safeErrorLogValue(value: unknown, seen: WeakSet<object>): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (seen.has(value)) {
+    return "[Circular]";
+  }
+  seen.add(value);
+
+  if (value instanceof Error) {
+    // 保留原 Error 的 prototype 供 Pino 推导 type,但所有实例字段都来自安全复制。
+    const projected = Object.create(Object.getPrototypeOf(value)) as Error &
+      Record<string, unknown>;
+    Object.defineProperty(projected, "message", {
+      value: value.message,
+      enumerable: false,
+      configurable: true,
+    });
+    if (value.stack !== undefined) {
+      Object.defineProperty(projected, "stack", {
+        value: value.stack,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+    for (const key of Object.keys(value)) {
+      if (isSensitiveErrorKey(key) || key === "message" || key === "stack") continue;
+      Object.defineProperty(projected, key, {
+        value: safeErrorLogValue((value as unknown as Record<string, unknown>)[key], seen),
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    // Error.cause 通常是 non-enumerable;显式投影它,同时递归执行同一套过滤。
+    if ("cause" in value && !Object.prototype.hasOwnProperty.call(projected, "cause")) {
+      Object.defineProperty(projected, "cause", {
+        value: safeErrorLogValue((value as Error & { cause?: unknown }).cause, seen),
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    return projected;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => safeErrorLogValue(item, seen));
+  }
+
+  const projected: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (isSensitiveErrorKey(key)) continue;
+    projected[key] = safeErrorLogValue(item, seen);
+  }
+  return projected;
+}
+
+function safeErrorLogRepresentation(error: unknown): unknown {
+  return safeErrorLogValue(error, new WeakSet<object>());
+}
+
+/**
  * 统一错误出口:
  * - AppError → 对应 statusCode + { error: { code, message, requestId } }
  * - 请求体超过 body limit → 413 PAYLOAD_TOO_LARGE
@@ -75,8 +147,8 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
         code: appErr.code,
         statusCode: appErr.statusCode,
         message: appErr.message,
-        // 完整原始异常只写服务端日志,响应不回传
-        err: appErr.cause ?? appErr,
+        // 只写不含 raw body / credential 的错误投影,不修改 appErr 或其 cause 原对象。
+        err: safeErrorLogRepresentation(appErr.cause ?? appErr),
       },
       "request failed",
     );

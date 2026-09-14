@@ -2,17 +2,17 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -20,7 +20,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ADMIN_USER_ID } from "../../src/config/constants.js";
 import { isUniqueViolation, uniqueViolationInfo } from "../../src/common/utils/prisma-error.js";
 import { createPrismaClient } from "../../src/database/prisma.js";
-import { columnsOf, foreignKeyViolations, objectSql, openDatabase, rawCount } from "../migration-harness.js";
+import {
+  columnsOf,
+  foreignKeyViolations,
+  objectSql,
+  openDatabase,
+  prepareSafeMigrationDb,
+  rawCount,
+  safeDatabaseUrl,
+} from "../migration-harness.js";
 import type { RawDb } from "../migration-harness.js";
 
 /**
@@ -37,9 +45,9 @@ const require = createRequire(import.meta.url);
 const PRISMA_CLI = require.resolve("prisma/build/index.js");
 
 const REPO = process.cwd();
-const REAL_APP_DB = join(REPO, "data", "database", "app.db");
 const SCHEMA = join(REPO, "prisma", "schema.prisma");
 const MIGRATIONS_DIR = join(REPO, "prisma", "migrations");
+const REAL_APP_DB = resolve(REPO, "data", "database", "app.db");
 
 const U1_MIGRATION = "20260914120000_v14_u1_user_credential";
 /** V1.3 发布冻结点:U1 之前的最后一份 schema / generated client */
@@ -56,14 +64,6 @@ const NEW_COLUMNS = ["username", "usernameNormalized", "passwordHash"];
 const UNIQUE_INDEX = "User_usernameNormalized_key";
 /** User 的列顺序:三个新列由 ADD COLUMN 追加在既有五列之后 */
 const USER_COLUMN_ORDER = ["id", "type", "status", "createdAt", "updatedAt", ...NEW_COLUMNS];
-
-function fileUrl(path: string): string {
-  return `file:${path.replace(/\\/g, "/")}`;
-}
-
-function sha256(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
 
 interface CliResult {
   ok: boolean;
@@ -87,7 +87,9 @@ function runPrisma(args: string[], env: Record<string, string>): CliResult {
 
 /** 仓库全量 migrations + prisma.config.ts;只通过 DATABASE_URL 换库 */
 function deployAll(dbFile: string): CliResult {
-  return runPrisma(["migrate", "deploy", "--schema", SCHEMA], { DATABASE_URL: fileUrl(dbFile) });
+  return runPrisma(["migrate", "deploy", "--schema", SCHEMA], {
+    DATABASE_URL: safeDatabaseUrl(dbFile),
+  });
 }
 
 /**
@@ -108,7 +110,7 @@ function deployOnly(
     mkdirSync(to, { recursive: true });
     copyFileSync(join(MIGRATIONS_DIR, name, "migration.sql"), join(to, "migration.sql"));
   }
-  const url = fileUrl(dbFile);
+  const url = prepareSafeMigrationDb(dbFile);
   const configFile = join(dir, `${tag}.config.mjs`);
   writeFileSync(
     configFile,
@@ -251,6 +253,16 @@ describe("V1.4 U1 user credential migration", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("MIG-GUARD-01 real app.db target fails before filesystem mutation", () => {
+    const beforeHash = createHash("sha256").update(readFileSync(REAL_APP_DB)).digest("hex");
+    const beforeSize = statSync(REAL_APP_DB).size;
+
+    expect(() => prepareSafeMigrationDb(REAL_APP_DB)).toThrow(/must not be real app\.db/);
+
+    expect(createHash("sha256").update(readFileSync(REAL_APP_DB)).digest("hex")).toBe(beforeHash);
+    expect(statSync(REAL_APP_DB).size).toBe(beforeSize);
+  });
+
   // §34/§35:diff 面只含三列 + 一个 unique index;migration.sql 不含任何数据写入或破坏性语句
   it("U1-DIFF-01 prisma migrate diff 与手写 migration.sql 语句集合等价", () => {
     const headSchema = join(dir, "schema-head.prisma");
@@ -296,25 +308,19 @@ describe("V1.4 U1 user credential migration", () => {
     expect(code.match(/BEGIN;|COMMIT;/g)).toEqual(["BEGIN;", "COMMIT;"]);
   });
 
-  describe.skipIf(!existsSync(REAL_APP_DB))("MIG-01/02 真实 app.db 冷副本", () => {
+  describe("MIG-01/02 explicit pre-U1 temp fixture", () => {
     let target: string;
     let pristine: string;
-    let sourceHashBefore: string;
-    let sourceHashAfter: string;
 
     beforeAll(() => {
       target = join(dir, "app-copy.db");
       pristine = join(dir, "app-pristine.db");
-      sourceHashBefore = sha256(REAL_APP_DB);
-      copyFileSync(REAL_APP_DB, target);
-      // 复制期间真实库可能被本机在跑的后端写入:再取一次 hash,两次相同才证明副本是一致的时点快照
-      sourceHashAfter = sha256(REAL_APP_DB);
-      copyFileSync(REAL_APP_DB, pristine);
+      const seeded = deployOnly(target, PREFIX_MIGRATIONS, dir, "mig01-prefix");
+      expect(seeded.ok, seeded.output).toBe(true);
+      copyFileSync(target, pristine);
     });
 
-    it("MIG-01a 冷复制自证一致,且副本起点确实缺少 U1", () => {
-      expect(sourceHashAfter).toBe(sourceHashBefore);
-      expect(sha256(target)).toBe(sourceHashBefore);
+    it("MIG-01a 显式 pre-U1 fixture 恰有 6 条 migration 且缺少 U1", () => {
       const before = openDatabase(target);
       try {
         expect(appliedMigrations(before).slice().sort()).toEqual(PREFIX_MIGRATIONS);
@@ -324,7 +330,7 @@ describe("V1.4 U1 user credential migration", () => {
       }
     });
 
-    it("MIG-01 真实 runner 只补 U1,结构与数据零漂移", () => {
+    it("MIG-01 真实 runner 对 pre-U1 fixture 只补 U1,结构与数据零漂移", () => {
       const before = openDatabase(pristine);
       let usersBefore: Record<string, unknown>[];
       let objectsBefore: Record<string, string | null>;
@@ -438,6 +444,7 @@ describe("V1.4 U1 user credential migration", () => {
 
     beforeAll(() => {
       dbFile = join(dir, "multi-null.db");
+      prepareSafeMigrationDb(dbFile);
       const deployed = deployAll(dbFile);
       expect(deployed.ok, deployed.output).toBe(true);
     });
@@ -474,7 +481,7 @@ describe("V1.4 U1 user credential migration", () => {
     });
 
     it("匿名 bootstrap 的 Prisma 写入形状在 U1 之后照常工作", async () => {
-      const prisma = await createPrismaClient(fileUrl(dbFile));
+      const prisma = await createPrismaClient(safeDatabaseUrl(dbFile));
       try {
         // 与 AuthUserRepository.createAnonymous 同形状(U1 不改 auth 代码,这里只在 DB 层验证)
         const first = await prisma.user.create({ data: { type: "ANONYMOUS", status: "ACTIVE" } });
@@ -496,12 +503,13 @@ describe("V1.4 U1 user credential migration", () => {
 
     beforeAll(() => {
       dbFile = join(dir, "unique.db");
+      prepareSafeMigrationDb(dbFile);
       const deployed = deployAll(dbFile);
       expect(deployed.ok, deployed.output).toBe(true);
     });
 
     it("同名第二次写入被拒,P2002 的结构化 fields 含 usernameNormalized", async () => {
-      const prisma = await createPrismaClient(fileUrl(dbFile));
+      const prisma = await createPrismaClient(safeDatabaseUrl(dbFile));
       const credential = (username: string, normalized: string, hash: string) => ({
         type: "REGISTERED",
         username,
@@ -656,6 +664,7 @@ describe("V1.4 U1 user credential migration", () => {
 
     beforeAll(() => {
       dbFile = join(dir, "old-client.db");
+      prepareSafeMigrationDb(dbFile);
       const deployed = deployAll(dbFile);
       expect(deployed.ok, deployed.output).toBe(true);
 
@@ -698,7 +707,7 @@ describe("V1.4 U1 user credential migration", () => {
       };
 
       const old = new clientModule.PrismaClient({
-        adapter: new PrismaBetterSqlite3({ url: fileUrl(dbFile) }),
+        adapter: new PrismaBetterSqlite3({ url: safeDatabaseUrl(dbFile) }),
       });
       let createdUserId = "";
       try {

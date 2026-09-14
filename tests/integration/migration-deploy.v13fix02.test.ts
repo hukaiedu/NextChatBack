@@ -22,7 +22,9 @@ import {
   insertRequest,
   objectSql,
   openDatabase,
+  prepareSafeMigrationDb,
   rawCount,
+  safeDatabaseUrl,
 } from "../migration-harness.js";
 import type { RawDb } from "../migration-harness.js";
 
@@ -72,10 +74,6 @@ const HISTORY_SNAPSHOT = `
          CAST("createdAt" AS TEXT) createdAt, CAST("updatedAt" AS TEXT) updatedAt,
          CAST("deletedAt" AS TEXT) deletedAt
   FROM "Conversation" ORDER BY "id"`;
-
-function fileUrl(path: string): string {
-  return `file:${path.replace(/\\/g, "/")}`;
-}
 
 interface DeployResult {
   ok: boolean;
@@ -250,7 +248,7 @@ describe.skipIf(!existsSync(REAL_APP_DB))(
       copyFileSync(REAL_APP_DB, target);
       copyFileSync(REAL_APP_DB, pristine);
 
-      const deployed = deployAll(fileUrl(target));
+      const deployed = deployAll(safeDatabaseUrl(target));
       expect(deployed.ok, deployed.output).toBe(true);
 
       const upgraded = openDatabase(target);
@@ -314,7 +312,7 @@ describe.skipIf(!existsSync(REAL_APP_DB))(
         copyFileSync(join(MIGRATIONS_DIR, name, "migration.sql"), join(to, "migration.sql"));
       }
       const prefixDeploy = deployPrefixOnly(
-        fileUrl(target),
+        prepareSafeMigrationDb(target),
         prefixMigrations,
         join(dir, "prefix.config.mjs"),
       );
@@ -342,7 +340,7 @@ describe.skipIf(!existsSync(REAL_APP_DB))(
         probe.close();
       }
 
-      const failed = deployAll(fileUrl(target));
+      const failed = deployAll(safeDatabaseUrl(target));
       expect(failed.ok, "B4 竟然 deploy 成功 —— §46 的 NOT NULL 防线失效").toBe(false);
       // 实测:真实 runner 报 P3018,底层约束落在重建目标表 new_Conversation 上
       expect(failed.output).toMatch(/P3018/);
@@ -378,7 +376,7 @@ describe.skipIf(!existsSync(REAL_APP_DB))(
       }
 
       // 实测的恢复路径:runner 不会替你猜 —— 未 resolve 之前再 deploy 一律 P3009 拒绝
-      const blocked = deployAll(fileUrl(target));
+      const blocked = deployAll(safeDatabaseUrl(target));
       expect(blocked.ok, "未 resolve 就又跑了一次 deploy").toBe(false);
       expect(blocked.output).toMatch(/P3009/);
 
@@ -391,9 +389,9 @@ describe.skipIf(!existsSync(REAL_APP_DB))(
       } finally {
         fixer.close();
       }
-      const resolved = resolveRolledBack(B4_MIGRATION, fileUrl(target));
+      const resolved = resolveRolledBack(B4_MIGRATION, safeDatabaseUrl(target));
       expect(resolved.ok, resolved.output).toBe(true);
-      const retry = deployAll(fileUrl(target));
+      const retry = deployAll(safeDatabaseUrl(target));
       expect(retry.ok, retry.output).toBe(true);
       const done = openDatabase(target);
       try {
