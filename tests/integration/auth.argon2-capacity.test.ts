@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { AppError } from "../../src/common/errors/app-error.js";
-import { ErrorCodes } from "../../src/common/errors/error-codes.js";
 import { PublicErrorCodes } from "../../src/common/errors/public-error.js";
 import { FixedWindowRateLimiter } from "../../src/common/rate-limit/rate-limiter.js";
 import { Argon2CapacityGate } from "../../src/modules/auth/auth.argon2-capacity.js";
@@ -199,37 +197,81 @@ describe("D1C Global Argon2 Capacity", () => {
 
   it("AGC-08 hash-stage capacity reject 不写 password/session,且 public 只见 SERVICE_BUSY", async () => {
     const gate = new Argon2CapacityGate(1);
-    let rejectHash = false;
+    const limiter = new FixedWindowRateLimiter({ windowMs: 60_000, max: 5 });
+    const stats = { hashCalls: 0, verifyCalls: 0 };
     const raw: RawPasswordCrypto = {
-      async hash() {
-        return "fake:initial";
+      async hash(password) {
+        stats.hashCalls += 1;
+        return `fake:${password}`;
       },
       async verify() {
+        stats.verifyCalls += 1;
         return true;
       },
     };
     const gated = createPasswordCrypto(gate, raw);
+    let blocker: ReturnType<Argon2CapacityGate["tryAcquire"]> = null;
+    let holdAfterVerify = false;
     const crypto: PasswordCrypto = {
-      verifyPassword: gated.verifyPassword,
-      hashPassword: async (password) => {
-        if (rejectHash) {
-          throw new AppError(ErrorCodes.AUTH_CRYPTO_CAPACITY_EXCEEDED, "capacity");
+      verifyPassword: async (hashed, password) => {
+        const verified = await gated.verifyPassword(hashed, password);
+        if (verified && holdAfterVerify) {
+          blocker = gate.tryAcquire();
+          if (blocker === null) {
+            throw new Error("test blocker failed to acquire Argon2 permit");
+          }
         }
-        return gated.hashPassword(password);
+        return verified;
       },
+      hashPassword: (password) => gated.hashPassword(password),
     };
     await withApp(gate, crypto, async (ctx) => {
       const cookie = await registered(ctx, "alice");
+      const secondCookieResponse = await post(
+        ctx,
+        "/api/auth/user/login",
+        { username: "alice", password: PASSWORD },
+      );
+      expect(secondCookieResponse.status).toBe(200);
+      const secondCookie = cookieOf(secondCookieResponse);
       const user = await ctx.prisma.user.findUnique({ where: { usernameNormalized: "alice" } });
       const beforeHash = user!.passwordHash;
-      const beforeSessions = await ctx.prisma.session.count({ where: { userId: user!.id } });
-      rejectHash = true;
-      const response = await post(ctx, "/api/auth/password/change", { currentPassword: PASSWORD, newPassword: "Changed123!" }, cookie);
-      expect(response.status).toBe(503);
-      expect(errorCode(await response.json())).toBe(PublicErrorCodes.SERVICE_BUSY);
-      expect((await ctx.prisma.user.findUnique({ where: { id: user!.id } }))!.passwordHash).toBe(beforeHash);
-      expect(await ctx.prisma.session.count({ where: { userId: user!.id } })).toBe(beforeSessions);
-    });
+      const beforeSessions = await ctx.prisma.session.findMany({
+        where: { userId: user!.id },
+        orderBy: { id: "asc" },
+      });
+      stats.hashCalls = 0;
+      stats.verifyCalls = 0;
+      holdAfterVerify = true;
+      try {
+        const response = await post(
+          ctx,
+          "/api/auth/password/change",
+          { currentPassword: PASSWORD, newPassword: "Changed123!" },
+          cookie,
+        );
+        expect(response.status).toBe(503);
+        expect(errorCode(await response.json())).toBe(PublicErrorCodes.SERVICE_BUSY);
+        expect(stats.verifyCalls).toBe(1);
+        expect(stats.hashCalls).toBe(0);
+        expect(limiter.keyCount()).toBe(1);
+        expect(gate.activeCount()).toBe(1);
+        expect((await ctx.prisma.user.findUnique({ where: { id: user!.id } }))!.passwordHash).toBe(
+          beforeHash,
+        );
+        expect(
+          await ctx.prisma.session.findMany({
+            where: { userId: user!.id },
+            orderBy: { id: "asc" },
+          }),
+        ).toEqual(beforeSessions);
+        expect(secondCookie).not.toBe(cookie);
+      } finally {
+        holdAfterVerify = false;
+        blocker?.release();
+      }
+      expect(gate.activeCount()).toBe(0);
+    }, { passwordChangeRateLimiter: limiter });
   });
 
   it("AGC-09/10 register + login 占满同一个 gate 时,password-change fail-fast", async () => {

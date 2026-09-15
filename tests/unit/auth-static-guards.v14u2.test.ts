@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
  */
 
 const AUTH_DIR = join(process.cwd(), "src", "modules", "auth");
+const SRC_DIR = join(process.cwd(), "src");
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -33,6 +34,7 @@ function codeOf(path: string): string {
 }
 
 const files = sourceFiles(AUTH_DIR);
+const productionFiles = sourceFiles(SRC_DIR);
 const rel = (path: string) => relative(process.cwd(), path).replace(/\\/g, "/");
 
 describe("V1.4 U2 auth 模块静态守卫", () => {
@@ -152,17 +154,33 @@ describe("V1.4 U2 auth 模块静态守卫", () => {
   });
 
   it("D1C @node-rs/argon2 只允许低层 password module 直接 import", () => {
-    const password = join(AUTH_DIR, "auth.password.ts");
-    expect(codeOf(password)).toContain('@node-rs/argon2');
-    const offenders = files
+    const password = join(SRC_DIR, "modules", "auth", "auth.password.ts");
+    expect(codeOf(password)).toContain("@node-rs/argon2");
+    const offenders = productionFiles
       .filter((file) => file !== password)
       .filter((file) => codeOf(file).includes("@node-rs/argon2"))
       .map(rel);
     expect(offenders).toEqual([]);
-    for (const file of ["auth.controller.ts", "auth.session.service.ts"]) {
-      expect(codeOf(join(AUTH_DIR, file))).not.toMatch(
-        /import\s*\{[^}]*\b(?:hashPassword|verifyPassword)\b[^}]*\}\s*from\s*["']\.\/auth\.password\.js["']/s,
-      );
+  });
+
+  it("D1C production src 全扫描禁止裸 hash/verify 与 namespace bypass", () => {
+    const password = join(SRC_DIR, "modules", "auth", "auth.password.ts");
+    const offenders: string[] = [];
+    for (const file of productionFiles) {
+      if (file === password) continue;
+      const code = codeOf(file);
+      const imports = code.match(
+        /import[\s\S]*?from\s*["'][^"']*auth\.password\.js["']\s*;?/g,
+      ) ?? [];
+      for (const statement of imports) {
+        if (/import\s*\*\s*as\s+/s.test(statement)) {
+          offenders.push(`${rel(file)}: namespace auth.password import`);
+        }
+        if (/\b(?:hashPassword|verifyPassword)\b/.test(statement)) {
+          offenders.push(`${rel(file)}: raw hash/verify import`);
+        }
+      }
     }
+    expect(offenders).toEqual([]);
   });
 });
