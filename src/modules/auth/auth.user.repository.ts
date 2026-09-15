@@ -55,7 +55,7 @@ export class AuthUserRepository {
   /**
    * 匿名原地升级为注册用户(V1.4 U2 §23,R7)。
    *
-   * `WHERE id = ? AND type = 'ANONYMOUS'` 这个谓词就是 CAS:并发双提交里只有第一条
+   * `WHERE id = ? AND type = 'ANONYMOUS' AND status = 'ACTIVE'` 这个谓词就是 CAS:并发双提交里只有第一条
    * 拿到 count=1,败方拿到 0 —— 靠 SQLite 写序列化裁决,不靠读后判断,所以
    * **User 终态不会随机覆盖**。升级只写这一行:不动 Conversation/Message/ModelRequest,
    * 因此零业务数据搬迁(R7)是结构性的,不是靠约定。
@@ -65,7 +65,7 @@ export class AuthUserRepository {
     data: { userId: string; username: string; usernameNormalized: string; passwordHash: string },
   ): Promise<number> {
     const result = await db.user.updateMany({
-      where: { id: data.userId, type: "ANONYMOUS" },
+      where: { id: data.userId, type: "ANONYMOUS", status: "ACTIVE" },
       data: {
         type: "REGISTERED",
         username: data.username,

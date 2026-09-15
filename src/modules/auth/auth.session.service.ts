@@ -9,6 +9,7 @@ import type { PasswordCrypto } from "./auth.password.js";
 import type { AuthSessionRepository } from "./auth.session.repository.js";
 import { generateSessionToken, hashSessionToken, parseSessionToken } from "./auth.session-token.js";
 import type { AuthUserRepository } from "./auth.user.repository.js";
+import type { AnonymousDataCleanupService } from "./anonymous-data-cleanup.service.js";
 import { normalizeUsername } from "./auth.username.js";
 import type { AuthContext, UserType } from "./auth.types.js";
 
@@ -32,6 +33,7 @@ export interface AuthSessionServiceDeps {
   options: AuthSessionServiceOptions;
   /** 测试接缝:假时钟(与 LoginRateLimiter 同一约定);生产不传 */
   clock?: () => Date;
+  anonymousDataCleanup?: AnonymousDataCleanupService;
 }
 
 /** renewed=true ⇒ 本次调用赢得 CAS,调用方必须按同一 raw token 重发 Set-Cookie */
@@ -92,6 +94,7 @@ export class AuthSessionService {
   private readonly options: AuthSessionServiceOptions;
   private readonly clock: () => Date;
   private readonly passwordCrypto: PasswordCrypto;
+  private readonly anonymousDataCleanup?: AnonymousDataCleanupService;
 
   constructor(deps: AuthSessionServiceDeps) {
     this.prisma = deps.prisma;
@@ -101,6 +104,7 @@ export class AuthSessionService {
     this.passwordCrypto = deps.passwordCrypto;
     this.options = deps.options;
     this.clock = deps.clock ?? (() => new Date());
+    this.anonymousDataCleanup = deps.anonymousDataCleanup;
   }
 
   /**
@@ -253,7 +257,12 @@ export class AuthSessionService {
     if (rawToken === null) {
       return false;
     }
-    const count = await this.sessions.deleteByTokenHash(this.prisma, hashSessionToken(rawToken));
+    const tokenHash = hashSessionToken(rawToken);
+    const session = await this.sessions.findByTokenHash(this.prisma, tokenHash);
+    const count = await this.sessions.deleteByTokenHash(this.prisma, tokenHash);
+    if (count > 0 && session?.user.type === "ANONYMOUS") {
+      await this.anonymousDataCleanup?.cleanupEligible(this.clock());
+    }
     return count > 0;
   }
 
@@ -496,10 +505,12 @@ export class AuthSessionService {
     };
   }
 
-  /** V1.3 §19:只删已过期 Session(不碰 User);失败只记日志,绝不打崩服务 */
+  /** V1.3 §19:删已过期 Session并清理失效匿名用户;失败只记日志,绝不打崩服务 */
   async sweepExpired(): Promise<number> {
     try {
-      const count = await this.sessions.deleteExpired(this.prisma, this.clock());
+      const now = this.clock();
+      const count = await this.sessions.deleteExpired(this.prisma, now);
+      await this.anonymousDataCleanup?.cleanupEligible(now);
       if (count > 0) {
         this.logger.info({ count }, "expired auth sessions removed");
       }

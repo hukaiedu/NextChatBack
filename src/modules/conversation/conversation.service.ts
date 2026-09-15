@@ -24,11 +24,20 @@ export class ConversationService {
   ) {}
 
   async create(userId: string, input: { title?: string }): Promise<ConversationModel> {
-    return this.conversationRepo.create(this.prisma, {
-      title: input.title ?? DEFAULT_TITLE,
-      status: "ACTIVE",
-      provider: DEFAULT_PROVIDER,
-      userId,
+    return this.prisma.$transaction(async (tx) => {
+      const owner = await tx.user.findFirst({
+        where: { id: userId, status: "ACTIVE" },
+        select: { id: true },
+      });
+      if (owner === null) {
+        throw new AppError(ErrorCodes.AUTH_REQUIRED, "Missing or invalid session");
+      }
+      return this.conversationRepo.create(tx, {
+        title: input.title ?? DEFAULT_TITLE,
+        status: "ACTIVE",
+        provider: DEFAULT_PROVIDER,
+        userId,
+      });
     });
   }
 

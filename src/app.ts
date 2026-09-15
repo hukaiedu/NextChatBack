@@ -76,6 +76,7 @@ import type { PasswordCrypto } from "./modules/auth/auth.password.js";
 import { AnonymousIpRateLimiter } from "./modules/auth/auth.anonymous-rate-limit.js";
 import { LoginRateLimiter } from "./modules/auth/auth.rate-limit.js";
 import type { AuthDeps } from "./modules/auth/auth.types.js";
+import { AnonymousDataCleanupService } from "./modules/auth/anonymous-data-cleanup.service.js";
 
 export interface SchedulerConfig {
   /** PENDING 扫描周期(ms),默认 1000 */
@@ -226,6 +227,7 @@ export function createApp(deps: AppDeps): AppHandle {
             users: new AuthUserRepository(),
             logger: deps.logger,
             passwordCrypto,
+            anonymousDataCleanup: new AnonymousDataCleanupService(deps.prisma, deps.logger),
             options: {
               ttlAnonymousSeconds: deps.auth.ttlAnonymousSeconds,
               ttlRegisteredSeconds: deps.auth.ttlRegisteredSeconds,

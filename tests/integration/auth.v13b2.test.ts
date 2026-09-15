@@ -609,7 +609,7 @@ describe("TOUCH-01..03 滑动续期(§13)", () => {
 });
 
 describe("SWEEP-01 过期 Session 清理(§19)", () => {
-  it("只删已过期 Session,不删未过期 Session,不删 User", async () => {
+  it("只删已过期 Session,不删未过期 Session,并清理失效匿名 User", async () => {
     await withApp(async (ctx) => {
       const boot = await bootstrapAnonymous(ctx.baseUrl);
       const anonCookie = cookieHeader(boot)!;
@@ -625,8 +625,7 @@ describe("SWEEP-01 过期 Session 清理(§19)", () => {
       expect(await ctx.authSessions!.sweepExpired()).toBe(1);
       expect(await sessionRowOf(ctx, rawTokenOf(anonCookie))).toBeNull();
       expect(await ctx.prisma.session.findUnique({ where: { id: adminRow!.id } })).not.toBeNull();
-      // User 保留(匿名 User 的孤儿清理是 Deferred)
-      expect(await ctx.prisma.user.findUnique({ where: { id: expired!.userId } })).not.toBeNull();
+      expect(await ctx.prisma.user.findUnique({ where: { id: expired!.userId } })).toBeNull();
       // 幂等:再清一次为 0
       expect(await ctx.authSessions!.sweepExpired()).toBe(0);
     });

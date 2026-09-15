@@ -7,7 +7,8 @@ import { describe, expect, it } from "vitest";
  * V1.4 U2 §77/§78/§92/§96/§105:范围明确的源码静态守卫。
  *
  * 刻意不引入 AST/parser 依赖 —— 这几条规则的表达形式本身就是要钉的东西:
- * auth 模块**没有**日志出口能拿到口令/请求体,也**没有**任何一条语句能写业务表。
+ * auth 模块的认证流程文件**没有**日志出口能拿到口令/请求体,也**没有**任何一条语句能写业务表。
+ * 匿名生命周期清理是唯一例外:它由独立的 anonymous-data-cleanup.service.ts 统一负责短期业务数据删除。
  * 用「整模块零命中」来保证,比逐条审查调用点更抗腐蚀(新增文件自动被扫进来)。
  *
  * 扫描前先剥掉注释:文档注释里会出现 "passwordHash"、"req.body" 这些词本身。
@@ -107,9 +108,10 @@ describe("V1.4 U2 auth 模块静态守卫", () => {
     expect(sessionRepo).not.toContain("usernameNormalized");
   });
 
-  it("§92 auth 模块不碰任何业务表,注册/登录/改密不可能迁数据", () => {
+  it("§92 认证流程不碰业务表,注册/登录/改密不可能迁数据", () => {
     const offenders: string[] = [];
     for (const file of files) {
+      if (rel(file) === "src/modules/auth/anonymous-data-cleanup.service.ts") continue;
       const code = codeOf(file);
       for (const model of ["conversation", "message", "modelRequest"]) {
         // db.<model>.xxx / tx.<model>.xxx / "<Model>Repository" 三类真实访问形式
