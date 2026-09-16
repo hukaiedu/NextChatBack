@@ -12,20 +12,25 @@ import { BrowserManager } from "./providers/gemini/browser-manager.js";
 import { runBrowserPrewarm } from "./providers/gemini/browser-prewarm.js";
 import { createDriver } from "./providers/gemini/create-driver.js";
 import { GeminiWebAdapter } from "./providers/gemini/gemini.adapter.js";
+import { E2EFakeBrowserManager } from "./providers/fake/e2e-fake-browser-manager.js";
+import { E2EFakeGeminiAdapter } from "./providers/fake/e2e-fake-gemini.adapter.js";
 
 async function main(): Promise<void> {
   const env = parseEnv(process.env);
   const logger = createLogger(env.LOG_LEVEL);
   const prisma = await createPrismaClient(env.DATABASE_URL);
+  const useE2EFakeProvider = env.NODE_ENV === "test" && env.E2E_FAKE_PROVIDER;
 
   // Browser Manager:进程级单实例(一个 Persistent Context)
-  const browserManager = new BrowserManager({
-    driver: createDriver(env),
-    profileDir: env.BROWSER_PROFILE_DIR,
-    headless: env.BROWSER_HEADLESS,
-    geminiBaseUrl: env.GEMINI_BASE_URL,
-    logger,
-  });
+  const browserManager = useE2EFakeProvider
+    ? new E2EFakeBrowserManager(logger)
+    : new BrowserManager({
+        driver: createDriver(env),
+        profileDir: env.BROWSER_PROFILE_DIR,
+        headless: env.BROWSER_HEADLESS,
+        geminiBaseUrl: env.GEMINI_BASE_URL,
+        logger,
+      });
 
   const { app, scheduler, recovery, sse, attachmentStore, authSessions, rateLimits } = createApp({
     prisma,
@@ -33,12 +38,14 @@ async function main(): Promise<void> {
     logger,
     browserManager,
     auth: buildAuthDeps(env),
-    geminiAdapter: new GeminiWebAdapter({
-      manager: browserManager,
-      baseUrl: env.GEMINI_BASE_URL,
-      options: { responseTimeoutMs: env.GEMINI_RESPONSE_TIMEOUT_MS },
-      logger,
-    }),
+    geminiAdapter: useE2EFakeProvider
+      ? new E2EFakeGeminiAdapter()
+      : new GeminiWebAdapter({
+          manager: browserManager,
+          baseUrl: env.GEMINI_BASE_URL,
+          options: { responseTimeoutMs: env.GEMINI_RESPONSE_TIMEOUT_MS },
+          logger,
+        }),
     argon2MaxConcurrency: env.AUTH_ARGON2_MAX_CONCURRENCY,
     // V1.3 P6:限额全部来自 env(§13:不进数据库);生产逐项显式传,不依赖代码默认值
     abuse: {
@@ -80,8 +87,8 @@ async function main(): Promise<void> {
   const server = http.createServer(app);
   server.listen(env.PORT, env.HOST, () => {
     logger.info(`server listening on http://${env.HOST}:${env.PORT}`);
-    // P7:HTTP 已对外服务,浏览器预热才开工;helper 内部收敛错误,不会拖垮启动
-    void runBrowserPrewarm(browserManager, logger);
+    // P7:HTTP 已对外服务,浏览器预热才开工;fake provider 不启动任何浏览器。
+    if (!useE2EFakeProvider) void runBrowserPrewarm(browserManager, logger);
   });
 
   let shuttingDown = false;
