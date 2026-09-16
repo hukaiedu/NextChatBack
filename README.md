@@ -871,7 +871,7 @@ V1.1 在不改变 V1 请求链路语义的前提下新增会话级模型选择�
 
 ---
 
-## 26. V1.4 访问鉴权与身份契约
+## 26. V1.6 访问鉴权与身份契约
 
 身份只有 `ANONYMOUS`、`REGISTERED`、`ADMIN`。普通用户使用 username/password；不提供 email、OAuth、2FA、password recovery 或 account deletion。
 
@@ -892,7 +892,7 @@ Conversation、Message、Request、SSE 的 ownership key 都是 `User.id`，不�
 
 前端 `/` 为 anonymous-first；普通用户页面为 `/login`、`/register`，管理员页面为独立的 `/admin/login` 与 `/admin`。注册成功不清空当前 chat/messages；登录已有账号会关闭 streams、清除旧 conversation UI 与未发送敏感 draft 后加载目标账号；改密保持 subject；logout、revoke-all、identity lost 才是真正 subject transition。多 Tab 通过 focus/visibility 重新 probe；不引入额外 identity bus。
 
-`AUTH_ENABLED=false` 仅为 loopback 兼容模式；production 必须启用认证。Origin 校验、登录/注册限流和 `AUTH_TRUST_PROXY` 规则以 [.env.example](.env.example) 与 [src/config/env.ts](src/config/env.ts) 为准。
+`AUTH_ENABLED=false` 仅为 loopback 兼容模式；production 必须启用认证。V1.6 正式开放注册时，部署环境必须显式设置 `AUTH_ENABLED=true`、安全的 `AUTH_PASSWORD` 和 HTTPS `AUTH_ALLOWED_ORIGINS`；不提交真实 secret。Origin 校验、登录/注册限流和 `AUTH_TRUST_PROXY` 规则以 [.env.example](.env.example) 与 [src/config/env.ts](src/config/env.ts) 为准。
 
 ---
 

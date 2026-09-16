@@ -187,6 +187,16 @@ Agent
 云端 SaaS
 ```
 
+## 1.6 注册账号正式开放范围
+
+V1.6 正式开放已有的本地账号体系，不改变 User、Conversation ownership、Session 或密码存储模型：
+
+- 支持游客模式、游客注册升级、登录、登出、修改密码。
+- 游客注册后保留原聊天记录，并继续归属于同一个 `User.id`。
+- 注册成功轮换 Session；刷新页面后通过 Cookie 恢复 `REGISTERED` 身份。
+- 暂不支持邮箱验证、找回密码、OAuth、2FA、多设备账号管理。
+- 正式部署必须启用 `AUTH_ENABLED=true`，配置 `AUTH_PASSWORD` 与 HTTPS `AUTH_ALLOWED_ORIGINS`；`AUTH_ENABLED=false` 仅用于 loopback 兼容模式。
+
 ---
 
 # 2. 技术栈和版本基线

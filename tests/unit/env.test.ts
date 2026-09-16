@@ -49,6 +49,16 @@ describe("parseEnv", () => {
   it("LOG_LEVEL 非法时抛错", () => {
     expect(() => parseEnv({ ...base, LOG_LEVEL: "chatty" })).toThrow(/LOG_LEVEL/);
   });
+
+  it("E2E_FAKE_PROVIDER 仅允许 NODE_ENV=test", () => {
+    expect(parseEnv({ ...base, E2E_FAKE_PROVIDER: "true" }).E2E_FAKE_PROVIDER).toBe(true);
+    expect(() =>
+      parseEnv({ ...base, NODE_ENV: "development", E2E_FAKE_PROVIDER: "true" }),
+    ).toThrow(/E2E_FAKE_PROVIDER=true requires NODE_ENV=test/);
+    expect(() =>
+      parseEnv({ ...base, NODE_ENV: "production", E2E_FAKE_PROVIDER: "true" }),
+    ).toThrow(/E2E_FAKE_PROVIDER=true requires NODE_ENV=test/);
+  });
 });
 
 // ISSUE-03:REQUEST_EXECUTION_TIMEOUT_MS 与 GEMINI_RESPONSE_TIMEOUT_MS 的跨字段约束。

@@ -27,6 +27,8 @@ const envSchema = z.object({
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .default("development"),
+  /** 仅 NODE_ENV=test 可显式开启的本地 E2E fake provider;生产环境 fail-closed */
+  E2E_FAKE_PROVIDER: boolFromString.default("false"),
   HOST: z.string().min(1).default("127.0.0.1"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3010),
   DATABASE_URL: z.string().min(1),
@@ -190,6 +192,13 @@ const envSchema = z.object({
   },
 )
 // SEC-1 跨字段约束(docs/SEC1_AUTH_DESIGN.md §3.2):全部 fail-fast
+.refine(
+  (env) => !env.E2E_FAKE_PROVIDER || env.NODE_ENV === "test",
+  {
+    message: "E2E_FAKE_PROVIDER=true requires NODE_ENV=test",
+    path: ["E2E_FAKE_PROVIDER"],
+  },
+)
 .refine(
   (env) => env.NODE_ENV !== "production" || env.AUTH_ENABLED,
   {
