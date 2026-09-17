@@ -29,6 +29,10 @@ logs/*
 
 # project-level skills (reinstallable from GitHub)
 .claude/skills/
+.qoder/skills/
+
+# personal agent instructions, local only
+AGENTS.md
 
 # generated docs / baseline reports
 docs/
@@ -40,3 +44,12 @@ docs/
 scripts/acceptance/
 acceptance-artifacts/
 data/acceptance/
+
+# local acceptance artifacts and one-off verification scripts
+/artifacts-*/
+scripts/probe-*.ts
+scripts/probe-*.mjs
+scripts/probe-*.ps1
+scripts/seed-*.ts
+scripts/sample-*.ts
+scripts/verify-*.ts
