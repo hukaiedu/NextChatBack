@@ -53,3 +53,23 @@ scripts/probe-*.ps1
 scripts/seed-*.ts
 scripts/sample-*.ts
 scripts/verify-*.ts
+
+# OS, editor, and temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+*.pid
+/tmp/
+/.cache/
+/coverage/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
