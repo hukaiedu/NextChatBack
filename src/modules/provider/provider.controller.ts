@@ -83,6 +83,12 @@ export function createProviderHandlers(
 export function createProviderRouter(handlers: ProviderHandlers): Router {
   const router = Router();
 
+  // 模型目录来自当前 Gemini 页面,禁止浏览器/代理复用旧目录。
+  router.use((_req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
+
   router.get("/models", handlers.models);
 
   return router;

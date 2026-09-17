@@ -353,6 +353,7 @@ describe("M1 模型选择:GET /api/provider/models(§十/§二十三;FIX-03 状�
     try {
       const res = await fetch(`${readyCtx.baseUrl}/api/provider/models`);
       expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("no-store");
       const body = (await res.json()) as { data: typeof FAKE_MODEL_CATALOG };
       expect(body.data).toEqual(FAKE_MODEL_CATALOG);
       expect(body.data.models.map((m) => m.key)).toEqual(["model-a", "model-b", "model-c"]);
