@@ -8,6 +8,8 @@ dist/
 .env
 .env.*
 !.env.example
+!.env.test.example
+!.env.production.example
 
 # runtime data (keep directory placeholders)
 data/*

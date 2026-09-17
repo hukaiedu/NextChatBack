@@ -405,7 +405,18 @@ REQUEST_EXECUTION_TIMEOUT_MS  必须严格大于  GEMINI_RESPONSE_TIMEOUT_MS
 
 ---
 
-## 10. Provider 状态
+## 10. 环境 profile
+
+为避免测试配置与生产配置混用，复制对应模板为本地文件（真实文件已被 `.gitignore` 忽略）：
+
+```powershell
+Copy-Item .env.test.example .env.test
+Copy-Item .env.production.example .env.production
+```
+
+测试使用 `yarn dev:test`，生产构建后使用 `yarn start:production`。不要把真实密码、Cookie、Token 或数据库文件写入模板或提交到 Git。
+
+## 11. Provider 状态
 
 `BrowserProviderStatus` 枚举定义于 [src/providers/gemini/browser-driver.ts](src/providers/gemini/browser-driver.ts)。**初始 / 未启动状态是 `STOPPED`（源码中不存在 `NOT_CREATED`）。**
 
